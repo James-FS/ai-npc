@@ -1,0 +1,40 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Node / Vue (M5)
+node_modules/
+dist/
+
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]serSettings/
+MemoryCaptures/
+*.csproj
+*.sln
+!src/**/*.csproj
+*.unitypackage
+.crashlytics/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# Secrets —— key 永不入库
+appsettings.*.local.json
+*.apikey
+
+# NPC 真实配置（含 API key，不入库；结构与示例见 *.template.json）
+data/games/default/npcs/blacksmith_wang.json
+# 以后新增的 NPC 配置若也直接填 key，取消下一行注释统一忽略（改用环境变量则无需忽略）：
+# data/games/*/npcs/*.json
+
+# 运行时会话数据（端到端测试产物，不入库）
+data/games/*/sessions/

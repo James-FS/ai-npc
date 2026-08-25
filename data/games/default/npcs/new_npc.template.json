@@ -1,0 +1,40 @@
+{
+  "_comment": "NPC 配置模板：复制本文件为 {npcId}.json 后填写。apiKey 可留空并改用环境变量 AIBot_LLM_KEY。常用端点——OpenCode Go(免梯子): https://opencode.ai/zen/go/v1 模型 ox-alpha-free；DeepSeek: https://api.deepseek.com 模型 deepseek-chat；智谱GLM: https://open.bigmodel.cn/api/paas/v4 模型 glm-4-flash(免费)",
+  "npcId": "new_npc",
+  "displayName": "新NPC的名字",
+  "persona": "性格与说话风格：一两句写清。例如：说话直来直去，喜欢用本行职业比喻，对陌生人警惕但讲礼数。",
+  "backstory": "背景故事：出身、经历、在意的事、和其他角色的关系。",
+  "worldId": "default",
+  "loreBlocks": [
+    {
+      "title": "知识块标题（如：第一章·丢失的剑）",
+      "content": "这个 NPC 知道的一段剧情事实。unlockStage 控制第几章之后才注入；isSecret 为 true 时模型不会轻易透露。",
+      "unlockStage": 0,
+      "isSecret": false,
+      "enabled": true
+    }
+  ],
+  "enabledToolIds": [],
+  "fallbackReplies": [
+    "（……兜底台词：网络或模型失败时使用，保持角色口吻）",
+    "（……再来一条，随机感更好）"
+  ],
+  "model": {
+    "baseUrl": "https://opencode.ai/zen/go/v1",
+    "apiKey": "",
+    "model": "ox-alpha-free",
+    "temperature": 0.8,
+    "maxTokens": 1500,
+    "timeoutMs": 60000
+  },
+  "memory": {
+    "shortTermTurns": 12,
+    "summaryThreshold": 20,
+    "summaryModel": null
+  },
+  "output": {
+    "emotions": ["neutral", "happy", "angry", "sad", "surprised"],
+    "actions": ["idle", "wave", "point", "offer"]
+  },
+  "configVersion": 1
+}

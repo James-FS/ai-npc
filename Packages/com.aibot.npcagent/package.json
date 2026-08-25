@@ -1,0 +1,11 @@
+{
+    "name": "com.aibot.npcagent",
+    "version": "0.1.0",
+    "displayName": "AI NPC Agent",
+    "description": "可插拔的 LLM NPC Agent：DeepSeek/GLM（OpenAI 兼容），对话/工具调用/记忆/结构化输出。核心 AIBot.Core 与 Server 共享源码。",
+    "unity": "2022.3",
+    "documentationUrl": "https://example.local/docs",
+    "dependencies": {
+        "com.unity.nuget.newtonsoft-json": "3.2.1"
+    }
+}

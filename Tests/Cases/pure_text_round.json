@@ -1,0 +1,16 @@
+{
+  "name": "pure_text_round",
+  "description": "纯文本轮：一次流式返回结构化 JSON，验证解析与记忆写入",
+  "config": { "npcId": "tester", "tools": [] },
+  "input": { "userMessage": "你好" },
+  "mockRounds": [
+    [
+      { "token": "{\"say\":\"来了。\",\"emotion\":\"happy\",\"action\":\"wave\"}" }
+    ]
+  ],
+  "assertions": {
+    "usedFallback": false,
+    "reply": { "say": "来了。", "emotion": "happy", "action": "wave" },
+    "memoryCount": 2
+  }
+}
