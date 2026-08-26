@@ -25,6 +25,45 @@ namespace AIBot.Unity
 
         public async Task ChatStreamAsync(LlmRequest request, ILlmStreamSink sink, CancellationToken ct)
         {
+            bool degraded = false;
+            for (int attempt = 0; ; attempt++)
+            {
+                var gate = new GateSink(sink);
+                try
+                {
+                    await OnceAsync(request, gate, ct);
+                    return;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (LlmTransportException ex)
+                {
+                    if (ex.StatusCode == 400 && !degraded && request.ResponseFormat != null
+                        && ex.Body.Contains("response_format"))
+                    {
+                        degraded = true;
+                        request.ResponseFormat = null;
+                        attempt = -1;
+                        continue;
+                    }
+                    bool retryable = ex.StatusCode == 0 || ex.StatusCode >= 500
+                        || ex.StatusCode == 429 || ex.StatusCode == 408;
+                    if (retryable && attempt < 1 && !gate.Streamed)
+                    {
+                        await Task.Delay(1000, ct);
+                        continue;
+                    }
+                    var fallback = new LlmFallbackException(ex.Message, ex);
+                    sink.OnError(fallback);
+                    throw fallback;
+                }
+            }
+        }
+
+        private async Task OnceAsync(LlmRequest request, ILlmStreamSink sink, CancellationToken ct)
+        {
             string url = _settings.baseUrl.TrimEnd('/') + "/chat/completions";
             string body = JsonConvert.SerializeObject(request);
 
@@ -46,16 +85,14 @@ namespace AIBot.Unity
 
                 if (ct.IsCancellationRequested)
                 {
-                    sink.OnError(new OperationCanceledException(ct));
                     throw new OperationCanceledException(ct);
                 }
 
                 if (req.result != UnityWebRequest.Result.Success)
                 {
-                    var ex = new LlmFallbackException("LLM request failed: " + req.result + " " + req.error
-                        + " body=" + Truncate(req.downloadHandler != null ? req.downloadHandler.text : "", 500));
-                    sink.OnError(ex);
-                    throw ex;
+                    string responseBody = handler.RawText;
+                    throw new LlmTransportException((int)req.responseCode,
+                        string.IsNullOrEmpty(responseBody) ? req.error : Truncate(responseBody, 500));
                 }
             }
 
@@ -73,6 +110,9 @@ namespace AIBot.Unity
         {
             private readonly SseLineParser _parser;
             private readonly Decoder _utf8 = Encoding.UTF8.GetDecoder();
+            private readonly StringBuilder _raw = new StringBuilder();
+
+            public string RawText { get { return _raw.ToString(); } }
 
             public SseDownloadHandler(SseLineParser parser)
             {
@@ -85,9 +125,36 @@ namespace AIBot.Unity
                 {
                     char[] chars = new char[Encoding.UTF8.GetMaxCharCount(dataLength)];
                     int decoded = _utf8.GetChars(data, 0, dataLength, chars, 0);
-                    if (decoded > 0) _parser.Feed(new string(chars, 0, decoded));
+                    if (decoded > 0)
+                    {
+                        string text = new string(chars, 0, decoded);
+                        if (_raw.Length < 4096)
+                        {
+                            int take = Math.Min(text.Length, 4096 - _raw.Length);
+                            _raw.Append(text, 0, take);
+                        }
+                        _parser.Feed(text);
+                    }
                 }
                 return true;
+            }
+        }
+
+        private sealed class GateSink : ILlmStreamSink, IReasoningSink
+        {
+            private readonly ILlmStreamSink _inner;
+            public bool Streamed;
+
+            public GateSink(ILlmStreamSink inner) { _inner = inner; }
+            public void OnToken(string delta) { Streamed = true; _inner.OnToken(delta); }
+            public void OnToolCall(ToolCallDto call) { _inner.OnToolCall(call); }
+            public void OnCompleted(string fullText, Usage usage) { _inner.OnCompleted(fullText, usage); }
+            public void OnError(Exception ex) { _inner.OnError(ex); }
+            public void OnReasoningToken(string delta)
+            {
+                Streamed = true;
+                var sink = _inner as IReasoningSink;
+                if (sink != null) sink.OnReasoningToken(delta);
             }
         }
     }

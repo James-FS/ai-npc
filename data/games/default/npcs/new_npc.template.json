@@ -28,9 +28,20 @@
     "timeoutMs": 60000
   },
   "memory": {
-    "shortTermTurns": 12,
-    "summaryThreshold": 20,
-    "summaryModel": null
+    "inheritGameDefaults": true,
+    "shortTermTurns": null,
+    "summaryThreshold": null,
+    "summaryTrigger": null,
+    "memoryScope": null,
+    "maxFacts": null,
+    "rememberPlayerProfile": null,
+    "rememberPromises": null,
+    "rememberQuestEvents": null,
+    "rememberCasualChat": null,
+    "backgroundSummarization": null,
+    "summaryModel": null,
+    "useMainSummaryModel": null,
+    "extensions": null
   },
   "output": {
     "emotions": ["neutral", "happy", "angry", "sad", "surprised"],

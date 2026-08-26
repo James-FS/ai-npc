@@ -25,6 +25,8 @@ namespace AIBot.Core
         public object HostContext;               // 透传给工具执行（游戏对象/模拟状态）
         public string MemorySummary;             // M2 摘要注入
         public List<string> MemoryFacts;
+        public MemoryPolicy ResolvedMemoryPolicy; // 宿主完成四级配置合并后传入；为空时使用 Core+NPC 兼容解析
+        public bool DeferMemorySummarizationToHost; // Server 玩家后台队列为 true；Unity/Session 同步路径为 false
     }
 
     public sealed class ToolExecution
@@ -49,6 +51,7 @@ namespace AIBot.Core
         public string RawText;                   // 模型最终原文（解析失败时的排查依据）
         public string MemorySummary;             // 本轮触发了记忆摘要时非空：宿主写回会话状态
         public List<string> MemoryFacts;
+        public List<LlmMessage> MemorySummarizedMessages; // 宿主保存失败时用于恢复待摘要批次
         public bool FlaggedInjection;            // 玩家输入命中注入检测（供日志/统计）
     }
 
@@ -67,24 +70,35 @@ namespace AIBot.Core
         private readonly ILogSink _log;
         private readonly IClock _clock;
         private readonly AgentLoopOptions _options;
+        private readonly Func<ModelSettings, ILlmBackend> _backendFactory;
 
-        public AgentLoop(ILlmBackend backend, ILogSink log = null, IClock clock = null, AgentLoopOptions options = null)
+        public AgentLoop(ILlmBackend backend, ILogSink log = null, IClock clock = null,
+            AgentLoopOptions options = null, Func<ModelSettings, ILlmBackend> backendFactory = null)
         {
             _backend = backend ?? throw new ArgumentNullException(nameof(backend));
             _log = log ?? NullLogSink.Instance;
             _clock = clock ?? new SystemClock();
             _options = options ?? new AgentLoopOptions();
+            _backendFactory = backendFactory;
         }
 
         public async Task<AgentLoopResult> RunAsync(AgentRunInput input, ILlmStreamSink sink, CancellationToken ct)
         {
             long started = _clock.TimestampMilliseconds;
+            if (input == null) throw new ArgumentNullException(nameof(input));
             AgentConfigDto cfg = input.Config;
+            if (cfg == null) throw new ArgumentException("Agent config is required", nameof(input));
+            cfg.model = cfg.model ?? new ModelSettings();
+            cfg.memory = cfg.memory ?? new MemorySettings();
+            cfg.output = cfg.output ?? new OutputSettings();
+            input.ResolvedMemoryPolicy = input.ResolvedMemoryPolicy
+                ?? MemoryPolicyResolver.Resolve(null, cfg.memory, null).policy;
+            SanitizeResult sanitized = InputSanitizer.Sanitize(input.UserMessage);
 
             try
             {
-                AgentLoopResult result = await RunInternalAsync(input, sink, cfg, ct, started);
-                await MaybeSummarizeAsync(input, result);
+                AgentLoopResult result = await RunInternalAsync(input, sink, cfg, sanitized, ct, started);
+                await MaybeSummarizeAsync(input, result, ct);
                 return result;
             }
             catch (OperationCanceledException)
@@ -94,21 +108,24 @@ namespace AIBot.Core
             catch (Exception ex)
             {
                 _log.Log(LogLevel.Error, "AgentLoop failed, using fallback. npc=" + cfg.npcId, ex);
-                return BuildFallback(cfg, started);
+                AgentLoopResult fallback = BuildFallback(cfg, started);
+                fallback.FlaggedInjection = sanitized.Flagged;
+                Remember(input, LlmMessage.User(sanitized.Wrapped), SerializeReply(fallback.Reply));
+                return fallback;
             }
         }
 
         private async Task<AgentLoopResult> RunInternalAsync(AgentRunInput input, ILlmStreamSink sink,
-            AgentConfigDto cfg, CancellationToken ct, long started)
+            AgentConfigDto cfg, SanitizeResult sanitized, CancellationToken ct, long started)
         {
-            SanitizeResult sanitized = InputSanitizer.Sanitize(input.UserMessage);
             if (sanitized.Flagged) _log.Log(LogLevel.Warning, "Input flagged as possible injection. npc=" + cfg.npcId);
 
             string systemPrompt = new ContextBuilder().BuildSystemPrompt(
                 cfg, input.World, input.Game, input.MemorySummary, input.MemoryFacts);
 
             var messages = new List<LlmMessage> { LlmMessage.System(systemPrompt) };
-            if (input.Memory != null) messages.AddRange(TrimmedHistory(input.Memory.Messages, systemPrompt));
+            if (input.Memory != null) messages.AddRange(TrimmedHistory(
+                input.Memory.Messages, systemPrompt, cfg.npcId));
             LlmMessage userMessage = LlmMessage.User(sanitized.Wrapped);
             messages.Add(userMessage);
 
@@ -149,6 +166,7 @@ namespace AIBot.Core
 
                 totalUsage.PromptTokens += collector.Usage?.PromptTokens ?? 0;
                 totalUsage.CompletionTokens += collector.Usage?.CompletionTokens ?? 0;
+                totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens;
 
                 // 用真实 usage 校准该 NPC 的 token 估算系数（裁剪决策越来越准）
                 int estimatedRound = 0;
@@ -202,7 +220,7 @@ namespace AIBot.Core
                 fallback.Usage = totalUsage;
                 fallback.RawText = finalText;
                 fallback.FlaggedInjection = sanitized.Flagged;
-                Remember(input, userMessage, finalText);
+                Remember(input, userMessage, SerializeReply(fallback.Reply));
                 return fallback;
             }
 
@@ -225,40 +243,64 @@ namespace AIBot.Core
         }
 
         /// <summary>淘汰消息达到阈值时，压缩为「摘要+关键事实」（失败仅告警，不影响主流程）。</summary>
-        private async Task MaybeSummarizeAsync(AgentRunInput input, AgentLoopResult result)
+        private async Task MaybeSummarizeAsync(AgentRunInput input, AgentLoopResult result, CancellationToken ct)
         {
             ShortTermMemory memory = input.Memory;
             AgentConfigDto cfg = input.Config;
-            if (memory == null || cfg.memory == null || cfg.memory.summaryThreshold <= 0) return;
-            if (memory.EvictedCount < cfg.memory.summaryThreshold) return;
+            MemoryPolicy policy = input.ResolvedMemoryPolicy ?? MemoryPolicy.Defaults();
+            if (memory == null) return;
+            if (policy.summaryThreshold <= 0)
+            {
+                // 0 表示关闭自动摘要。Session 没有人工入口，直接丢弃；玩家范围保留最近一个窗口供人工摘要。
+                if (policy.memoryScope == MemoryPolicyValues.ScopeSession) memory.TakeEvicted();
+                else memory.TrimEvictedToLast(Math.Max(2, policy.shortTermTurns * 2));
+                return;
+            }
+            if (policy.backgroundSummarization && input.DeferMemorySummarizationToHost) return;
+            if (memory.EvictedCount < policy.summaryThreshold) return;
 
             List<LlmMessage> evicted = memory.TakeEvicted();
             if (evicted.Count == 0) return;
             try
             {
+                ModelSettings summarySettings = policy.summaryModel ?? cfg.model;
+                ILlmBackend summaryBackend = _backendFactory != null
+                    ? _backendFactory(summarySettings)
+                    : _backend;
                 MemorySummaryResult summary = await MemorySummarizer.RunAsync(
-                    _backend, cfg, input.MemorySummary, input.MemoryFacts, evicted, _log, CancellationToken.None);
+                    summaryBackend, summarySettings, input.MemorySummary, input.MemoryFacts, evicted,
+                    policy.maxFacts, _log, ct, policy);
                 result.MemorySummary = summary.Summary;
                 result.MemoryFacts = summary.Facts;
+                result.MemorySummarizedMessages = evicted;
+            }
+            catch (OperationCanceledException)
+            {
+                memory.RestoreEvicted(evicted);
+                throw;
             }
             catch (Exception ex)
             {
-                _log.Log(LogLevel.Warning, "Memory summarize failed (dropped this batch): " + ex.Message);
+                memory.RestoreEvicted(evicted);
+                _log.Log(LogLevel.Warning, "Memory summarize failed (batch restored): " + ex.Message);
             }
         }
 
-        private static IEnumerable<LlmMessage> TrimmedHistory(IReadOnlyList<LlmMessage> history, string systemPrompt)
+        private IEnumerable<LlmMessage> TrimmedHistory(IReadOnlyList<LlmMessage> history,
+            string systemPrompt, string npcId)
         {
-            // 按预算从最旧裁剪；轮内 user/assistant/tool 组可能被切半，M1 接受（M2 摘要上线后缓解）
             var kept = new List<LlmMessage>(history);
-            int used = TokenBudget.Estimate(systemPrompt);
-            foreach (LlmMessage m in kept) used += TokenBudget.Estimate(m.Content ?? string.Empty);
+            int used = TokenBudget.Calibration.EstimateCalibrated(npcId, systemPrompt);
+            foreach (LlmMessage m in kept)
+                used += TokenBudget.Calibration.EstimateCalibrated(npcId, m.Content ?? string.Empty);
             int drop = 0;
-            while (used > TokenBudget.DefaultBudget && drop < kept.Count)
+            while (used > _options.TokenBudget && drop < kept.Count)
             {
-                used -= TokenBudget.Estimate(kept[drop].Content ?? string.Empty);
+                used -= TokenBudget.Calibration.EstimateCalibrated(npcId, kept[drop].Content ?? string.Empty);
                 drop++;
             }
+            // 不让历史从 assistant/tool 半轮开始；继续丢到下一个 user 边界。
+            while (drop < kept.Count && kept[drop].Role != "user") drop++;
             return kept.GetRange(drop, kept.Count - drop);
         }
 
@@ -271,15 +313,23 @@ namespace AIBot.Core
 
         private AgentLoopResult BuildFallback(AgentConfigDto cfg, long started)
         {
-            string say = cfg.fallbackReplies != null && cfg.fallbackReplies.Count > 0
-                ? cfg.fallbackReplies[0]
-                : "（沉默片刻）……";
+            string say = "（沉默片刻）……";
+            if (cfg.fallbackReplies != null && cfg.fallbackReplies.Count > 0)
+            {
+                int index = (int)((ulong)_clock.TimestampMilliseconds % (ulong)cfg.fallbackReplies.Count);
+                say = cfg.fallbackReplies[index];
+            }
             return new AgentLoopResult
             {
                 Reply = new StructuredReply { say = say, emotion = "neutral", action = "idle" },
                 ElapsedMs = _clock.TimestampMilliseconds - started,
                 UsedFallback = true
             };
+        }
+
+        private static string SerializeReply(StructuredReply reply)
+        {
+            return Newtonsoft.Json.JsonConvert.SerializeObject(reply);
         }
 
         /// <summary>单轮收集器：token 实时透传外层 sink；工具调用与全文在轮末可用；思考过程按需转发。</summary>
@@ -290,10 +340,15 @@ namespace AIBot.Core
             public string Text;
             public Usage Usage;
             public Exception LastError;
+            private readonly StructuredReplyStreamExtractor _speech = new StructuredReplyStreamExtractor();
 
             public RoundCollector(ILlmStreamSink outer) { _outer = outer; }
 
-            public void OnToken(string delta) { if (_outer != null) _outer.OnToken(delta); }
+            public void OnToken(string delta)
+            {
+                string speechDelta = _speech.Push(delta);
+                if (_outer != null && !string.IsNullOrEmpty(speechDelta)) _outer.OnToken(speechDelta);
+            }
             public void OnToolCall(ToolCallDto call) { ToolCalls.Add(call); }
             public void OnCompleted(string fullText, Usage usage) { Text = fullText; Usage = usage; }
             public void OnError(Exception ex) { LastError = ex; if (_outer != null) _outer.OnError(ex); }

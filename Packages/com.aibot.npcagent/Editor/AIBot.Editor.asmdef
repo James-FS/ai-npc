@@ -4,7 +4,8 @@
     "references": [
         "AIBot.Core",
         "AIBot.Unity",
-        "Newtonsoft.Json"
+        "Newtonsoft.Json",
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [
         "Editor"

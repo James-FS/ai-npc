@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using AIBot.Core.Memory;
 
 namespace AIBot.Core.Config
 {
@@ -38,11 +39,10 @@ namespace AIBot.Core.Config
         public int timeoutMs = 20000;
     }
 
-    public class MemorySettings
+    public class MemorySettings : MemoryPolicyOverrides
     {
-        public int shortTermTurns = 12;
-        public int summaryThreshold = 20;
-        public ModelSettings summaryModel;   // 为空则复用主模型
+        /// <summary>false 保持旧行为：从 Core 默认值开始；true 表示先继承 Game 策略再应用非空覆盖。</summary>
+        public bool inheritGameDefaults;
     }
 
     public class OutputSettings

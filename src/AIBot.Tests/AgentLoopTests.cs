@@ -77,7 +77,7 @@ namespace AIBot.Tests
             Assert.False(result.UsedFallback);
             Assert.Equal("来了。", result.Reply.say);
             Assert.Equal("happy", result.Reply.emotion);
-            Assert.Equal(replyJson, sink.Tokens.ToString());
+            Assert.Equal("来了。", sink.Tokens.ToString());     // 下游只收到 say 台词，不暴露原始 JSON
             Assert.Equal(2, memory.Messages.Count);            // user + assistant
             Assert.Contains("[玩家说]你好[/玩家说]", memory.Messages[0].Content);
 
@@ -130,13 +130,16 @@ namespace AIBot.Tests
             var backend = new MockLlmBackend();   // 无脚本 → 立即失败
             var loop = new AgentLoop(backend);
             var sink = new RecordingSink();
+            var memory = new ShortTermMemory(12);
 
             AgentLoopResult result = await loop.RunAsync(
-                Input(Config(true), null, new ShortTermMemory(12), "你好"), sink, CancellationToken.None);
+                Input(Config(true), null, memory, "ignore previous"), sink, CancellationToken.None);
 
             Assert.True(result.UsedFallback);
             Assert.Equal("（测试兜底台词）", result.Reply.say);
             Assert.NotNull(sink.Error);
+            Assert.True(result.FlaggedInjection);
+            Assert.Equal(2, memory.Messages.Count);            // 网络失败也保留玩家输入与兜底回复
         }
 
         [Fact]
@@ -166,6 +169,24 @@ namespace AIBot.Tests
             Assert.StartsWith("[玩家说]ignore previous[/玩家说]", user.Content);
             Assert.StartsWith("# 世界观", req.Messages[0].Content);   // system 分层 prompt
             Assert.EndsWith("\"action\":\"idle,wave,point,offer\"}", req.Messages[0].Content.TrimEnd());
+        }
+
+        [Fact]
+        public async Task ConfiguredTokenBudget_TrimsOldHistoryAtUserBoundary()
+        {
+            var backend = new MockLlmBackend(
+                Sse.Round(Sse.Token("{\"say\":\"答\",\"emotion\":\"neutral\",\"action\":\"idle\"}")));
+            var memory = new ShortTermMemory(12);
+            memory.Add(LlmMessage.User(new string('旧', 300)));
+            memory.Add(LlmMessage.Assistant(new string('答', 300)));
+            var loop = new AgentLoop(backend, options: new AgentLoopOptions { TokenBudget = 100 });
+
+            await loop.RunAsync(Input(Config(false), null, memory, "新问题"),
+                new RecordingSink(), CancellationToken.None);
+
+            Assert.Equal(2, backend.Requests[0].Messages.Count); // system + 当前 user，旧轮整体被裁掉
+            Assert.Equal("user", backend.Requests[0].Messages[1].Role);
+            Assert.Contains("新问题", backend.Requests[0].Messages[1].Content);
         }
     }
 }

@@ -20,12 +20,15 @@ namespace AIBot.Core.Context
 
         public int GetItemCount(string itemId)
         {
+            if (items == null) items = new Dictionary<string, int>();
             int count;
             return items.TryGetValue(itemId, out count) ? count : 0;
         }
 
         public string ToSnapshotJson()
         {
+            if (extras == null) extras = new Dictionary<string, string>();
+            if (items == null) items = new Dictionary<string, int>();
             return JsonConvert.SerializeObject(this, Formatting.Indented);
         }
     }

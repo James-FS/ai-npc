@@ -6,6 +6,7 @@
     "unity": "2022.3",
     "documentationUrl": "https://example.local/docs",
     "dependencies": {
-        "com.unity.nuget.newtonsoft-json": "3.2.1"
+        "com.unity.nuget.newtonsoft-json": "3.2.1",
+        "com.unity.textmeshpro": "3.0.6"
     }
 }

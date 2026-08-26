@@ -2,8 +2,8 @@
 
 > 一个可插拔的 NPC 智能Agent平台：纯 C# 核心（AIBot.Core）+ Unity 包 + 独立管理服务（AIBot.Server）+ Web 管理台。接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM），NPC 具备自由对话、剧情人设、两级记忆、工具调用与结构化输出的完整 agent 能力。
 >
-> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v1.7（2026-08-24）
-> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（38/38）与真实模型端到端验证。**
+> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v2.5（2026-08-26）
+> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（68/68）与真实模型端到端验证。**
 
 | 版本 | 变更 |
 |---|---|
@@ -13,6 +13,14 @@
 | v1.5 | 优化 R7-R9：工具链闭环（状态随工具变更）、日志查询+注入标记、注入测试集+A/B对比 |
 | v1.6 | 优化 R10-R11：test-connection 连接诊断、供应商预设、Unity 对齐（onReasoning/摘要记忆）、会话导出 |
 | v1.7 | 现状重写：文档与已实现代码全面同步（架构/目录/API/里程碑状态），附录B 补 reasoning 事件 |
+| v1.8 | P0/P1 加固：Unity 组件/生命周期修复、管理鉴权与聊天限流、会话串行锁、待摘要记忆持久化、独立摘要后端、纯台词流式输出 |
+| v1.9 | 记忆管理阶段A：四级记忆策略契约、结构化事实 DTO、配置来源追踪、Server 安全上限、Game 策略文件与最终策略预览 API |
+| v2.0 | 记忆管理阶段B：playerId 玩家/NPC 长期记忆、短长期存储拆分、后台摘要队列、乐观版本控制、失败重试与旧会话懒迁移 |
+| v2.1 | 记忆管理阶段C：长期记忆管理 API、显式迁移、手动摘要、导出/清理、乐观并发冲突与完整审计记录 |
+| v2.2 | 记忆管理阶段D：Vue 3 正式记忆控制台、NPC 实时策略预览、记忆检查/迁移/审计页面与 `/app/` 静态部署 |
+| v2.3 | 四阶段 P1 加固：动态短期窗口、摘要禁用边界、Unity/Server 后台语义、删除与摘要互斥、类别约束、必写审计及 Vue 可重复构建 |
+| v2.4 | 四阶段 P2 加固：保留期按最旧批次清理、清理预演防过期、危险操作说明对齐、Session 删除失败保留状态及前端取消处理 |
+| v2.5 | 调试台 Vue 统一：原生调试台能力迁移至 `AIBot.Web`，根路径统一跳转 `/app/#/debug/chat`，日志/统计/会话/Prompt/NPC/世界观/流式对话共用一套控制台 |
 
 ---
 
@@ -22,7 +30,7 @@
 
 | 形态 | 使用者 | 状态 |
 |---|---|---|
-| **管理台**（`http://localhost:5000`，单文件网页） | 策划/开发 | ✅ 七标签页：对话/NPC编辑/世界观/Prompt预览/会话记忆/日志/统计 |
+| **Vue 统一管理台**（`http://localhost:5000/` 或 `/app/`） | 开发/联调/策划/测试/运营 | ✅ 13 个路由：记忆治理六页 + 流式对话/NPC/世界观/Prompt/会话/日志/统计七页 |
 | **AIBot.Server**（ASP.NET Core） | 独立运行宿主 | ✅ 全套管理 API + SSE 对话透传 + 会话/状态/日志持久化 |
 | **Unity 包（UPM）** | 游戏开发者 | ✅ 代码就绪（含 Demo 场景生成器），待 Unity 编辑器联调 |
 
@@ -30,17 +38,18 @@
 
 - **开发期接入**：写一份 JSON 配置（或在管理台表单编辑）→ 挂到角色/测试台即可对话，改配置即生效
 - **供应商可切换**：已实测三种接法（见 §2），编辑器下拉一键填充 + ⚡连接测试带中文诊断
-- **Agent 能力**：工具调用闭环（`give_item`/`change_favor`/`advance_stage` 真实读写会话状态）、结构化输出（`{say,emotion,action}` 三层容错+截断挽救）、两级记忆（短期窗口 + 摘要式长期记忆）
+- **Agent 能力**：工具调用闭环（`give_item`/`change_favor`/`advance_stage` 真实读写会话状态）、结构化输出（`{say,emotion,action}` 三层容错+截断挽救）、玩家级两层记忆（session 短期窗口 + player/NPC 结构化长期记忆）
 - **护栏**：防注入包裹与检测（命中标记进日志与统计）、行为规则、兜底台词链
 - **可观测**：Prompt 七层预览（token 估算）、对话日志（按日 jsonl、30 天轮转）、用量统计、注入尝试计数
-- **持久化**：会话消息/摘要/模拟状态每轮落盘，重启进程记忆不丢（实测通过）
+- **记忆治理**：长期摘要和结构化事实可检查/纠正/固定/删除，支持显式迁移、保留期清理预演与变更审计
+- **持久化**：会话消息/待摘要队列/模拟状态每轮落盘，玩家长期摘要与结构化事实独立版本化保存；重启自动恢复后台摘要
 
 ### 1.3 非目标（未做）
 
 - ❌ WebGL/微信小游戏（架构不阻碍：换一个 ILlmBackend 即可）
 - ❌ 向量库 RAG（剧情阶段知识块平替）
 - ❌ Unity 编辑器工具（M3）、发布期玩家级治理（M6）
-- ❌ 正式 Vue 工程（单文件管理台已覆盖其 MVP，见 §7 与 `docs/Vue管理端方案.md`）
+- ❌ 动态自定义字段 Schema 设计器（第一版提供 `extensions` JSON 对象编辑与校验）
 
 ---
 
@@ -69,7 +78,7 @@
 ## 3. 总体架构（当前实现）
 
 ```
-┌──────────────────────── 管理台（wwwroot/index.html，单文件）────────────────────────┐
+┌──────────────────────── Vue 统一管理台（AIBot.Web，部署于 wwwroot/app）────────────────────────┐
 │ 对话(流式/思考折叠/停止/注入测试/A-B对比/导出) │ NPC编辑(预设+测试连接) │ 世界观      │
 │ Prompt七层预览 │ 会话与记忆 │ 日志(分页/注入标记) │ 用量统计                        │
 └───────────────┬────────────────────────────── HTTP/SSE ↓ 事件契约见附录B ──────────┘
@@ -104,7 +113,8 @@ D:\Code\aibot\
 │   │   ├── world.json                # 世界观（管理台可编辑）
 │   │   ├── npcs/blacksmith_wang.json # 示例NPC（含key，已gitignore）
 │   │   ├── npcs/new_npc.template.json# 创建模板（可提交，含三供应商速查）
-│   │   └── sessions/{npcId}/{sid}.json  # 会话持久化（消息+摘要+事实+模拟状态）
+│   │   ├── sessions/{npcId}/{playerId}/{sid}.json # 玩家短期会话与待摘要消息
+│   │   └── memories/{npcId}/{playerId}.json       # 玩家/NPC 长期摘要与结构化事实
 │   └── logs/default/yyyy-MM-dd.jsonl # 对话日志（30天自动清理）
 ├── Packages/com.aibot.npcagent/      # Unity 包
 │   ├── Runtime/Core/                 # ★ AIBot.Core（noEngineReferences）
@@ -120,9 +130,11 @@ D:\Code\aibot\
 │   ├── Editor/ (DemoSceneBuilder)    └── Samples~/DemoNpc/
 └── src/
     ├── AIBot.Server/                 # Program.cs + ChatEndpoints + AdminEndpoints
-    │   │                             # + SessionStore + ChatLogService + DataStore + ModelDiagnostics
-    │   └── wwwroot/index.html        # 管理台（单文件，静态免编译热改）
-    └── AIBot.Tests/                  # 38 项 xUnit（Mock 后端免网全链路）
+    │   │                             # + SessionStore + PlayerMemoryService + MemorySummaryQueue + JsonMemoryRepository + MemoryAuditService
+    │   ├── wwwroot/index.html        # 根入口重定向到 Vue 调试工作台（不再独立维护原生调试台）
+    │   └── wwwroot/app/              # Vue 正式控制台生产构建产物
+    ├── AIBot.Web/                    # Vue 3 + TypeScript + Vite + Pinia + Element Plus
+    └── AIBot.Tests/                  # 68 项 xUnit（Mock 后端免网全链路）
 ```
 
 ---
@@ -144,7 +156,7 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 ### 5.2 配置 DTO（data JSON 与 TS/表单一致）
 
-`AgentConfigDto`：npcId/displayName/persona/backstory/worldId、`LoreBlock[]`（unlockStage 阶段过滤、isSecret 秘密规则、enabled 停用开关）、enabledToolIds、fallbackReplies、`ModelSettings`（baseUrl/apiKey/model/temperature/maxTokens/timeoutMs）、`MemorySettings`（shortTermTurns/summaryThreshold/summaryModel）、`OutputSettings`（emotions/actions 枚举）、configVersion。
+`AgentConfigDto`：npcId/displayName/persona/backstory/worldId、`LoreBlock[]`（unlockStage 阶段过滤、isSecret 秘密规则、enabled 停用开关）、enabledToolIds、fallbackReplies、`ModelSettings`、支持 Game 继承与 nullable 覆盖的 `MemorySettings`、`OutputSettings`、configVersion。运行期由 `MemoryPolicyResolver` 合并 Session > NPC > Game > Core，再应用 Server 安全上限并记录字段来源。
 
 ### 5.3 AgentLoop 主循环（R7 后的完整语义）
 
@@ -155,14 +167,16 @@ public class SimGameState { stage, favorability, extras, items }           // �
   │   → 结果 role:"tool" 回填 → 【重建 system：当前状况反映工具改后的状态】→ 再请求
   └─ 返回文本 → 三层容错解析（JObject→截断挽救say→枚举回退）
 → usage 校准该 NPC 的 token 估算系数（0.3~3.0 滚动）
-→ 淘汰消息 ≥ summaryThreshold → MemorySummarizer 压缩为「摘要+关键事实」（失败仅告警）
+→ 淘汰消息 ≥ summaryThreshold → MemorySummarizer 压缩为「摘要+关键事实」（失败仅告警；Server 后台宿主路径由 `DeferMemorySummarizationToHost` 延迟）
 → 结果含 Reply/Usage/ElapsedMs/UsedFallback/FlaggedInjection/MemorySummary
 失败链：网络/5xx/超时重试1次（未流出token才重试）→ 兜底台词，永不卡死
 ```
 
 ### 5.4 记忆与工具
 
-- **短期**：`ShortTermMemory` 窗口（默认12条）+ 淘汰队列；**长期**：`MemorySummarizer` 用 summaryModel（空则主模型，0.3温度、json_object、400 tokens）把淘汰消息滚动压缩为 ≤80 字摘要 + ≤8 条事实
+- **短期**：`ShortTermMemory` 窗口（默认12条）+ 淘汰队列；运行中策略改变 `shortTermTurns` 会立即 `Resize`，缩小窗口的消息进入待摘要队列
+- **长期**：`MemorySummarizer` 用 summaryModel（空则主模型，0.3温度、json_object、400 tokens）把淘汰消息滚动压缩为 ≤80 字摘要 + ≤8 条事实；结构化玩家记忆使用独立 JSON 文件和乐观版本
+- **摘要关闭**：`summaryThreshold=0` 时 Session 范围丢弃窗口外消息，玩家范围保留有界的最近短期窗口供手动摘要
 - **模拟工具** `SimulatedToolHost`：`give_item`（背包累积）/ `change_favor` / `advance_stage`，真实读写 SimGameState 并随会话持久化；游戏端替换为真实 IAgentTool 即可（接口不变）
 
 ---
@@ -176,21 +190,41 @@ public class SimGameState { stage, favorability, extras, items }           // �
 | `POST /api/games/{gid}/chat/stream` | 对话（SSE，附录B 契约；支持 simState/override 模型覆盖） |
 | `GET/POST/PUT/DELETE …/npcs(/{id})` | NPC CRUD（POST 从模板创建；PUT 空 apiKey 不覆盖已存 key） |
 | `GET/PUT …/world` | 世界观读写 |
+| `GET/PUT …/memory-policy` | Game 默认记忆策略读写 |
+| `GET/PUT …/npcs/{id}/memory-policy` | NPC 记忆覆盖与最终策略 |
+| `POST …/npcs/{id}/memory-policy/preview-effective` | 预览 Session>NPC>Game>Core 合并、来源与 Server 裁剪 |
+| `GET /api/admin/memory-limits` | Server 非敏感记忆安全上限（管理鉴权） |
 | `POST …/npcs/{id}/preview-prompt` | 七层预览（层名/文本/估算/颜色 + 总量 vs 预算） |
 | `POST …/npcs/{id}/test-connection` | 连接测试（8-token 最小请求 → 延迟 或 中文诊断） |
-| `GET …/sessions`、`GET/DELETE …/sessions/{sid}?npcId=` | 会话列表/详情/清空（磁盘会话自动恢复） |
+| `GET …/sessions?npcId=&playerId=`、`GET/DELETE …/sessions/{sid}?npcId=&playerId=` | 玩家会话列表/详情/清空（磁盘会话自动恢复） |
+| `GET …/memories/{npcId}/{playerId}` | 玩家长期记忆详情 |
+| `GET /api/admin/memory-summary-queue` | 后台摘要队列待处理数与失败数 |
+| `GET …/memories?npcId=&playerId=` | 玩家长期记忆分页筛选 |
+| `PUT …/summary`、`POST/PUT/DELETE …/facts` | 摘要与结构化事实管理（expectedVersion 冲突保护） |
+| `POST …/summarize`、`GET …/export`、`DELETE …/memories/{npcId}/{playerId}` | 手动摘要、导出与整份清空 |
+| `GET …/memory-migrations`、`POST …/sessions/{sid}/migrate-memory` | 旧 session 迁移检查与显式迁移 |
+| `GET …/memory-audit`、`POST …/memories/cleanup` | 审计查询与保留期清理预演/执行；清理从最旧批次开始并返回 `hasMoreCandidates` |
 | `GET …/logs?date=&npcId=&limit=&offset=` | 日志分页查询（最新在前） |
 | `GET …/stats`、`GET /api/health` | 用量统计（含注入尝试数）/ 健康检查 |
 
 ### 6.2 持久化与日志
 
-- **会话**：内存缓存 + `sessions/{npcId}/{sid}.json` 每轮落盘（消息窗口/摘要/事实/模拟状态）；重启后首次访问自动恢复
+- **短期会话**：内存缓存 + 每会话串行锁 + `sessions/{npcId}/{playerId}/{sid}.json` 原子落盘（消息窗口/待摘要队列/模拟状态）；无 playerId 的旧客户端继续走兼容路径
+- **长期记忆**：`memories/{npcId}/{playerId}.json` 保存滚动摘要、结构化事实与 `memoryVersion`；同一玩家切换 session 后继续注入，冲突时重新加载并合并
+- **后台摘要**：`reply/done` 刷新后入有界去重队列；失败重试，长期记忆与必写审计均成功后才确认消费待摘要消息；启动扫描恢复未完成任务
+- **并发删除**：玩家级任务代数与互斥锁共同保护“失效旧任务 → 删除长期记忆 → 清空全部 Session”，避免旧摘要任务把已删除记忆重新写回
+- **摘要关闭**：`summaryThreshold=0` 时 Session 丢弃窗口外消息；玩家范围仅保留最近一个短期窗口供手动摘要，不会无界增长
+- **保留期清理**：按更新时间倒序分页的末尾读取最旧批次；执行结果返回 `totalMemoryCount`、`batchLimit`、`candidateCount` 与 `hasMoreCandidates`，前端按批次继续预演
+- **清理预演一致性**：Vue 只允许执行当前 `gameId + inactiveDays` 对应的最新预演；修改任一条件后必须重新预演
+- **删除一致性**：删除长期记忆会同步清空该玩家/NPC 的 Session 消息与待摘要队列；Session 持久化删除失败时保留缓存状态并返回错误
 - **日志**：`logs/{gid}/yyyy-MM-dd.jsonl`（完整请求/回复/usage/工具/注入标记），按日轮转、保留 30 天；内存聚合统计
-- **安全**：key 优先级 NPC配置 > `AIBOT_LLM_KEY` > appsettings；npcId/gameId 正则校验防路径穿越；含 key 的真实配置已 gitignore
+- **安全**：key 优先级 NPC配置 > `AIBOT_LLM_KEY` > appsettings；管理 API 可通过 `AIBOT_ADMIN_TOKEN` 启用 Bearer 鉴权；聊天默认每 IP 60 次/分钟；配置读取接口不回传 key；ID 正则校验防路径穿越
 
 ---
 
-## 7. 管理台（单文件 `wwwroot/index.html`，已取代原"极简测试页"）
+## 7. Web 管理台
+
+### 7.1 Vue 统一调试工作台 `AIBot.Web`
 
 | 标签页 | 功能 |
 |---|---|
@@ -202,9 +236,11 @@ public class SimGameState { stage, favorability, extras, items }           // �
 | **日志** | 按日期/NPC 过滤分页，兜底/注入/工具列 |
 | **用量统计** | 总请求/兜底/注入尝试/输入输出 tokens/平均耗时 + 按 NPC 明细 |
 
-左侧栏：gameId、NPC 选择/新建/删除、会话切换、模拟状态（阶段/好感度滑条——与工具写入同一状态）、临时模型覆盖。
+左侧栏：gameId、NPC 选择/新建/删除；页面内提供 Player/Session、模拟状态（阶段/好感度——与工具写入同一状态）、临时模型覆盖、日志日期/NPC 过滤和统计刷新。根路径 `/` 由 `wwwroot/index.html` 跳转至 `/app/#/debug/chat`，因此服务端只维护一套 Vue 前端。
 
-> 正式 Vue 工程（原 M5）作为后续升级选项，设计见 `docs/Vue管理端方案.md`；单文件版已覆盖其 MVP 功能，schema 已稳定，随时可迁移。
+### 7.2 正式 Vue 记忆控制台 `AIBot.Web`
+
+部署入口为 `/app/`，使用 Hash 路由与管理 API 通信。除记忆治理页面外，统一控制台还提供流式对话、注入测试、A/B 模型对比、NPC/世界观编辑、Prompt 分层预览、Session 回放与删除、日志分页详情和用量统计。管理 Token 与审计操作人只保存在浏览器；模型 API Key 不回显。前端使用组件按需加载和路由懒加载，`npx vue-tsc -b --force`、`npm run build` 均作为交付验证。
 
 ---
 
@@ -218,18 +254,19 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M1 Core 分层 + Unity 闭环 | ✅ 完成 | 38 项测试含 SSE/组装/循环/注入全链路 |
+| M1 Core 分层 + Unity 闭环 | ✅ 完成 | 68 项测试含 SSE/组装/循环/注入/记忆全链路 |
 | M2 Agent 能力 | ✅ 基本完成 | 工具循环/结构化解析/摘要记忆/HttpLlmBackend/Mock 全部就位 |
 | M3 配置化 + Unity 编辑器工具 | 🔶 部分 | JSON 配置/SO 互转/防注入✅；AgentChatWindow、BuildConfigCopier ⬜ |
-| M4 Server + 测试页 | ✅ 超额完成 | 端点全家桶 + 七页管理台（远超原"单文件测试页"规划） |
-| M5 Vue 管理端 | 🔶 被 absorbed | 单文件管理台覆盖 MVP；正式 Vue 可选 |
+| M4 Server + 测试页 | ✅ 超额完成 | 端点全家桶 + 调试能力已迁移到 Vue 统一管理台 |
+| M5 Vue 管理端 | ✅ 完成 | `/app/` 部署 13 个路由，根路径统一跳转，覆盖记忆治理与全部调试能力 |
 | M6 发布期治理 | ⬜ 未开始 | 设备令牌/限流配额/远端热更/内容合规（上线前必办合规项） |
 
 ---
 
 ## 10. 测试与验证现状
 
-- **xUnit 38/38**：SSE 解析 5（半行/粘包/CRLF/注释/尾行）、流聚合 4（分片聚合/空参/垃圾行）、结构化解析 7（围栏/前后缀/枚举回退/截断挽救）、上下文 3（阶段过滤/秘密/首遇）、防注入 4、AgentLoop 5（纯文本/工具循环/失败兜底/不可解析/包裹校验）、增强 7（reasoning×2/挽救×2/校准/摘要×2）、模拟工具 5（含状态闭环集成）
+- **xUnit 68/68**：覆盖 SSE/聚合/结构化解析/上下文/防注入/AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 清理与必写审计失败、保留期最旧批次选择及 Session 删除失败保护
+- **构建回归**：Server 独立输出目录编译 0 警告/0 错误；Vue 强制全量 `vue-tsc -b --force` 与生产 `npm run build` 均通过，可在生成 `components.d.ts` 后重复执行
 - **真实端到端已验证**：Ox Alpha 流式对话（角色扮演+结构化输出）、拒绝白送矿石（工具决策）、重启记忆恢复、注入攻击被记录且模型保持角色、连接测试诊断（6.3s 成功 / 错误配置给出原因）
 - **已知环境限制**：ZCode 内嵌浏览器不派发点击事件（页面代码经 DOM/截图/后端全链路验证，真实浏览器正常）
 
@@ -242,27 +279,31 @@ Ox Alpha（免费）：完整一轮对话约 650-800 prompt tokens + 150-420 com
 | 风险 | 对策 |
 |---|---|
 | key 泄露 | NPC配置/环境变量/appsettings 三级；含 key 文件 gitignore；发布期走 M6 中转 |
-| 账单刷量（发布期） | M6：设备令牌+限流+日配额+熔断（设计已定） |
+| 账单刷量（发布期） | 当前有基础 IP 固定窗口限流；M6 再补设备令牌、日配额与熔断 |
 | 内容合规（国内发布） | **发布前必办**：接入供应商内容安全接口；日志留存已就绪 |
 | 免费模型不稳定 | 429 自动重试+兜底；连接测试快速定位；预设一键换供应商 |
-| 模型输出破坏 JSON | 三层容错+截断挽救+兜底台词（38 项测试覆盖） |
+| 模型输出破坏 JSON | 三层容错+截断挽救+兜底台词（49 项测试覆盖） |
 | 注入攻击 | 包裹标记+行为规则+检测；管理台一键回归用例集 |
 | 三端契约漂移 | 附录A/B 为唯一契约；单测双端可跑 |
 
 ## 13. 快速开始
 
 ```bash
-# 测试（免网免key，38项）
+# 测试（免网免key，68项）
 cd src/AIBot.Tests && dotnet test
+# Server 编译回归（避免占用正在运行的 apphost）
+cd ../AIBot.Server && dotnet build --no-restore -p:UseAppHost=false
 # 启动（Windows 双击 start-server.bat）
-cd src/AIBot.Server && dotnet run     # → 浏览器 http://localhost:5000
+dotnet run     # → 浏览器 http://localhost:5000
+# Vue 控制台回归/部署
+cd ../AIBot.Web && npx vue-tsc -b --force && npm run build
 # key：编辑 data/games/default/npcs/*.json 的 model 段（或管理台编辑页，留空不覆盖）
 # Unity：manifest.json 加 "com.aibot.npcagent": "file:D:/Code/aibot/Packages/com.aibot.npcagent"
 ```
 
 ## 14. 未来扩展
 
-WebGL（JS桥接Backend）/ RAG（lore层换检索）/ 多NPC编排 / MCP对齐 / 发布期治理（M6）/ 正式Vue工程 / Unity编辑器窗口（M3）
+WebGL（JS桥接Backend）/ RAG（lore层换检索）/ 多NPC编排 / MCP对齐 / 动态记忆 Schema 设计器 / 发布期治理（M6）/ Unity编辑器窗口（M3）
 
 ---
 

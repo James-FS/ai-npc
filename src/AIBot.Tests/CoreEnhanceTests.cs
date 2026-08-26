@@ -83,6 +83,15 @@ namespace AIBot.Tests
             Assert.False(StructuredReplyParser.TryParse("{\"emotion\":\"happy", new OutputSettings(), out _));
         }
 
+        [Fact]
+        public void StructuredStream_EmitsOnlySay_AndHandlesEscapes()
+        {
+            var extractor = new StructuredReplyStreamExtractor();
+            Assert.Equal("", extractor.Push("{\"sa"));
+            Assert.Equal("你", extractor.Push("y\":\"你"));
+            Assert.Equal("好\n呀", extractor.Push("好\\n呀\",\"emotion\":\"happy\"}"));
+        }
+
         // ---- token 校准 ----
         [Fact]
         public void Calibration_UpdatesAndClamps()
@@ -164,6 +173,88 @@ namespace AIBot.Tests
 
             Assert.Single(backend.Requests);                    // 只有主对话一轮
             Assert.Null(result.MemorySummary);
+        }
+
+        [Fact]
+        public async Task SummaryFailure_RestoresEvictedBatch()
+        {
+            var cfg = new AgentConfigDto { npcId = "sum_restore", displayName = "t", persona = "p" };
+            cfg.memory.summaryThreshold = 1;
+            var memory = new ShortTermMemory(2);
+            memory.Add(LlmMessage.User("旧问题"));
+            memory.Add(LlmMessage.Assistant("旧回答"));
+            var backend = new MockLlmBackend(
+                Sse.Round(Sse.Token("{\"say\":\"新回答\",\"emotion\":\"neutral\",\"action\":\"idle\"}")));
+
+            AgentLoopResult result = await new AgentLoop(backend).RunAsync(new AgentRunInput
+            {
+                Config = cfg,
+                World = new WorldConfigDto(),
+                Game = new SimGameContext(new SimGameState()),
+                UserMessage = "新问题",
+                Memory = memory
+            }, new RecordingSink(), CancellationToken.None);
+
+            Assert.False(result.UsedFallback);
+            Assert.True(memory.EvictedCount > 0);
+        }
+
+        [Fact]
+        public async Task SummaryModel_UsesBackendFactoryAndOwnModel()
+        {
+            var cfg = new AgentConfigDto { npcId = "sum_factory", displayName = "t", persona = "p" };
+            cfg.memory.summaryThreshold = 1;
+            cfg.memory.summaryModel = new ModelSettings
+            {
+                baseUrl = "https://summary.example/v1", model = "summary-model", apiKey = "summary-key"
+            };
+            var memory = new ShortTermMemory(2);
+            memory.Add(LlmMessage.User("旧问题"));
+            memory.Add(LlmMessage.Assistant("旧回答"));
+            var main = new MockLlmBackend(
+                Sse.Round(Sse.Token("{\"say\":\"新回答\",\"emotion\":\"neutral\",\"action\":\"idle\"}")));
+            var summary = new MockLlmBackend(
+                Sse.Round(Sse.Token("{\"summary\":\"摘要\",\"facts\":[]}")));
+
+            AgentLoopResult result = await new AgentLoop(main,
+                backendFactory: settings => settings.model == "summary-model" ? summary : main).RunAsync(new AgentRunInput
+            {
+                Config = cfg,
+                World = new WorldConfigDto(),
+                Game = new SimGameContext(new SimGameState()),
+                UserMessage = "新问题",
+                Memory = memory
+            }, new RecordingSink(), CancellationToken.None);
+
+            Assert.Equal("摘要", result.MemorySummary);
+            Assert.Single(summary.Requests);
+            Assert.Equal("summary-model", summary.Requests[0].Model);
+        }
+
+        [Fact]
+        public async Task EffectivePolicy_MaxFactsCapsSummaryResult()
+        {
+            var cfg = new AgentConfigDto { npcId = "sum_fact_limit", displayName = "t", persona = "p" };
+            cfg.memory.summaryThreshold = 1;
+            cfg.memory.maxFacts = 2;
+            var memory = new ShortTermMemory(2);
+            memory.Add(LlmMessage.User("旧问题"));
+            memory.Add(LlmMessage.Assistant("旧回答"));
+            var backend = new MockLlmBackend(
+                Sse.Round(Sse.Token("{\"say\":\"新回答\",\"emotion\":\"neutral\",\"action\":\"idle\"}")),
+                Sse.Round(Sse.Token("{\"summary\":\"摘要\",\"facts\":[\"一\",\"二\",\"三\"]}")));
+
+            AgentLoopResult result = await new AgentLoop(backend).RunAsync(new AgentRunInput
+            {
+                Config = cfg,
+                World = new WorldConfigDto(),
+                Game = new SimGameContext(new SimGameState()),
+                UserMessage = "新问题",
+                Memory = memory
+            }, new RecordingSink(), CancellationToken.None);
+
+            Assert.Equal(2, result.MemoryFacts.Count);
+            Assert.Equal(new[] { "一", "二" }, result.MemoryFacts);
         }
     }
 }

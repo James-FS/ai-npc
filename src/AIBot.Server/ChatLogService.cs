@@ -33,7 +33,9 @@ namespace AIBot.Server
         {
             public string ts;
             public string npcId;
+            public string playerId;
             public string sessionId;
+            public bool legacyMemoryScope;
             public string userMessage;
             public string say;
             public string emotion;
@@ -95,12 +97,15 @@ namespace AIBot.Server
         {
             var perGame = Stats.GetOrAdd(gameId, _ => new ConcurrentDictionary<string, NpcAgg>());
             NpcAgg agg = perGame.GetOrAdd(e.npcId ?? "?", _ => new NpcAgg());
-            agg.Requests++;
-            if (e.fallback) agg.Fallbacks++;
-            if (e.injection) agg.InjectionAttempts++;
-            agg.PromptTokens += e.promptTokens;
-            agg.CompletionTokens += e.completionTokens;
-            agg.TotalMs += e.elapsedMs;
+            lock (agg)
+            {
+                agg.Requests++;
+                if (e.fallback) agg.Fallbacks++;
+                if (e.injection) agg.InjectionAttempts++;
+                agg.PromptTokens += e.promptTokens;
+                agg.CompletionTokens += e.completionTokens;
+                agg.TotalMs += e.elapsedMs;
+            }
         }
 
         /// <summary>查询某日对话日志（最新在前，分页；供 /api/games/{gid}/logs）。</summary>
@@ -142,21 +147,24 @@ namespace AIBot.Server
             {
                 foreach (KeyValuePair<string, NpcAgg> kv in perGame)
                 {
-                    byNpc[kv.Key] = new JObject
+                    lock (kv.Value)
                     {
-                        ["requests"] = kv.Value.Requests,
-                        ["fallbacks"] = kv.Value.Fallbacks,
-                        ["injectionAttempts"] = kv.Value.InjectionAttempts,
-                        ["promptTokens"] = kv.Value.PromptTokens,
-                        ["completionTokens"] = kv.Value.CompletionTokens,
-                        ["avgMs"] = kv.Value.Requests > 0 ? Math.Round(kv.Value.TotalMs / kv.Value.Requests) : 0
-                    };
-                    totalRequests += kv.Value.Requests;
-                    totalFallbacks += kv.Value.Fallbacks;
-                    totalInjections += kv.Value.InjectionAttempts;
-                    totalPrompt += kv.Value.PromptTokens;
-                    totalCompletion += kv.Value.CompletionTokens;
-                    totalMs += kv.Value.TotalMs;
+                        byNpc[kv.Key] = new JObject
+                        {
+                            ["requests"] = kv.Value.Requests,
+                            ["fallbacks"] = kv.Value.Fallbacks,
+                            ["injectionAttempts"] = kv.Value.InjectionAttempts,
+                            ["promptTokens"] = kv.Value.PromptTokens,
+                            ["completionTokens"] = kv.Value.CompletionTokens,
+                            ["avgMs"] = kv.Value.Requests > 0 ? Math.Round(kv.Value.TotalMs / kv.Value.Requests) : 0
+                        };
+                        totalRequests += kv.Value.Requests;
+                        totalFallbacks += kv.Value.Fallbacks;
+                        totalInjections += kv.Value.InjectionAttempts;
+                        totalPrompt += kv.Value.PromptTokens;
+                        totalCompletion += kv.Value.CompletionTokens;
+                        totalMs += kv.Value.TotalMs;
+                    }
                 }
             }
             return new JObject

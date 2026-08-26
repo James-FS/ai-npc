@@ -20,6 +20,7 @@ namespace AIBot.Unity.EditorTools
             var relay = npcGo.AddComponent<GameContextRelay>();
             relay.stage = 0;
             relay.favorability = 30;
+            agent.gameContext = relay;
 
             var capsule = GameObject.CreatePrimitive(PrimitiveType.Capsule);
             capsule.transform.SetParent(npcGo.transform, false);

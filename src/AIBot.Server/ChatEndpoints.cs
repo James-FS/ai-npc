@@ -7,9 +7,11 @@ using AIBot.Core.Config;
 using AIBot.Core.Context;
 using AIBot.Core.Llm;
 using AIBot.Core.Logging;
+using AIBot.Core.Memory;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -19,10 +21,12 @@ namespace AIBot.Server
     public class ChatRequestBody
     {
         public string NpcId { get; set; }
+        public string PlayerId { get; set; }
         public string SessionId { get; set; } = "s-local";
         public string Message { get; set; }
         public SimGameState SimState { get; set; }
         public OverrideSettings Override { get; set; }
+        public MemoryPolicyOverrides MemoryOverride { get; set; } // 管理端调试临时覆盖，Server 最终仍应用安全上限
     }
 
     public class OverrideSettings
@@ -37,11 +41,22 @@ namespace AIBot.Server
         public static void MapAIBotChat(this WebApplication app)
         {
             IConfiguration config = app.Configuration;
+            PlayerMemoryService playerMemories = app.Services.GetRequiredService<PlayerMemoryService>();
+            MemorySummaryQueue summaryQueue = app.Services.GetRequiredService<MemorySummaryQueue>();
 
-            app.MapGet("/api/games/{gid}/npcs", (string gid) => Results.Json(new { gameId = gid, npcs = DataStore.ListNpcIds(gid) }));
+            app.MapGet("/api/games/{gid}/npcs", (string gid) =>
+                DataStore.IsValidId(gid)
+                    ? Results.Json(new { gameId = gid, npcs = DataStore.ListNpcIds(gid) })
+                    : Results.BadRequest("非法 gameId"));
 
             app.MapPost("/api/games/{gid}/chat/stream", async (string gid, HttpContext http) =>
             {
+                if (http.Request.ContentLength.HasValue && http.Request.ContentLength.Value > 64 * 1024)
+                {
+                    http.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                    await http.Response.WriteAsync("请求体过大");
+                    return;
+                }
                 ChatRequestBody body;
                 try { body = await http.Request.ReadFromJsonAsync<ChatRequestBody>(http.RequestAborted); }
                 catch { body = null; }
@@ -49,6 +64,36 @@ namespace AIBot.Server
                 {
                     http.Response.StatusCode = 400;
                     await http.Response.WriteAsync("npcId 与 message 必填");
+                    return;
+                }
+                if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(body.NpcId))
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("gameId 或 npcId 非法");
+                    return;
+                }
+                if (!DataStore.IsValidSessionId(body.SessionId))
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("sessionId 非法（仅允许字母数字及 _ . : -，最长128位）");
+                    return;
+                }
+                if (!string.IsNullOrEmpty(body.PlayerId) && !DataStore.IsValidPlayerId(body.PlayerId))
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("playerId 非法（仅允许字母数字及 _ . : -，最长128位）");
+                    return;
+                }
+                if (body.Message.Length > 4000)
+                {
+                    http.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                    await http.Response.WriteAsync("message 最长 4000 字符");
+                    return;
+                }
+                if (body.MemoryOverride != null && !CanUseAdminOverrides(http, config))
+                {
+                    http.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    await http.Response.WriteAsync("memoryOverride 仅允许管理端调试请求使用");
                     return;
                 }
 
@@ -60,6 +105,8 @@ namespace AIBot.Server
                     return;
                 }
                 WorldConfigDto world = DataStore.LoadWorld(gid, cfg.worldId);
+                cfg.model = cfg.model ?? new ModelSettings();
+                cfg.memory = cfg.memory ?? new MemorySettings();
 
                 // key 优先级：NPC 配置 > 环境变量 AIBOT_LLM_KEY > appsettings
                 if (string.IsNullOrEmpty(cfg.model.apiKey))
@@ -73,25 +120,57 @@ namespace AIBot.Server
                     if (body.Override.Temperature.HasValue) cfg.model.temperature = body.Override.Temperature.Value;
                 }
 
-                SessionState session = SessionStore.GetOrCreate(gid, body.NpcId, body.SessionId, cfg.memory.shortTermTurns);
+                EffectiveMemoryPolicy effectiveMemory = MemoryPolicyService.Resolve(
+                    gid, cfg, body.MemoryOverride, config);
 
-                http.Response.ContentType = "text/event-stream; charset=utf-8";
-                http.Response.Headers.CacheControl = "no-cache";
-
-                var channel = Channel.CreateUnbounded<string>();
-                var sse = new SseEventWriter(channel.Writer, body.SessionId);
-                Task pump = Task.Run(async () =>
+                bool requestedPlayerScope = effectiveMemory.policy.memoryScope == MemoryPolicyValues.ScopePlayerNpc;
+                bool playerScoped = requestedPlayerScope && !string.IsNullOrEmpty(body.PlayerId);
+                bool legacyMemoryScope = requestedPlayerScope && !playerScoped;
+                if (legacyMemoryScope)
                 {
-                    try
+                    // 兼容未传 playerId 的旧客户端：仍按 session 同步摘要，不能投递玩家后台任务。
+                    effectiveMemory.policy.memoryScope = MemoryPolicyValues.ScopeSession;
+                    effectiveMemory.policy.backgroundSummarization = false;
+                }
+
+                SessionState session = SessionStore.GetOrCreate(gid, body.NpcId, body.PlayerId, body.SessionId,
+                    effectiveMemory.policy.shortTermTurns);
+
+                try
+                {
+                    await session.Gate.WaitAsync(http.RequestAborted);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                try
+                {
+                    PlayerLongTermMemory longMemory = null;
+                    if (playerScoped)
                     {
-                        await foreach (string line in channel.Reader.ReadAllAsync(http.RequestAborted))
-                        {
-                            await http.Response.WriteAsync(line, http.RequestAborted);
-                            await http.Response.Body.FlushAsync(http.RequestAborted);
-                        }
+                        longMemory = await playerMemories.LoadAndMigrateAsync(session,
+                            effectiveMemory.policy.maxFacts, http.RequestAborted);
                     }
-                    catch (OperationCanceledException) { }
-                });
+
+                    http.Response.ContentType = "text/event-stream; charset=utf-8";
+                    http.Response.Headers.CacheControl = "no-cache";
+
+                    var channel = Channel.CreateUnbounded<string>();
+                    var sse = new SseEventWriter(channel.Writer, body.SessionId);
+                    Task pump = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await foreach (string line in channel.Reader.ReadAllAsync(http.RequestAborted))
+                            {
+                                await http.Response.WriteAsync(line, http.RequestAborted);
+                                await http.Response.Body.FlushAsync(http.RequestAborted);
+                            }
+                        }
+                        catch (OperationCanceledException) { }
+                    });
 
                 // 模拟状态合并进会话：测试台滑条覆盖 stage/favorability，extras 逐键覆盖
                 if (body.SimState != null)
@@ -100,6 +179,8 @@ namespace AIBot.Server
                     session.SimState.favorability = body.SimState.favorability;
                     if (body.SimState.extras != null)
                     {
+                        if (session.SimState.extras == null)
+                            session.SimState.extras = new Dictionary<string, string>();
                         foreach (var kv in body.SimState.extras) session.SimState.extras[kv.Key] = kv.Value;
                     }
                 }
@@ -109,7 +190,8 @@ namespace AIBot.Server
                 new AIBot.Core.Tools.SimulatedToolHost(session.SimState).RegisterAll(toolRegistry);
 
                 var backend = new HttpLlmBackend(cfg.model);
-                var loop = new AgentLoop(backend, new ConsoleLogSink());
+                var loop = new AgentLoop(backend, new ConsoleLogSink(),
+                    backendFactory: settings => new HttpLlmBackend(settings));
                 var input = new AgentRunInput
                 {
                     Config = cfg,
@@ -117,8 +199,13 @@ namespace AIBot.Server
                     Game = new SimGameContext(session.SimState),
                     UserMessage = body.Message,
                     Memory = session.Memory,
-                    MemorySummary = session.Summary,
-                    MemoryFacts = session.Facts,
+                    MemorySummary = playerScoped ? longMemory?.summary : session.Summary,
+                    MemoryFacts = playerScoped
+                        ? PlayerMemoryService.ToPromptFacts(longMemory, effectiveMemory.policy)
+                        : session.Facts,
+                    ResolvedMemoryPolicy = effectiveMemory.policy,
+                    DeferMemorySummarizationToHost = playerScoped
+                        && effectiveMemory.policy.backgroundSummarization,
                     Tools = toolRegistry,
                     HostContext = session.SimState
                 };
@@ -137,14 +224,37 @@ namespace AIBot.Server
 
                 session.LastActiveUtc = DateTime.UtcNow;
 
-                // 本轮触发了记忆摘要 → 写回会话状态（下一轮对话即注入长期记忆）
+                // 同步摘要兼容路径：玩家范围写长期文件，session 范围仍写会话文件。
                 if (result.MemorySummary != null)
                 {
-                    session.Summary = result.MemorySummary;
-                    session.Facts = result.MemoryFacts ?? new List<string>();
+                    if (playerScoped)
+                    {
+                        try
+                        {
+                            await playerMemories.SaveLegacySummaryAsync(gid, body.NpcId, body.PlayerId,
+                                body.SessionId, result.MemorySummary, result.MemoryFacts,
+                                effectiveMemory.policy.maxFacts, http.RequestAborted);
+                        }
+                        catch
+                        {
+                            session.Memory.RestoreEvicted(result.MemorySummarizedMessages);
+                            SessionStore.Save(session);
+                            throw;
+                        }
+                    }
+                    else
+                    {
+                        session.Summary = result.MemorySummary;
+                        session.Facts = result.MemoryFacts ?? new List<string>();
+                    }
                 }
 
-                SessionStore.Save(session);                       // 每轮落盘：重启不丢记忆
+                if (!SessionStore.Save(session) && result.MemorySummarizedMessages != null)
+                {
+                    // 摘要虽在内存成功，但 session 未确认落盘时恢复原批次，避免静默丢失。
+                    session.Memory.RestoreEvicted(result.MemorySummarizedMessages);
+                    SessionStore.Save(session);
+                }
 
                 var tools = new List<string>();
                 foreach (ToolExecution ex in result.ToolExecutions) tools.Add(ex.Call.Function.Name);
@@ -153,7 +263,9 @@ namespace AIBot.Server
                 {
                     ts = DateTime.UtcNow.ToString("o"),
                     npcId = cfg.npcId,
+                    playerId = body.PlayerId,
                     sessionId = body.SessionId,
+                    legacyMemoryScope = legacyMemoryScope,
                     userMessage = body.Message,
                     say = result.Reply.say,
                     emotion = result.Reply.emotion,
@@ -184,7 +296,29 @@ namespace AIBot.Server
                 sse.Write(new JObject { ["type"] = "done", ["sessionId"] = body.SessionId });
                 channel.Writer.TryComplete();
                 await pump;
-            });
+
+                // done 已经发送并刷新后才投递；后台摘要不增加玩家等待时间。
+                if (playerScoped && effectiveMemory.policy.backgroundSummarization
+                    && effectiveMemory.policy.summaryThreshold > 0
+                    && session.Memory.EvictedCount >= effectiveMemory.policy.summaryThreshold)
+                {
+                    summaryQueue.Enqueue(gid, body.NpcId, body.PlayerId, body.SessionId);
+                }
+                }
+                finally
+                {
+                    session.Gate.Release();
+                }
+            }).RequireRateLimiting("chat");
+        }
+
+        private static bool CanUseAdminOverrides(HttpContext http, IConfiguration configuration)
+        {
+            string adminToken = Environment.GetEnvironmentVariable("AIBOT_ADMIN_TOKEN")
+                ?? configuration["Security:AdminToken"];
+            if (string.IsNullOrEmpty(adminToken)) return true; // 本地开发未启用鉴权
+            return string.Equals(http.Request.Headers.Authorization.ToString(),
+                "Bearer " + adminToken, StringComparison.Ordinal);
         }
 
         /// <summary>把 Core 回调转成附录B的 SSE 事件行，经 Channel 泵异步写出。</summary>

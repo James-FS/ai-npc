@@ -11,6 +11,11 @@
 
   <ItemGroup>
     <Compile Include="..\..\Packages\com.aibot.npcagent\Runtime\Core\**\*.cs" />
+    <Compile Include="..\AIBot.Server\DataStore.cs" Link="Server\DataStore.cs" />
+    <Compile Include="..\AIBot.Server\MemoryRepository.cs" Link="Server\MemoryRepository.cs" />
+    <Compile Include="..\AIBot.Server\MemoryAuditService.cs" Link="Server\MemoryAuditService.cs" />
+    <Compile Include="..\AIBot.Server\PlayerMemoryService.cs" Link="Server\PlayerMemoryService.cs" />
+    <Compile Include="..\AIBot.Server\SessionStore.cs" Link="Server\SessionStore.cs" />
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
     <PackageReference Include="xunit" Version="2.7.0" />

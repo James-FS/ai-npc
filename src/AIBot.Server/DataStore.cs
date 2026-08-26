@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using AIBot.Core.Config;
 using AIBot.Core.Logging;
+using AIBot.Core.Memory;
 using Newtonsoft.Json;
 
 namespace AIBot.Server
@@ -22,8 +23,22 @@ namespace AIBot.Server
                 && System.Text.RegularExpressions.Regex.IsMatch(id, "^[a-zA-Z0-9_-]+$");
         }
 
+        public static bool IsValidSessionId(string id)
+        {
+            return !string.IsNullOrEmpty(id)
+                && id.Length <= 128
+                && System.Text.RegularExpressions.Regex.IsMatch(id, "^[a-zA-Z0-9_.:-]+$");
+        }
+
+        /// <summary>playerId 使用稳定内部 ID；允许与 sessionId 相同字符集，最长 128 位。</summary>
+        public static bool IsValidPlayerId(string id)
+        {
+            return IsValidSessionId(id);
+        }
+
         private static string NpcDir(string gameId, bool create)
         {
+            if (!IsValidId(gameId)) return null;
             string root = FindDataRoot();
             if (root == null) { Log.Log(LogLevel.Error, "data/ 根目录未找到，设置 AIBOT_DATA_ROOT"); return null; }
             string dir = Path.Combine(root, "games", gameId, "npcs");
@@ -49,32 +64,84 @@ namespace AIBot.Server
 
         public static AgentConfigDto LoadNpc(string gameId, string npcId)
         {
+            if (!IsValidId(gameId) || !IsValidId(npcId)) return null;
             string root = FindDataRoot();
             if (root == null) { Log.Log(LogLevel.Error, "data/ 根目录未找到，设置 AIBOT_DATA_ROOT"); return null; }
             string path = Path.Combine(root, "games", gameId, "npcs", npcId + ".json");
             if (!File.Exists(path)) return null;
-            return JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(path));
+            try { return JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(path)); }
+            catch (Exception ex)
+            {
+                Log.Log(LogLevel.Error, "NPC 配置解析失败: " + path, ex);
+                return null;
+            }
         }
 
         public static WorldConfigDto LoadWorld(string gameId, string worldId)
         {
+            if (!IsValidId(gameId)) return new WorldConfigDto { worldId = worldId };
             string root = FindDataRoot();
             string path = root == null ? null : Path.Combine(root, "games", gameId, "world.json");
             if (path == null || !File.Exists(path)) return new WorldConfigDto { worldId = worldId };
-            return JsonConvert.DeserializeObject<WorldConfigDto>(File.ReadAllText(path));
+            try
+            {
+                return JsonConvert.DeserializeObject<WorldConfigDto>(File.ReadAllText(path))
+                    ?? new WorldConfigDto { worldId = worldId };
+            }
+            catch (Exception ex)
+            {
+                Log.Log(LogLevel.Error, "世界观配置解析失败: " + path, ex);
+                return new WorldConfigDto { worldId = worldId };
+            }
+        }
+
+        public static MemoryPolicy LoadMemoryPolicy(string gameId)
+        {
+            if (!IsValidId(gameId)) return null;
+            string root = FindDataRoot();
+            string path = root == null ? null : Path.Combine(root, "games", gameId, "memory-policy.json");
+            if (path == null || !File.Exists(path)) return null;
+            try { return JsonConvert.DeserializeObject<MemoryPolicy>(File.ReadAllText(path)); }
+            catch (Exception ex)
+            {
+                Log.Log(LogLevel.Error, "Game 记忆策略解析失败: " + path, ex);
+                return null;
+            }
+        }
+
+        public static bool SaveMemoryPolicy(string gameId, MemoryPolicy policy)
+        {
+            string root = FindDataRoot();
+            if (root == null || policy == null || !IsValidId(gameId)) return false;
+            string dir = Path.Combine(root, "games", gameId);
+            Directory.CreateDirectory(dir);
+            lock (IoLock)
+            {
+                File.WriteAllText(Path.Combine(dir, "memory-policy.json"),
+                    JsonConvert.SerializeObject(policy, Formatting.Indented));
+            }
+            return true;
         }
 
         public static List<string> ListNpcIds(string gameId)
         {
             var ids = new List<string>();
+            if (!IsValidId(gameId)) return ids;
             string root = FindDataRoot();
             string dir = root == null ? null : Path.Combine(root, "games", gameId, "npcs");
             if (dir == null || !Directory.Exists(dir)) return ids;
             foreach (string file in Directory.GetFiles(dir, "*.json"))
             {
                 if (file.EndsWith(".template.json")) continue;    // 模板不是可聊的 NPC
-                AgentConfigDto dto = JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(file));
-                if (dto != null) ids.Add(dto.npcId);
+                try
+                {
+                    AgentConfigDto dto = JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(file));
+                    if (dto != null && IsValidId(dto.npcId)) ids.Add(dto.npcId);
+                }
+                catch (Exception ex)
+                {
+                    Log.Log(LogLevel.Warning, "跳过损坏的 NPC 配置: " + file, ex);
+                }
             }
             return ids;
         }
@@ -82,7 +149,7 @@ namespace AIBot.Server
         /// <summary>保存 NPC 配置（覆盖写，缩进格式便于人工检查）。</summary>
         public static bool SaveNpc(string gameId, AgentConfigDto dto)
         {
-            if (dto == null || !IsValidId(dto.npcId)) return false;
+            if (!IsValidId(gameId) || dto == null || !IsValidId(dto.npcId)) return false;
             string dir = NpcDir(gameId, true);
             if (dir == null) return false;
             string path = Path.Combine(dir, dto.npcId + ".json");
@@ -95,7 +162,7 @@ namespace AIBot.Server
 
         public static bool DeleteNpc(string gameId, string npcId)
         {
-            if (!IsValidId(npcId)) return false;
+            if (!IsValidId(gameId) || !IsValidId(npcId)) return false;
             string dir = NpcDir(gameId, false);
             if (dir == null) return false;
             string path = Path.Combine(dir, npcId + ".json");
@@ -120,12 +187,20 @@ namespace AIBot.Server
         /// <summary>读取 NPC 创建模板（不存在则返回内置默认）。</summary>
         public static AgentConfigDto LoadTemplate(string gameId)
         {
+            if (!IsValidId(gameId)) return null;
             string root = FindDataRoot();
             string path = root == null ? null : Path.Combine(root, "games", gameId, "npcs", "new_npc.template.json");
             if (path != null && File.Exists(path))
             {
-                AgentConfigDto dto = JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(path));
-                if (dto != null) return dto;
+                try
+                {
+                    AgentConfigDto dto = JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(path));
+                    if (dto != null) return dto;
+                }
+                catch (Exception ex)
+                {
+                    Log.Log(LogLevel.Warning, "NPC 模板解析失败，使用内置模板: " + path, ex);
+                }
             }
             return new AgentConfigDto
             {

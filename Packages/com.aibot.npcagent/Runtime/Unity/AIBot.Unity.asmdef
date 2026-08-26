@@ -3,7 +3,8 @@
     "rootNamespace": "AIBot.Unity",
     "references": [
         "AIBot.Core",
-        "Newtonsoft.Json"
+        "Newtonsoft.Json",
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

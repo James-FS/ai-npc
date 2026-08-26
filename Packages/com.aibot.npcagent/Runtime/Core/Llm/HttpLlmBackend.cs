@@ -59,6 +59,23 @@ namespace AIBot.Core.Llm
 
         public async Task ChatStreamAsync(LlmRequest request, ILlmStreamSink sink, CancellationToken ct)
         {
+            try
+            {
+                await ChatStreamCoreAsync(request, sink, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                sink.OnError(ex);
+                throw;
+            }
+        }
+
+        private async Task ChatStreamCoreAsync(LlmRequest request, ILlmStreamSink sink, CancellationToken ct)
+        {
             bool degraded = false;
             for (int attempt = 0; ; attempt++)
             {
@@ -150,7 +167,7 @@ namespace AIBot.Core.Llm
         }
 
         /// <summary>重试安全阀：一旦有 token 已流出到下游，禁止重放（避免重复输出）。</summary>
-        private sealed class GateSink : ILlmStreamSink
+        private sealed class GateSink : ILlmStreamSink, IReasoningSink
         {
             private readonly ILlmStreamSink _inner;
             public bool Streamed;
@@ -161,6 +178,12 @@ namespace AIBot.Core.Llm
             public void OnToolCall(ToolCallDto call) { _inner.OnToolCall(call); }
             public void OnCompleted(string fullText, Usage usage) { _inner.OnCompleted(fullText, usage); }
             public void OnError(Exception ex) { _inner.OnError(ex); }
+            public void OnReasoningToken(string delta)
+            {
+                Streamed = true;
+                var sink = _inner as IReasoningSink;
+                if (sink != null) sink.OnReasoningToken(delta);
+            }
         }
     }
 }

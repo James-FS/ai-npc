@@ -35,9 +35,11 @@ namespace AIBot.Unity
         public string model = "deepseek-chat";
         [Range(0f, 2f)] public float temperature = 0.8f;
         public int maxTokens = 500;
+        public int timeoutMs = 20000;
 
         [Header("记忆")]
         public int shortTermTurns = 12;
+        public int summaryThreshold = 20;
 
         [Header("输出枚举（与游戏 Animator 参数对齐）")]
         public List<string> emotions = new List<string> { "neutral", "happy", "angry", "sad", "surprised" };
@@ -59,9 +61,14 @@ namespace AIBot.Unity
                     baseUrl = baseUrl,
                     model = model,
                     temperature = temperature,
-                    maxTokens = maxTokens
+                    maxTokens = maxTokens,
+                    timeoutMs = timeoutMs
                 },
-                memory = new MemorySettings { shortTermTurns = shortTermTurns },
+                memory = new MemorySettings
+                {
+                    shortTermTurns = shortTermTurns,
+                    summaryThreshold = summaryThreshold
+                },
                 output = new OutputSettings { emotions = emotions, actions = actions }
             };
             foreach (LoreEntry entry in loreBlocks)
@@ -84,8 +91,9 @@ namespace AIBot.Unity
             persona = dto.persona; backstory = dto.backstory; worldId = dto.worldId;
             enabledToolIds = dto.enabledToolIds; fallbackReplies = dto.fallbackReplies;
             baseUrl = dto.model.baseUrl; model = dto.model.model;
-            temperature = dto.model.temperature; maxTokens = dto.model.maxTokens;
-            shortTermTurns = dto.memory.shortTermTurns;
+            temperature = dto.model.temperature; maxTokens = dto.model.maxTokens; timeoutMs = dto.model.timeoutMs;
+            shortTermTurns = dto.memory?.shortTermTurns ?? 12;
+            summaryThreshold = dto.memory?.summaryThreshold ?? 20;
             emotions = dto.output.emotions; actions = dto.output.actions;
             loreBlocks = new List<LoreEntry>();
             foreach (LoreBlock block in dto.loreBlocks)

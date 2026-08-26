@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 using AIBot.Core;
 using AIBot.Core.Config;
 using AIBot.Core.Context;
@@ -24,6 +25,9 @@ namespace AIBot.Unity
         [Tooltip("留空则从 data/games/{gameId}/npcs/{npcId}.json 加载")]
         public AgentConfigAsset configAsset;
 
+        [Tooltip("仅开发期使用。留空时依次使用配置 JSON 与环境变量 AIBOT_LLM_KEY；正式发布应走服务端中转。")]
+        public string apiKeyOverride;
+
         public GameContextRelay gameContext;
 
         [Header("事件")]
@@ -37,8 +41,10 @@ namespace AIBot.Unity
         private UnityWebRequestBackend _backend;
         private AgentLoop _loop;
         private ShortTermMemory _memory;
+        private MemoryPolicy _memoryPolicy;
         private ToolRegistry _tools;
-        private CancellationTokenSource _cts;
+        private CancellationTokenSource _lifetimeCts;
+        private CancellationTokenSource _requestCts;
         private bool _running;
 
         private string _sessionSummary;
@@ -66,26 +72,48 @@ namespace AIBot.Unity
         private void Awake()
         {
             LoadConfig();
-            _memory = new ShortTermMemory(_config != null ? _config.memory.shortTermTurns : 12);
+            _memoryPolicy = _memoryPolicy ?? MemoryPolicy.Defaults();
+            int turns = _memoryPolicy.shortTermTurns;
+            _memory = new ShortTermMemory(Math.Max(2, turns * 2));
             if (gameContext == null) gameContext = gameObject.AddComponent<GameContextRelay>();
         }
 
-        private void OnEnable() { _cts = new CancellationTokenSource(); }
-        private void OnDisable() { CancelRunning(); }
+        private void OnEnable()
+        {
+            _lifetimeCts?.Dispose();
+            _lifetimeCts = new CancellationTokenSource();
+        }
+
+        private void OnDisable()
+        {
+            CancelRunning();
+            _lifetimeCts?.Cancel();
+            _lifetimeCts?.Dispose();
+            _lifetimeCts = null;
+        }
 
         public void CancelRunning()
         {
-            if (_cts != null) _cts.Cancel();
-            _running = false;
+            _requestCts?.Cancel();
         }
 
         public async void Chat(string message)
         {
-            if (_running) { Debug.LogWarning("[AIBot] 上一轮对话未结束，忽略新输入"); return; }
+            await ChatAsync(message);
+        }
+
+        /// <summary>可等待、可测试的对话入口；Chat(string) 仅作为 UnityEvent 兼容包装。</summary>
+        public async Task<AgentLoopResult> ChatAsync(string message)
+        {
+            if (_running) { Debug.LogWarning("[AIBot] 上一轮对话未结束，忽略新输入"); return null; }
             if (_config == null) LoadConfig();
-            if (_config == null) { EmitError("配置加载失败：" + gameId + "/" + npcId); return; }
+            if (_config == null) { EmitError("配置加载失败：" + gameId + "/" + npcId); return null; }
 
             _running = true;
+            _requestCts?.Dispose();
+            _requestCts = _lifetimeCts != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token)
+                : new CancellationTokenSource();
             try
             {
                 var input = new AgentRunInput
@@ -98,33 +126,48 @@ namespace AIBot.Unity
                     Tools = _tools,
                     HostContext = gameObject,
                     MemorySummary = _sessionSummary,
-                    MemoryFacts = _sessionFacts
+                    MemoryFacts = _sessionFacts,
+                    ResolvedMemoryPolicy = _memoryPolicy
                 };
-                AgentLoopResult result = await _loop.RunAsync(input, new UnityStreamSink(this), _cts.Token);
-                if (result.Reply != null) onReply.Invoke(result.Reply);
+                AgentLoopResult result = await _loop.RunAsync(input, new UnityStreamSink(this), _requestCts.Token);
+                if (result.Reply != null) onReply?.Invoke(result.Reply);
                 // 摘要式长期记忆写回（下一次对话注入）
                 if (result.MemorySummary != null)
                 {
                     _sessionSummary = result.MemorySummary;
                     _sessionFacts = result.MemoryFacts;
                 }
+                return result;
             }
-            catch (OperationCanceledException) { /* 玩家离开/组件禁用：静默 */ }
+            catch (OperationCanceledException) { return null; /* 玩家离开/组件禁用：静默 */ }
             catch (Exception ex)
             {
                 UnityLogSink.Instance.Log(LogLevel.Error, "Chat failed: " + ex.Message, ex);
                 EmitError(ex.Message);
+                return null;
             }
-            finally { _running = false; }
+            finally
+            {
+                _requestCts?.Dispose();
+                _requestCts = null;
+                _running = false;
+            }
         }
 
         private void LoadConfig()
         {
             _config = configAsset != null ? configAsset.ToDto() : DevConfigStore.LoadNpc(gameId, npcId);
             if (_config == null) return;
+            if (_config.model == null) _config.model = new ModelSettings();
+            if (!string.IsNullOrEmpty(apiKeyOverride)) _config.model.apiKey = apiKeyOverride;
+            if (string.IsNullOrEmpty(_config.model.apiKey))
+                _config.model.apiKey = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY");
+            MemoryPolicy gameMemoryPolicy = DevConfigStore.LoadMemoryPolicy(gameId);
+            _memoryPolicy = MemoryPolicyResolver.Resolve(gameMemoryPolicy, _config.memory, null).policy;
             _world = DevConfigStore.LoadWorld(gameId, _config.worldId);
             _backend = new UnityWebRequestBackend(_config.model);
-            _loop = new AgentLoop(_backend, UnityLogSink.Instance);
+            _loop = new AgentLoop(_backend, UnityLogSink.Instance,
+                backendFactory: settings => new UnityWebRequestBackend(settings));
         }
 
         private void EmitError(string message)
@@ -137,8 +180,8 @@ namespace AIBot.Unity
         {
             private readonly NpcAgent _agent;
             public UnityStreamSink(NpcAgent agent) { _agent = agent; }
-            public void OnToken(string delta) { _agent.onToken.Invoke(delta); }
-            public void OnReasoningToken(string delta) { _agent.onReasoning.Invoke(delta); }
+            public void OnToken(string delta) { _agent.onToken?.Invoke(delta); }
+            public void OnReasoningToken(string delta) { _agent.onReasoning?.Invoke(delta); }
             public void OnToolCall(ToolCallDto call) { }
             public void OnCompleted(string fullText, Usage usage) { }
             public void OnError(Exception ex) { Debug.LogWarning("[AIBot] 流错误：" + ex.Message); }

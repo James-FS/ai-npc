@@ -32,6 +32,7 @@ namespace AIBot.Core.Tools
                 {
                     string item = args["item_id"]?.ToString() ?? "?";
                     int count = args.Value<int?>("count") ?? 1;
+                    if (_state.items == null) _state.items = new System.Collections.Generic.Dictionary<string, int>();
                     _state.items[item] = _state.GetItemCount(item) + count;
                     return "已给玩家 " + item + " x" + count + "（当前持有 x" + _state.items[item] + "）";
                 }));

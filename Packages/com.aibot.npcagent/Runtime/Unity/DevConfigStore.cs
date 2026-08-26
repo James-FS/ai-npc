@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.IO;
 using AIBot.Core.Config;
+using AIBot.Core.Memory;
 using Newtonsoft.Json;
 using UnityEngine;
 
@@ -58,6 +59,20 @@ namespace AIBot.Unity
                 return null;
             }
             return JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(path));
+        }
+
+        public static MemoryPolicy LoadMemoryPolicy(string gameId)
+        {
+            string root = FindDataRoot();
+            if (root == null) return null;
+            string path = Path.Combine(root, "games", gameId, "memory-policy.json");
+            if (!File.Exists(path)) return null;
+            try { return JsonConvert.DeserializeObject<MemoryPolicy>(File.ReadAllText(path)); }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning("[AIBot] Game 记忆策略解析失败，使用 Core 默认值：" + ex.Message);
+                return null;
+            }
         }
 
         /// <summary>列出某游戏下全部 NPC 配置（编辑器窗口/测试用）。</summary>
