@@ -18,6 +18,9 @@
     <Compile Include="..\AIBot.Server\SessionStore.cs" Link="Server\SessionStore.cs" />
     <Compile Include="..\AIBot.Server\MySqlConnectionFactory.cs" Link="Server\MySqlConnectionFactory.cs" />
     <Compile Include="..\AIBot.Server\MySqlSessionPersistence.cs" Link="Server\MySqlSessionPersistence.cs" />
+    <Compile Include="..\AIBot.Server\MemoryPolicyService.cs" Link="Server\MemoryPolicyService.cs" />
+    <Compile Include="..\AIBot.Server\MemorySummaryQueue.cs" Link="Server\MemorySummaryQueue.cs" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
     <PackageReference Include="xunit" Version="2.7.0" />

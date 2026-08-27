@@ -845,12 +845,18 @@ memory.audit
 - 统一 Vue 控制台的危险操作提示与实际行为对齐，明确整份删除和保留期清理会同时清空关联 Session 消息与待摘要队列。
 - Session 持久化文件删除失败时保留内存状态并返回明确错误，避免 API 误报成功后重启复活。
 - 前端预设和清理确认取消均被正常吞掉，不再产生未处理 Promise rejection。
-- 回归结果：xUnit 68/68、Server 0 warning/0 error、Vue 强制全量类型检查和生产构建通过。
+- 回归结果：xUnit 74/74、Server 0 warning/0 error、Vue 强制全量类型检查和生产构建通过。
 
 ### 摘要稳定性收尾（✅ 2026-08-27 已完成）
 
 - 摘要任务耗尽 3 次自动重试后记录失败明细，原始 `evictedMessages` 保留不删除。
 - 新增摘要队列查询与失败重试 API，支持按 Game/NPC/Player/Session 过滤。
+
+### 后续 P1 运行加固（✅ 2026-08-27 已完成）
+
+- Server 对 `SupportedSummaryTriggers`、`SupportedMemoryScopes` 做大小写不敏感去重和空值清理，策略预览与控制台不会再出现重复能力标签。
+- 摘要队列增加幂等入队、玩家级失效后重新入队、非法标识拒绝和失败重试空队列等回归测试。
+- Server 启动时输出存储提供方、JSON data 根目录或 MySQL 目标、MySQL 必需表存在性、记忆边界/能力、全局 LLM Key 是否配置及 default NPC 发现结果；不会输出任何密钥或完整连接字符串。
 - 会话列表返回 `idle`、`waiting`、`pending`、`failed` 状态及最近失败原因。
 - Vue 记忆检查器增加队列概览、当前/累计失败统计、失败提示和全局/会话级重试入口。
 - 验收重点：摘要写入、审计写入、Session 确认落盘三者全部成功后才消费待摘要消息；服务重启和重试均保持幂等。

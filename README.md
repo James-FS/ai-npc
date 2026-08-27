@@ -2,7 +2,7 @@
 
 可插拔的游戏 NPC 智能Agent平台：纯 C# 核心 + Unity 包 + 独立 Server + Web 管理台，接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM）。
 
-- 方案文档：[AI-NPC-Agent-实施方案.md](./AI-NPC-Agent-实施方案.md)（v2.8，含数据契约、四阶段记忆管理、摘要队列治理、统一 Vue 调试工作台和附录A/B）
+- 方案文档：[AI-NPC-Agent-实施方案.md](./docs/architecture/AI-NPC-Agent-实施方案.md)（v2.8，含数据契约、四阶段记忆管理、摘要队列治理、统一 Vue 调试工作台和附录A/B）
 - 记忆管理与 Vue 控制台设计：[docs/记忆管理与Vue控制台设计方案.md](./docs/记忆管理与Vue控制台设计方案.md)
 - 当前进度：M1、M4、M5 已完成，M2 基本完成（详见主方案 §9）
 
@@ -12,7 +12,7 @@
 Packages/com.aibot.npcagent   Unity 包（Runtime/Core = 三端共享的 AIBot.Core 源码）
 src/AIBot.Server              ASP.NET Core 独立宿主 + 静态托管（根入口跳转 wwwroot/app）
 src/AIBot.Web                 Vue 3 + TypeScript 统一管理/调试控制台（可选后台）
-src/AIBot.Tests               xUnit 测试（68 项，Core/记忆仓储与审计免网全链路）
+src/AIBot.Tests               xUnit 测试（74 项，Core/记忆仓储/摘要队列与审计免网全链路）
 data/games/{gameId}           NPC 配置/世界观/JSON 兼容存储（MySQL 模式下为迁移源/配置源）
 database/mysql/schema.sql     MySQL + Dapper 的表结构
 ```

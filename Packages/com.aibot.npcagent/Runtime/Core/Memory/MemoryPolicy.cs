@@ -239,17 +239,29 @@ namespace AIBot.Core.Memory
 
         private static MemoryPolicyLimits CloneLimits(MemoryPolicyLimits source)
         {
+            List<string> triggers = Distinct(source.supportedSummaryTriggers);
+            List<string> scopes = Distinct(source.supportedMemoryScopes);
             return new MemoryPolicyLimits
             {
                 maxShortTermTurns = source.maxShortTermTurns,
                 maxSummaryThreshold = source.maxSummaryThreshold,
                 maxFacts = source.maxFacts,
                 allowBackgroundSummarization = source.allowBackgroundSummarization,
-                supportedSummaryTriggers = source.supportedSummaryTriggers != null
-                    ? new List<string>(source.supportedSummaryTriggers) : new List<string>(),
-                supportedMemoryScopes = source.supportedMemoryScopes != null
-                    ? new List<string>(source.supportedMemoryScopes) : new List<string>()
+                supportedSummaryTriggers = triggers,
+                supportedMemoryScopes = scopes
             };
+        }
+
+        private static List<string> Distinct(List<string> values)
+        {
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string value in values ?? new List<string>())
+            {
+                string normalized = value?.Trim();
+                if (!string.IsNullOrEmpty(normalized) && seen.Add(normalized)) result.Add(normalized);
+            }
+            return result;
         }
     }
 }

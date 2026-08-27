@@ -73,6 +73,9 @@ if (storageOptions.IsMySql && Array.Exists(args, value => string.Equals(value, "
         return;
 }
 
+await StartupDiagnostics.RunAsync(storageOptions, mySqlFactory, builder.Configuration,
+    app.Lifetime.ApplicationStopping);
+
 // 可选管理鉴权：本地未配置时保持零门槛；部署时设置 AIBOT_ADMIN_TOKEN 即保护管理 API。
 string adminToken = Environment.GetEnvironmentVariable("AIBOT_ADMIN_TOKEN")
     ?? app.Configuration["Security:AdminToken"];

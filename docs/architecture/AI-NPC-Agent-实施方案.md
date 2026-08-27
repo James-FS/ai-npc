@@ -2,8 +2,8 @@
 
 > 一个可插拔的 NPC 智能Agent平台：纯 C# 核心（AIBot.Core）+ Unity 包 + 独立管理服务（AIBot.Server）+ Web 管理台。接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM），NPC 具备自由对话、剧情人设、两级记忆、工具调用与结构化输出的完整 agent 能力。
 >
-> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v2.5（2026-08-26）
-> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（68/68）与真实模型端到端验证。**
+> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v2.8（2026-08-27）
+> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（74/74）与真实模型端到端验证。**
 
 | 版本 | 变更 |
 |---|---|
@@ -19,6 +19,7 @@
 | v2.1 | 记忆管理阶段C：长期记忆管理 API、显式迁移、手动摘要、导出/清理、乐观并发冲突与完整审计记录 |
 | v2.2 | 记忆管理阶段D：Vue 3 正式记忆控制台、NPC 实时策略预览、记忆检查/迁移/审计页面与 `/app/` 静态部署 |
 | v2.3 | 四阶段 P1 加固：动态短期窗口、摘要禁用边界、Unity/Server 后台语义、删除与摘要互斥、类别约束、必写审计及 Vue 可重复构建 |
+| v2.4 | P1 运行加固：策略能力去重、摘要队列幂等/失效回归测试、启动期存储与数据库诊断 |
 | v2.4 | 四阶段 P2 加固：保留期按最旧批次清理、清理预演防过期、危险操作说明对齐、Session 删除失败保留状态及前端取消处理 |
 | v2.5 | 调试台 Vue 统一：原生调试台能力迁移至 `AIBot.Web`，根路径统一跳转 `/app/#/debug/chat`，日志/统计/会话/Prompt/NPC/世界观/流式对话共用一套控制台 |
 | v2.6 | 客户端轻量化部署：Unity 运行时与 Server/Vue/MySQL 解耦，支持 Local/Server 双模式；数据库和管理控制台不进入 Unity 包，正式在线模式通过 Server 中转 |
@@ -138,7 +139,7 @@ Unity 和 Vue 都不直接连接 MySQL；数据库账号、模型 API Key 和记
 
 ```
 D:\Code\aibot\
-├── AI-NPC-Agent-实施方案.md          # 本文档
+├── docs/architecture/AI-NPC-Agent-实施方案.md # 主实施方案
 ├── README.md / .gitignore / start-server.bat（双击启动，代理行已注释）
 ├── data/
 │   ├── games/default/
@@ -166,7 +167,7 @@ D:\Code\aibot\
     │   ├── wwwroot/index.html        # 根入口重定向到 Vue 调试工作台（不再独立维护原生调试台）
     │   └── wwwroot/app/              # Vue 正式控制台生产构建产物
     ├── AIBot.Web/                    # Vue 3 + TypeScript + Vite + Pinia + Element Plus
-    └── AIBot.Tests/                  # 68 项 xUnit（Mock 后端免网全链路）
+    └── AIBot.Tests/                  # 74 项 xUnit（Mock 后端免网全链路）
 ```
 
 ---
@@ -309,7 +310,7 @@ Unity 运行时边界：
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M1 Core 分层 + Unity 闭环 | ✅ 完成 | 68 项测试含 SSE/组装/循环/注入/记忆全链路 |
+| M1 Core 分层 + Unity 闭环 | ✅ 完成 | 73 项测试含 SSE/组装/循环/注入/记忆全链路 |
 | M2 Agent 能力 | ✅ 基本完成 | 工具循环/结构化解析/摘要记忆/HttpLlmBackend/Mock 全部就位 |
 | M3 配置化 + Unity 编辑器工具 | 🔶 部分 | JSON 配置/SO 互转/防注入✅；AgentChatWindow、BuildConfigCopier ⬜ |
 | M4 Server + 测试页 | ✅ 超额完成 | 端点全家桶 + 调试能力已迁移到 Vue 统一管理台 |
@@ -320,7 +321,7 @@ Unity 运行时边界：
 
 ## 10. 测试与验证现状
 
-- **xUnit 68/68**：覆盖 SSE/聚合/结构化解析/上下文/防注入/AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 清理与必写审计失败、保留期最旧批次选择及 Session 删除失败保护
+- **xUnit 74/74**：覆盖 SSE/聚合/结构化解析/上下文/防注入/AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 清理与必写审计失败、保留期最旧批次选择、Session 删除失败保护、摘要队列幂等入队/玩家失效/非法标识及策略能力去重
 - **构建回归**：Server 独立输出目录编译 0 警告/0 错误；Vue 强制全量 `vue-tsc -b --force` 与生产 `npm run build` 均通过，可在生成 `components.d.ts` 后重复执行
 - **真实端到端已验证**：Ox Alpha 流式对话（角色扮演+结构化输出）、拒绝白送矿石（工具决策）、重启记忆恢复、注入攻击被记录且模型保持角色、连接测试诊断（6.3s 成功 / 错误配置给出原因）
 - **已知环境限制**：ZCode 内嵌浏览器不派发点击事件（页面代码经 DOM/截图/后端全链路验证，真实浏览器正常）
@@ -344,7 +345,7 @@ Ox Alpha（免费）：完整一轮对话约 650-800 prompt tokens + 150-420 com
 ## 13. 快速开始
 
 ```bash
-# 测试（免网免key，68项）
+# 测试（免网免key，74项）
 cd src/AIBot.Tests && dotnet test
 # Server 编译回归（避免占用正在运行的 apphost）
 cd ../AIBot.Server && dotnet build --no-restore -p:UseAppHost=false

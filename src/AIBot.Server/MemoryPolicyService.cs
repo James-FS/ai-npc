@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System;
 using AIBot.Core.Config;
 using AIBot.Core.Memory;
 using Microsoft.Extensions.Configuration;
@@ -52,7 +53,16 @@ namespace AIBot.Server
         private static List<string> ReadList(IConfiguration configuration, string key, List<string> fallback)
         {
             string[] values = configuration.GetSection(key).Get<string[]>();
-            return values != null && values.Length > 0 ? new List<string>(values) : fallback;
+            List<string> source = values != null && values.Length > 0 ? new List<string>(values) : fallback;
+            // 配置提供程序可能同时合并数组索引和逗号分隔值；对外能力契约必须稳定且无重复项。
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string value in source ?? new List<string>())
+            {
+                string normalized = value?.Trim();
+                if (!string.IsNullOrEmpty(normalized) && seen.Add(normalized)) result.Add(normalized);
+            }
+            return result.Count > 0 ? result : new List<string>(fallback ?? new List<string>());
         }
     }
 }

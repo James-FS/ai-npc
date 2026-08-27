@@ -2,6 +2,8 @@ using AIBot.Core.Config;
 using AIBot.Core.Memory;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
+using Microsoft.Extensions.Configuration;
 using Xunit;
 
 namespace AIBot.Tests
@@ -141,6 +143,49 @@ namespace AIBot.Tests
             Assert.Equal("player.name", restored.key);
             Assert.Equal("小明", restored.value);
             Assert.True(restored.pinned);
+        }
+
+        [Fact]
+        public void Limits_DeduplicateCapabilitiesAndTrimValues()
+        {
+            var limits = new MemoryPolicyLimits
+            {
+                supportedSummaryTriggers = new List<string>
+                {
+                    " message_count ", "message_count", "token_count", "TOKEN_COUNT", ""
+                },
+                supportedMemoryScopes = new List<string>
+                {
+                    "session", " session ", "player_npc"
+                }
+            };
+
+            EffectiveMemoryPolicy result = MemoryPolicyResolver.Resolve(null,
+                new MemorySettings(), null, limits);
+
+            Assert.Equal(new[] { "message_count", "token_count" },
+                result.limits.supportedSummaryTriggers);
+            Assert.Equal(new[] { "session", "player_npc" },
+                result.limits.supportedMemoryScopes);
+        }
+
+        [Fact]
+        public void ServerLimits_DeduplicateConfigurationArrays()
+        {
+            IConfiguration configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new[]
+                {
+                    new KeyValuePair<string, string>("Memory:SupportedSummaryTriggers:0", "message_count"),
+                    new KeyValuePair<string, string>("Memory:SupportedSummaryTriggers:1", "message_count"),
+                    new KeyValuePair<string, string>("Memory:SupportedMemoryScopes:0", "session"),
+                    new KeyValuePair<string, string>("Memory:SupportedMemoryScopes:1", "session")
+                })
+                .Build();
+
+            MemoryPolicyLimits limits = AIBot.Server.MemoryPolicyService.LoadLimits(configuration);
+
+            Assert.Single(limits.supportedSummaryTriggers);
+            Assert.Single(limits.supportedMemoryScopes);
         }
     }
 }
