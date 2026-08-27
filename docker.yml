@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: ai-npc-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${AIBOT_MYSQL_ROOT_PASSWORD:-change-this-root-password}
+      MYSQL_DATABASE: ${AIBOT_MYSQL_DATABASE:-ai_npc}
+      MYSQL_USER: ${AIBOT_MYSQL_USER:-aibot}
+      MYSQL_PASSWORD: ${AIBOT_MYSQL_PASSWORD:-change-this-password}
+      TZ: Asia/Shanghai
+    ports:
+      - "${AIBOT_MYSQL_PORT:-3306}:3306"
+    volumes:
+      - ai_npc_mysql_data:/var/lib/mysql
+      - ./database/mysql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  ai_npc_mysql_data:

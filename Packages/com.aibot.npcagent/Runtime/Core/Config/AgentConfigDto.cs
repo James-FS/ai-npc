@@ -18,6 +18,11 @@ namespace AIBot.Core.Config
         public MemorySettings memory = new MemorySettings();
         public OutputSettings output = new OutputSettings();
         public int configVersion = 1;
+
+        // Unity 运行时传输选择。Server 端读取 NPC 配置时会忽略这些客户端运行时字段。
+        // local：Unity 直连 OpenAI 兼容模型；server：Unity 调用 AIBot.Server。
+        public string runtimeMode = "local";
+        public string serverBaseUrl = "http://127.0.0.1:5000";
     }
 
     public class LoreBlock

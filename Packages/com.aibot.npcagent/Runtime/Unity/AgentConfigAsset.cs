@@ -6,6 +6,12 @@ using UnityEngine;
 
 namespace AIBot.Unity
 {
+    public enum AgentRuntimeMode
+    {
+        Local,
+        Server
+    }
+
     /// <summary>人设配置的 Unity 内等价物：编辑体验 + 与 data/ JSON 互转（M3 补导入导出器 UI）。</summary>
     [CreateAssetMenu(menuName = "AI NPC/Agent Config", fileName = "NewNpcConfig")]
     public class AgentConfigAsset : ScriptableObject
@@ -15,6 +21,11 @@ namespace AIBot.Unity
         [TextArea(2, 6)] public string persona;
         [TextArea(2, 6)] public string backstory;
         public string worldId = "default";
+
+        [Header("运行模式")]
+        [Tooltip("local 直连模型；server 通过 AIBot.Server 中转。")]
+        public AgentRuntimeMode runtimeMode = AgentRuntimeMode.Local;
+        public string serverBaseUrl = "http://127.0.0.1:5000";
 
         [Serializable]
         public class LoreEntry
@@ -69,7 +80,9 @@ namespace AIBot.Unity
                     shortTermTurns = shortTermTurns,
                     summaryThreshold = summaryThreshold
                 },
-                output = new OutputSettings { emotions = emotions, actions = actions }
+                output = new OutputSettings { emotions = emotions, actions = actions },
+                runtimeMode = runtimeMode == AgentRuntimeMode.Server ? "server" : "local",
+                serverBaseUrl = serverBaseUrl
             };
             foreach (LoreEntry entry in loreBlocks)
             {
@@ -89,6 +102,9 @@ namespace AIBot.Unity
         {
             npcId = dto.npcId; displayName = dto.displayName;
             persona = dto.persona; backstory = dto.backstory; worldId = dto.worldId;
+            runtimeMode = string.Equals(dto.runtimeMode, "server", StringComparison.OrdinalIgnoreCase)
+                ? AgentRuntimeMode.Server : AgentRuntimeMode.Local;
+            serverBaseUrl = string.IsNullOrEmpty(dto.serverBaseUrl) ? "http://127.0.0.1:5000" : dto.serverBaseUrl;
             enabledToolIds = dto.enabledToolIds; fallbackReplies = dto.fallbackReplies;
             baseUrl = dto.model.baseUrl; model = dto.model.model;
             temperature = dto.model.temperature; maxTokens = dto.model.maxTokens; timeoutMs = dto.model.timeoutMs;

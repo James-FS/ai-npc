@@ -22,6 +22,12 @@ namespace AIBot.Unity
         public string gameId = "default";
         public string npcId = "blacksmith_wang";
 
+        [Header("运行连接")]
+        [Tooltip("Server 模式下可选的稳定玩家 ID；留空时服务端使用 session 范围记忆。")]
+        public string playerId;
+        [Tooltip("Server 模式下的会话 ID；同一会话持续对话即可复用短期记忆。")]
+        public string sessionId = "s-unity";
+
         [Tooltip("留空则从 data/games/{gameId}/npcs/{npcId}.json 加载")]
         public AgentConfigAsset configAsset;
 
@@ -39,6 +45,7 @@ namespace AIBot.Unity
         private AgentConfigDto _config;
         private WorldConfigDto _world;
         private UnityWebRequestBackend _backend;
+        private UnityServerBackend _serverBackend;
         private AgentLoop _loop;
         private ShortTermMemory _memory;
         private MemoryPolicy _memoryPolicy;
@@ -116,6 +123,26 @@ namespace AIBot.Unity
                 : new CancellationTokenSource();
             try
             {
+                if (IsServerMode())
+                {
+                    ServerChatResult serverResult = await _serverBackend.ChatAsync(
+                        message, new UnityStreamSink(this), _requestCts.Token);
+                    if (serverResult == null || serverResult.Reply == null)
+                    {
+                        EmitError("AIBot.Server 未返回有效回复");
+                        return null;
+                    }
+                    var directResult = new AgentLoopResult
+                    {
+                        Reply = serverResult.Reply,
+                        Usage = serverResult.Usage,
+                        ElapsedMs = serverResult.ElapsedMs,
+                        UsedFallback = serverResult.UsedFallback
+                    };
+                    onReply?.Invoke(directResult.Reply);
+                    return directResult;
+                }
+
                 var input = new AgentRunInput
                 {
                     Config = _config,
@@ -165,9 +192,28 @@ namespace AIBot.Unity
             MemoryPolicy gameMemoryPolicy = DevConfigStore.LoadMemoryPolicy(gameId);
             _memoryPolicy = MemoryPolicyResolver.Resolve(gameMemoryPolicy, _config.memory, null).policy;
             _world = DevConfigStore.LoadWorld(gameId, _config.worldId);
-            _backend = new UnityWebRequestBackend(_config.model);
-            _loop = new AgentLoop(_backend, UnityLogSink.Instance,
-                backendFactory: settings => new UnityWebRequestBackend(settings));
+            if (IsServerMode())
+            {
+                string serverUrl = string.IsNullOrWhiteSpace(_config.serverBaseUrl)
+                    ? "http://127.0.0.1:5000" : _config.serverBaseUrl;
+                _serverBackend = new UnityServerBackend(serverUrl, gameId, npcId,
+                    playerId, sessionId, _config.model.timeoutMs);
+                _backend = null;
+                _loop = null;
+            }
+            else
+            {
+                _backend = new UnityWebRequestBackend(_config.model);
+                _serverBackend = null;
+                _loop = new AgentLoop(_backend, UnityLogSink.Instance,
+                    backendFactory: settings => new UnityWebRequestBackend(settings));
+            }
+        }
+
+        private bool IsServerMode()
+        {
+            return _config != null && string.Equals(_config.runtimeMode, "server",
+                StringComparison.OrdinalIgnoreCase);
         }
 
         private void EmitError(string message)

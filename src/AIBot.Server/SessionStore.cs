@@ -46,6 +46,13 @@ namespace AIBot.Server
             new ConcurrentDictionary<string, SessionState>();
         private static readonly object IoLock = new object();
         private static readonly ILogSink Log = new ConsoleLogSink();
+        private static MySqlSessionPersistence MySqlPersistence;
+
+        public static void UseMySql(MySqlConnectionFactory factory)
+        {
+            MySqlPersistence = factory == null ? null : new MySqlSessionPersistence(factory);
+            Map.Clear();
+        }
 
         public sealed class SessionFileDto
         {
@@ -105,6 +112,19 @@ namespace AIBot.Server
         private static SessionState LoadFromDisk(string gid, string npcId, string playerId,
             string sid, int maxTurns)
         {
+            if (MySqlPersistence != null)
+            {
+                try
+                {
+                    SessionFileDto mysqlDto = MySqlPersistence.Load(gid, npcId, playerId, sid);
+                    return mysqlDto == null ? null : FromDto(gid, playerId, sid, maxTurns, mysqlDto, null);
+                }
+                catch (Exception ex)
+                {
+                    Log.Log(LogLevel.Warning, "MySQL 会话恢复失败(" + sid + ")，从空白开始: " + ex.Message);
+                    return null;
+                }
+            }
             string path = FilePath(gid, npcId, playerId, sid);
             string legacyPath = null;
             if (!string.IsNullOrEmpty(playerId) && (path == null || !File.Exists(path)))
@@ -118,23 +138,8 @@ namespace AIBot.Server
             {
                 SessionFileDto dto = JsonConvert.DeserializeObject<SessionFileDto>(File.ReadAllText(path));
                 if (dto == null) return null;
-                var memory = new ShortTermMemory(ToMessageCapacity(maxTurns));
-                memory.RestoreEvicted((dto.evictedMessages ?? new List<LlmMessage>()).Select(CopyMessage));
-                foreach (LlmMessage message in dto.messages ?? new List<LlmMessage>())
-                    memory.Add(CopyMessage(message));
-                return new SessionState
-                {
-                    GameId = gid,
-                    NpcId = npcId,
-                    PlayerId = playerId ?? dto.playerId,
-                    SessionId = sid,
-                    Memory = memory,
-                    Summary = dto.summary,
-                    Facts = dto.facts ?? new List<string>(),
-                    SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
-                    LastActiveUtc = dto.lastActiveUtc == default(DateTime) ? File.GetLastWriteTimeUtc(path) : dto.lastActiveUtc,
-                    LegacySourcePath = legacyPath
-                };
+                return FromDto(gid, playerId, sid, maxTurns, dto, legacyPath,
+                    File.GetLastWriteTimeUtc(path));
             }
             catch (Exception ex)
             {
@@ -146,8 +151,6 @@ namespace AIBot.Server
         /// <summary>原子落盘；待摘要队列也持久化，后台失败或重启后可继续处理。</summary>
         public static bool Save(SessionState session)
         {
-            string path = FilePath(session.GameId, session.NpcId, session.PlayerId, session.SessionId);
-            if (path == null) return false;
             try
             {
                 var dto = new SessionFileDto
@@ -162,6 +165,13 @@ namespace AIBot.Server
                     evictedMessages = session.Memory.SnapshotEvicted().Select(CopyMessage).ToList(),
                     lastActiveUtc = session.LastActiveUtc
                 };
+                if (MySqlPersistence != null)
+                {
+                    MySqlPersistence.Save(session.GameId, dto);
+                    return true;
+                }
+                string path = FilePath(session.GameId, session.NpcId, session.PlayerId, session.SessionId);
+                if (path == null) return false;
                 lock (IoLock)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -204,6 +214,18 @@ namespace AIBot.Server
                     && (playerId == null || s.PlayerId == playerId))
                 .ToDictionary(s => Key(s.GameId, s.NpcId, s.PlayerId, s.SessionId), s => s);
 
+            if (MySqlPersistence != null)
+            {
+                foreach (SessionFileDto dto in MySqlPersistence.List(gid, npcId, playerId))
+                {
+                    if (dto == null || string.IsNullOrEmpty(dto.npcId) || string.IsNullOrEmpty(dto.sessionId)) continue;
+                    string key = Key(gid, dto.npcId, dto.playerId, dto.sessionId);
+                    if (!result.ContainsKey(key)) result[key] = FromDto(gid, dto.playerId,
+                        dto.sessionId, Math.Max(1, (dto.messages?.Count ?? 0) / 2 + 1), dto, null);
+                }
+                return result.Values.OrderByDescending(s => s.LastActiveUtc).ToList();
+            }
+
             foreach (string path in EnumerateSessionFiles(gid))
             {
                 try
@@ -240,6 +262,7 @@ namespace AIBot.Server
 
         public static List<PendingMemorySession> ScanPendingPlayerSessions()
         {
+            if (MySqlPersistence != null) return MySqlPersistence.ScanPending();
             var result = new List<PendingMemorySession>();
             string root = DataStore.FindDataRoot();
             if (root == null) return result;
@@ -298,6 +321,12 @@ namespace AIBot.Server
         public static bool Delete(string gid, string npcId, string playerId, string sid)
         {
             string key = Key(gid, npcId, playerId, sid);
+            if (MySqlPersistence != null)
+            {
+                bool mysqlPersisted = MySqlPersistence.Delete(gid, npcId, playerId, sid);
+                bool removedFromMemory = Map.TryRemove(key, out _);
+                return mysqlPersisted || removedFromMemory;
+            }
             string path = FilePath(gid, npcId, playerId, sid);
             bool persisted = false;
             try
@@ -331,6 +360,28 @@ namespace AIBot.Server
         private static LlmMessage CopyMessage(LlmMessage message)
         {
             return new LlmMessage { Role = message?.Role, Content = message?.Content };
+        }
+
+        private static SessionState FromDto(string gid, string playerId, string sid, int maxTurns,
+            SessionFileDto dto, string legacySourcePath, DateTime? fileTime = null)
+        {
+            var memory = new ShortTermMemory(ToMessageCapacity(maxTurns));
+            memory.RestoreEvicted((dto.evictedMessages ?? new List<LlmMessage>()).Select(CopyMessage));
+            foreach (LlmMessage message in dto.messages ?? new List<LlmMessage>()) memory.Add(CopyMessage(message));
+            return new SessionState
+            {
+                GameId = gid,
+                NpcId = dto.npcId,
+                PlayerId = playerId ?? dto.playerId,
+                SessionId = sid,
+                Memory = memory,
+                Summary = dto.summary,
+                Facts = dto.facts ?? new List<string>(),
+                SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
+                LastActiveUtc = dto.lastActiveUtc == default(DateTime)
+                    ? (fileTime ?? DateTime.UtcNow) : dto.lastActiveUtc,
+                LegacySourcePath = legacySourcePath
+            };
         }
 
         private static void WriteAtomic(string path, string content)

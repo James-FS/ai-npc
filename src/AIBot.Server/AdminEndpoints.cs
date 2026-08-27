@@ -57,6 +57,14 @@ namespace AIBot.Server
             public string SessionId { get; set; }
         }
 
+        public class RetryMemorySummaryRequest
+        {
+            public string GameId { get; set; }
+            public string NpcId { get; set; }
+            public string PlayerId { get; set; }
+            public string SessionId { get; set; }
+        }
+
         public class MemoryCleanupRequest
         {
             public int InactiveDays { get; set; }
@@ -75,8 +83,31 @@ namespace AIBot.Server
             app.MapGet("/api/admin/memory-summary-queue", () => JsonNet(new
             {
                 pending = summaryQueue.PendingCount,
-                failed = summaryQueue.FailedJobs
+                failed = summaryQueue.FailedJobs,
+                failedCurrent = summaryQueue.CurrentFailureCount,
+                failedTotal = summaryQueue.FailedJobs,
+                failures = summaryQueue.FailureSnapshot()
             }));
+            app.MapPost("/api/admin/memory-summary-queue/retry",
+                (RetryMemorySummaryRequest body, HttpContext http) =>
+            {
+                if (body?.GameId != null && !DataStore.IsValidId(body.GameId))
+                    return Results.BadRequest("非法 gameId");
+                if (body?.NpcId != null && !DataStore.IsValidId(body.NpcId))
+                    return Results.BadRequest("非法 npcId");
+                if (body?.PlayerId != null && !DataStore.IsValidPlayerId(body.PlayerId))
+                    return Results.BadRequest("非法 playerId");
+                if (body?.SessionId != null && !DataStore.IsValidSessionId(body.SessionId))
+                    return Results.BadRequest("非法 sessionId");
+                int retried = summaryQueue.RetryFailures(body?.GameId, body?.NpcId,
+                    body?.PlayerId, body?.SessionId, AuditActor(http));
+                return Results.Accepted(value: new
+                {
+                    retried,
+                    pending = summaryQueue.PendingCount,
+                    failedCurrent = summaryQueue.CurrentFailureCount
+                });
+            });
             app.MapGet("/api/admin/memory-retention", () => JsonNet(new
             {
                 retentionDays = app.Configuration.GetValue<int?>("Memory:RetentionDays") ?? 90,
@@ -336,6 +367,8 @@ namespace AIBot.Server
                 var array = new JArray();
                 foreach (SessionState s in SessionStore.ListByGame(gid, npcId, playerId))
                 {
+                    MemorySummarySessionStatus summaryStatus = summaryQueue.GetSessionStatus(
+                        gid, s.NpcId, s.PlayerId, s.SessionId, s.Memory.EvictedCount);
                     array.Add(new JObject
                     {
                         ["sessionId"] = s.SessionId,
@@ -345,7 +378,10 @@ namespace AIBot.Server
                         ["pendingSummaryMessages"] = s.Memory.EvictedCount,
                         ["hasSummary"] = !string.IsNullOrEmpty(s.Summary),
                         ["factCount"] = s.Facts.Count,
-                        ["lastActiveUtc"] = s.LastActiveUtc
+                        ["lastActiveUtc"] = s.LastActiveUtc,
+                        ["summaryStatus"] = summaryStatus.Status,
+                        ["summaryError"] = summaryStatus.Error,
+                        ["summaryFailedUtc"] = summaryStatus.FailedUtc
                     });
                 }
                 return JsonNet(new { sessions = array });

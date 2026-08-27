@@ -21,6 +21,9 @@
 | v2.3 | 四阶段 P1 加固：动态短期窗口、摘要禁用边界、Unity/Server 后台语义、删除与摘要互斥、类别约束、必写审计及 Vue 可重复构建 |
 | v2.4 | 四阶段 P2 加固：保留期按最旧批次清理、清理预演防过期、危险操作说明对齐、Session 删除失败保留状态及前端取消处理 |
 | v2.5 | 调试台 Vue 统一：原生调试台能力迁移至 `AIBot.Web`，根路径统一跳转 `/app/#/debug/chat`，日志/统计/会话/Prompt/NPC/世界观/流式对话共用一套控制台 |
+| v2.6 | 客户端轻量化部署：Unity 运行时与 Server/Vue/MySQL 解耦，支持 Local/Server 双模式；数据库和管理控制台不进入 Unity 包，正式在线模式通过 Server 中转 |
+| v2.7 | Server 持久化升级：Dapper + MySQL 可选存储、长期记忆/Session/日志/审计表、自动建表与 JSON→MySQL 长期记忆迁移；鉴权和登录仍保持可选/关闭 |
+| v2.8 | 摘要链路收尾：失败任务明细与手动重试、会话级摘要状态、Vue 队列监控与生命周期说明 |
 
 ---
 
@@ -34,7 +37,36 @@
 | **AIBot.Server**（ASP.NET Core） | 独立运行宿主 | ✅ 全套管理 API + SSE 对话透传 + 会话/状态/日志持久化 |
 | **Unity 包（UPM）** | 游戏开发者 | ✅ 代码就绪（含 Demo 场景生成器），待 Unity 编辑器联调 |
 
-### 1.2 已实现的核心能力
+### 1.2 客户端轻量化与部署剖面
+
+Unity 游戏本体只引用 `AIBot.Core` 与 `AIBot.Unity`，不引用 ASP.NET Core、Vue、MySQL、Dapper 或管理 API。`AIBot.Server`、Vue 控制台和 MySQL 属于可选的后台基础设施，不会进入 Unity 包，也不会增加游戏构建体积。
+
+支持两种运行模式：
+
+| 模式 | 调用链 | 适用场景 | 当前状态 |
+|---|---|---|---|
+| **Local** | Unity → OpenAI 兼容 LLM | Demo、单机、离线联调、快速原型 | ✅ 当前 `UnityWebRequestBackend` 已支持 |
+| **Server** | Unity → `AIBot.Server` → LLM / 数据库 | 在线游戏、服务端统一处理长期记忆与审计 | ✅ `UnityServerBackend` 已实现；鉴权暂不强制 |
+
+两种模式对游戏上层保持相同的 `NpcAgent.ChatAsync()` 和事件契约。游戏代码不需要感知底层是直连模型还是 Server 中转；正式在线环境默认使用 Server 模式，Local 模式仅用于开发和无后台部署。
+
+推荐部署结构：
+
+```text
+Unity 游戏客户端（轻量 UPM 包）
+        │ Local：直连 LLM（仅开发）
+        │ Server：HTTP / SSE
+        ▼
+    AIBot.Server ─── JSON 或 MySQL（Dapper，可配置切换）
+        │
+        └── LLM Provider
+
+Vue 管理控制台 ─── HTTP ─── AIBot.Server
+```
+
+Unity 和 Vue 都不直接连接 MySQL；数据库账号、模型 API Key 和记忆数据只由 Server 管理。Server 默认继续使用 JSON，设置 `Storage:Provider=MySql` 后由 Dapper 访问 MySQL。对于不需要在线记忆的单机项目，可以只发布 Unity 包，不部署 Server、Vue 和数据库。
+
+### 1.3 已实现的核心能力
 
 - **开发期接入**：写一份 JSON 配置（或在管理台表单编辑）→ 挂到角色/测试台即可对话，改配置即生效
 - **供应商可切换**：已实测三种接法（见 §2），编辑器下拉一键填充 + ⚡连接测试带中文诊断
@@ -44,7 +76,7 @@
 - **记忆治理**：长期摘要和结构化事实可检查/纠正/固定/删除，支持显式迁移、保留期清理预演与变更审计
 - **持久化**：会话消息/待摘要队列/模拟状态每轮落盘，玩家长期摘要与结构化事实独立版本化保存；重启自动恢复后台摘要
 
-### 1.3 非目标（未做）
+### 1.4 非目标（未做）
 
 - ❌ WebGL/微信小游戏（架构不阻碍：换一个 ILlmBackend 即可）
 - ❌ 向量库 RAG（剧情阶段知识块平替）
@@ -198,7 +230,8 @@ public class SimGameState { stage, favorability, extras, items }           // �
 | `POST …/npcs/{id}/test-connection` | 连接测试（8-token 最小请求 → 延迟 或 中文诊断） |
 | `GET …/sessions?npcId=&playerId=`、`GET/DELETE …/sessions/{sid}?npcId=&playerId=` | 玩家会话列表/详情/清空（磁盘会话自动恢复） |
 | `GET …/memories/{npcId}/{playerId}` | 玩家长期记忆详情 |
-| `GET /api/admin/memory-summary-queue` | 后台摘要队列待处理数与失败数 |
+| `GET /api/admin/memory-summary-queue` | 后台摘要队列待处理数、累计/当前失败数与失败任务明细 |
+| `POST /api/admin/memory-summary-queue/retry` | 按游戏/NPC/玩家/Session 过滤并重新排队失败摘要任务；不传过滤条件则重试全部当前失败任务 |
 | `GET …/memories?npcId=&playerId=` | 玩家长期记忆分页筛选 |
 | `PUT …/summary`、`POST/PUT/DELETE …/facts` | 摘要与结构化事实管理（expectedVersion 冲突保护） |
 | `POST …/summarize`、`GET …/export`、`DELETE …/memories/{npcId}/{playerId}` | 手动摘要、导出与整份清空 |
@@ -211,12 +244,28 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 - **短期会话**：内存缓存 + 每会话串行锁 + `sessions/{npcId}/{playerId}/{sid}.json` 原子落盘（消息窗口/待摘要队列/模拟状态）；无 playerId 的旧客户端继续走兼容路径
 - **长期记忆**：`memories/{npcId}/{playerId}.json` 保存滚动摘要、结构化事实与 `memoryVersion`；同一玩家切换 session 后继续注入，冲突时重新加载并合并
-- **后台摘要**：`reply/done` 刷新后入有界去重队列；失败重试，长期记忆与必写审计均成功后才确认消费待摘要消息；启动扫描恢复未完成任务
+- **后台摘要**：`reply/done` 刷新后入有界去重队列；单任务最多自动重试 3 次。长期记忆与必写审计均成功后才确认消费待摘要消息；启动扫描恢复未完成任务。耗尽重试后保留失败明细（游戏/NPC/玩家/Session、错误和时间），待摘要消息仍保留，可通过管理 API 或 Vue 手动重试。
+- **摘要状态**：会话级状态为 `idle`（无待处理）、`waiting`（有待摘要但尚未排队）、`pending`（已排队/处理中）或 `failed`（自动重试耗尽）。成功确认后状态回到 `idle`。
+- **摘要生命周期**：短期消息先进入 Session 的 `evictedMessages`；达到阈值后排队；模型将已有滚动摘要、结构化事实和淘汰消息压缩为新的单段 `summary` 与多条 `facts`；数据库事务写入成功、审计成功后才从 Session 删除已摘要消息。模型失败、数据库失败或审计失败均不删除原消息，重启或手动重试可继续处理。
 - **并发删除**：玩家级任务代数与互斥锁共同保护“失效旧任务 → 删除长期记忆 → 清空全部 Session”，避免旧摘要任务把已删除记忆重新写回
 - **摘要关闭**：`summaryThreshold=0` 时 Session 丢弃窗口外消息；玩家范围仅保留最近一个短期窗口供手动摘要，不会无界增长
 - **保留期清理**：按更新时间倒序分页的末尾读取最旧批次；执行结果返回 `totalMemoryCount`、`batchLimit`、`candidateCount` 与 `hasMoreCandidates`，前端按批次继续预演
 - **清理预演一致性**：Vue 只允许执行当前 `gameId + inactiveDays` 对应的最新预演；修改任一条件后必须重新预演
 - **删除一致性**：删除长期记忆会同步清空该玩家/NPC 的 Session 消息与待摘要队列；Session 持久化删除失败时保留缓存状态并返回错误
+
+#### 6.2.1 JSON / MySQL 双存储
+
+- 默认 `Storage:Provider=Json`，保持单机零依赖和现有 JSON/JSONL 兼容行为。
+- 配置 `Storage:Provider=MySql` 与 `Storage:MySql:ConnectionString` 后，Server 使用 Dapper + MySqlConnector。
+- 当前已接入表：`player_memories`、`memory_facts`、`sessions`、`chat_logs`、`memory_audits`；NPC/World 静态配置仍由 `data/` 管理。
+- `player_memories` 使用事务和 `memoryVersion` 乐观并发；Session 消息窗口、待摘要消息和模拟状态以 JSON 文档存入数据库。
+- `player_memories.summary` 只保存一段滚动摘要，`memory_facts` 保存可独立更新的结构化事实；`sessions.has_pending_memory` 与 `payload_json.evictedMessages` 共同表示尚未确认消费的摘要批次。
+- `Storage:MySql:AutoMigrate=true` 可在本地启动时自动建表；也可直接执行 `database/mysql/schema.sql`。
+- `dotnet run -- --migrate-json --exit-after-migrate` 将指定游戏（默认 `default`）的玩家长期记忆从 JSON 幂等迁移到 MySQL。
+- 项目根目录 `docker.yml` 只负责启动 MySQL；`database/mysql/schema.sql` 会在容器首次初始化时自动执行，数据保存在 `ai_npc_mysql_data` volume。默认映射宿主机 `3306`，如果端口冲突可通过 `.env` 的 `AIBOT_MYSQL_PORT` 改为其他端口（本机示例使用 `3307`），Server 仍可在宿主机运行并连接对应的 `127.0.0.1:<port>`。
+- 当前本机联调账号为 `aibot`，密码为 `123456`。宿主机连接 Docker MySQL 时使用 `SslMode=None;AllowPublicKeyRetrieval=True`，仅用于本地开发连接；生产环境应改用 TLS 和独立强密码。
+- Windows 本地开发可运行根目录 `start-server-mysql.ps1`：脚本读取被 Git 忽略的 `.env`，幂等启动并等待 MySQL 健康，然后只为当前 Server 进程注入 MySQL 连接配置并执行 `dotnet run`。脚本不保存或输出数据库密码，`Ctrl+C` 只停止 Server，MySQL 容器和数据卷继续保留。
+- 不需要登录或强制 API Token；输入校验、SQL 参数化和 Server 端密钥隔离仍然保留。
 - **日志**：`logs/{gid}/yyyy-MM-dd.jsonl`（完整请求/回复/usage/工具/注入标记），按日轮转、保留 30 天；内存聚合统计
 - **安全**：key 优先级 NPC配置 > `AIBOT_LLM_KEY` > appsettings；管理 API 可通过 `AIBOT_ADMIN_TOKEN` 启用 Bearer 鉴权；聊天默认每 IP 60 次/分钟；配置读取接口不回传 key；ID 正则校验防路径穿越
 
@@ -246,7 +295,13 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 ## 8. Unity 适配层（代码就绪，待编辑器联调）
 
-`NpcAgent`（MonoBehaviour）：配置来源 SO 或 `data/` JSON 直读（`DevConfigStore` 自动定位）；事件 `onToken/onReasoning/onReply/onError`（UnityEvent）；摘要记忆写回注入；`Tools` 注册表供游戏注册真实工具。`UnityWebRequestBackend`：增量 UTF-8 解码 + 共享 SSE 解析器。菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。配置分发三段管线：开发期直读 data/ → 构建期拷 StreamingAssets（`BuildConfigCopier`，M3）→ 热更远端拉取（M6）。
+`NpcAgent`（MonoBehaviour）：配置来源 SO 或 `data/` JSON 直读（`DevConfigStore` 自动定位）；通过 `runtimeMode=local/server` 选择后端；事件 `onToken/onReasoning/onReply/onError`（UnityEvent）。Local 模式使用 `UnityWebRequestBackend` 和本地 AgentLoop；Server 模式使用 `UnityServerBackend` 直接调用 `/api/games/{gid}/chat/stream`，由 Server 负责 AgentLoop、长期记忆、摘要、工具和日志，避免两端重复执行。Server 请求只携带 Game/NPC/Player/Session/消息，不携带模型 API Key，也不直接访问 MySQL。菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。配置分发三段管线：开发期直读 data/ → 构建期拷 StreamingAssets（`BuildConfigCopier`，M3）→ 热更远端拉取（M6）。
+
+Unity 运行时边界：
+
+- 必需：`AIBot.Core`、`AIBot.Unity`、一个 `ILlmBackend` 实现、游戏自己的 `IGameContext` 和真实工具注册。
+- 不打包：`AIBot.Server`、`AIBot.Web`、MySQL/Dapper、管理 API、审计查询和运营页面。
+- 直连 LLM 只用于 Local 开发或明确接受客户端密钥风险的单机项目；在线发布默认禁止直连。
 
 ---
 
@@ -259,7 +314,7 @@ public class SimGameState { stage, favorability, extras, items }           // �
 | M3 配置化 + Unity 编辑器工具 | 🔶 部分 | JSON 配置/SO 互转/防注入✅；AgentChatWindow、BuildConfigCopier ⬜ |
 | M4 Server + 测试页 | ✅ 超额完成 | 端点全家桶 + 调试能力已迁移到 Vue 统一管理台 |
 | M5 Vue 管理端 | ✅ 完成 | `/app/` 部署 13 个路由，根路径统一跳转，覆盖记忆治理与全部调试能力 |
-| M6 发布期治理 | ⬜ 未开始 | 设备令牌/限流配额/远端热更/内容合规（上线前必办合规项） |
+| M6 发布期治理 | 🔶 基础链路完成 | `UnityServerBackend` 和 JSON/MySQL 可选持久化已完成；设备令牌/更细粒度限流配额/远端热更/内容合规仍待上线前治理 |
 
 ---
 

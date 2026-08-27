@@ -8,13 +8,28 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
+StorageOptions storageOptions = StorageOptions.From(builder.Configuration);
+storageOptions.Validate();
+MySqlConnectionFactory mySqlFactory = storageOptions.IsMySql
+    ? new MySqlConnectionFactory(storageOptions.MySqlConnectionString) : null;
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.IncludeFields = true;        // Core DTO 使用公共字段（SimGameState 等）
 });
-builder.Services.AddSingleton<IMemoryRepository, JsonMemoryRepository>();
+builder.Services.AddSingleton(storageOptions);
+if (storageOptions.IsMySql)
+{
+    builder.Services.AddSingleton(mySqlFactory);
+    builder.Services.AddSingleton<IMemoryRepository, MySqlMemoryRepository>();
+    builder.Services.AddSingleton<MemoryAuditService>(provider =>
+        new MemoryAuditService(provider.GetRequiredService<MySqlConnectionFactory>()));
+}
+else
+{
+    builder.Services.AddSingleton<IMemoryRepository, JsonMemoryRepository>();
+    builder.Services.AddSingleton<MemoryAuditService>();
+}
 builder.Services.AddSingleton<PlayerMemoryService>();
-builder.Services.AddSingleton<MemoryAuditService>();
 builder.Services.AddSingleton<MemorySummaryQueue>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<MemorySummaryQueue>());
 int chatRequestsPerMinute = builder.Configuration.GetValue<int?>("Security:ChatRequestsPerMinute") ?? 60;
@@ -33,6 +48,30 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+if (storageOptions.IsMySql)
+{
+    SessionStore.UseMySql(mySqlFactory);
+    ChatLogService.UseMySql(mySqlFactory);
+}
+
+if (storageOptions.IsMySql && storageOptions.AutoMigrate)
+{
+    await DatabaseMigrator.ApplyAsync(mySqlFactory, app.Lifetime.ApplicationStopping);
+}
+
+if (storageOptions.IsMySql && Array.Exists(args, value => string.Equals(value, "--migrate-json",
+    StringComparison.OrdinalIgnoreCase)))
+{
+    var source = new JsonMemoryRepository();
+    var target = new MySqlMemoryRepository(mySqlFactory);
+    var migration = await new JsonToMySqlMemoryMigrator(source, target)
+        .RunAsync(builder.Configuration["Storage:MigrationGameId"] ?? "default", app.Lifetime.ApplicationStopping);
+    Console.WriteLine("JSON→MySQL memory migration: scanned=" + migration.Scanned
+        + ", migrated=" + migration.Migrated + ", skipped=" + migration.Skipped);
+    if (Array.Exists(args, value => string.Equals(value, "--exit-after-migrate", StringComparison.OrdinalIgnoreCase)))
+        return;
+}
 
 // 可选管理鉴权：本地未配置时保持零门槛；部署时设置 AIBOT_ADMIN_TOKEN 即保护管理 API。
 string adminToken = Environment.GetEnvironmentVariable("AIBOT_ADMIN_TOKEN")
@@ -64,6 +103,7 @@ app.MapGet("/api/health", () => Microsoft.AspNetCore.Http.Results.Ok(new
 {
     ok = true,
     version = "0.3.0-m3",
+    storage = storageOptions.Provider,
     dataRoot = DataStore.FindDataRoot(),
     npcs = DataStore.ListNpcIds("default")
 }));

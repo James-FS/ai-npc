@@ -12,6 +12,8 @@
     <Compile Include="..\..\Packages\com.aibot.npcagent\Runtime\Core\**\*.cs" />
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Dapper" Version="2.1.66" />
+    <PackageReference Include="MySqlConnector" Version="2.4.0" />
   </ItemGroup>
 
 </Project>

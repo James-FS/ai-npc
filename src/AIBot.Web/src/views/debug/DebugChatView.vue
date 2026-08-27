@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { debugApi, streamChat } from '@/api/debug'
+import { ApiError } from '@/api/http'
 import { useAppStore } from '@/stores/app'
 import type { DebugChatEvent, SimGameState } from '@/types/debug'
 
@@ -19,6 +20,8 @@ const messages = ref<ChatMessage[]>([])
 const streaming = ref(false)
 const controller = ref<AbortController | null>(null)
 const compareResult = ref<{ default?: string; override?: string } | null>(null)
+const showReasoning = ref(localStorage.getItem('aibot.debug.showReasoning') === 'true')
+const restoring = ref(false)
 
 const npcId = computed(() => app.currentNpcId)
 const simState = computed<SimGameState>(() => ({ stage: stage.value, favorability: favorability.value, extras: {}, items: {} }))
@@ -26,6 +29,58 @@ const simState = computed<SimGameState>(() => ({ stage: stage.value, favorabilit
 function persist() {
   localStorage.setItem('aibot.debug.playerId', playerId.value)
   localStorage.setItem('aibot.debug.sessionId', sessionId.value)
+}
+
+function persistReasoningPreference() {
+  localStorage.setItem('aibot.debug.showReasoning', String(showReasoning.value))
+}
+
+function parseStoredReply(content: string) {
+  const text = (content || '').trim()
+  if (!text) return null
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>
+    return parsed && typeof parsed.say === 'string' ? parsed : null
+  } catch { return null }
+}
+
+function restoreMessage(item: { role: string; content: string }): ChatMessage {
+  const target: ChatMessage = {
+    role: item.role === 'user' ? 'user' : 'assistant',
+    content: item.content || '',
+  }
+  if (target.role === 'assistant') {
+    const reply = parseStoredReply(target.content)
+    if (reply) {
+      target.content = reply.say as string
+      const tags: string[] = []
+      if (typeof reply.emotion === 'string' && reply.emotion) tags.push(`情绪：${reply.emotion}`)
+      if (typeof reply.action === 'string' && reply.action) tags.push(`动作：${reply.action}`)
+      if (tags.length) target.tags = tags
+    }
+  }
+  return target
+}
+
+async function restoreSession() {
+  if (!npcId.value || !playerId.value.trim() || !sessionId.value.trim() || streaming.value) return
+  restoring.value = true
+  try {
+    const detail = await debugApi.session(app.gameId, npcId.value, playerId.value, sessionId.value)
+    messages.value = (detail.messages || [])
+      .filter(item => item.role === 'user' || item.role === 'assistant')
+      .map(restoreMessage)
+  } catch (error) {
+    // 新会话可能尚未有记录，不把它当作错误提示。
+    if (!(error instanceof ApiError && error.status === 404)) {
+      ElMessage.error(error instanceof Error ? error.message : '会话恢复失败')
+    }
+  } finally { restoring.value = false }
+}
+
+function onSessionIdentityChange() {
+  persist()
+  void restoreSession()
 }
 
 function newSession() {
@@ -38,7 +93,12 @@ function addEvent(target: ChatMessage, event: DebugChatEvent) {
   if (event.type === 'token' && event.delta) target.content += event.delta
   if (event.type === 'reasoning' && event.delta) target.reasoning = (target.reasoning || '') + event.delta
   if (event.type === 'tool_call' && event.name) (target.tags ||= []).push(`${event.name}${event.success === false ? ' · 失败' : ''}`)
-  if (event.type === 'reply' && event.say && !target.content) target.content = event.say
+  if (event.type === 'reply' && event.say) {
+    // token 事件可能包含模型生成的原始 JSON；结构化 reply 才是最终展示内容。
+    target.content = event.say
+    if (event.emotion) (target.tags ||= []).push(`情绪：${event.emotion}`)
+    if (event.action) (target.tags ||= []).push(`动作：${event.action}`)
+  }
   if (event.type === 'error') (target.tags ||= []).push(event.message || 'Server 错误')
 }
 
@@ -67,11 +127,11 @@ async function compare() {
   try {
     await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: `${sessionId.value}-ab-default`, message: text, simState: simState.value }, event => {
       if (event.type === 'token' && event.delta) compareResult.value!.default = (compareResult.value!.default || '') + event.delta
-      if (event.type === 'reply' && event.say && !compareResult.value!.default) compareResult.value!.default = event.say
+      if (event.type === 'reply' && event.say) compareResult.value!.default = event.say
     }, controller.value.signal)
     await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: `${sessionId.value}-ab-override`, message: text, simState: simState.value, override: { model: compareModel.value } }, event => {
       if (event.type === 'token' && event.delta) compareResult.value!.override = (compareResult.value!.override || '') + event.delta
-      if (event.type === 'reply' && event.say && !compareResult.value!.override) compareResult.value!.override = event.say
+      if (event.type === 'reply' && event.say) compareResult.value!.override = event.say
     }, controller.value.signal)
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : 'A/B 对比失败') }
   finally { streaming.value = false; controller.value = null }
@@ -90,7 +150,8 @@ async function exportSession() {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '导出失败') }
 }
 
-onMounted(persist)
+watch(() => [app.gameId, npcId.value], () => { void restoreSession() })
+onMounted(() => { persist(); void restoreSession() })
 </script>
 
 <template>
@@ -99,10 +160,10 @@ onMounted(persist)
   </PageHeader>
   <div class="debug-grid">
     <div class="panel chat-panel">
-      <div class="chat-log">
+      <div v-loading="restoring" class="chat-log">
         <div v-for="(item, index) in messages" :key="index" class="chat-message" :class="item.role">
           <div class="message-role">{{ item.role === 'user' ? '玩家' : 'NPC' }}</div>
-          <div v-if="item.reasoning" class="reasoning">{{ item.reasoning }}</div>
+          <div v-if="showReasoning && item.reasoning" class="reasoning">{{ item.reasoning }}</div>
           <div class="message-content">{{ item.content || (item.role === 'assistant' && streaming ? '……' : '') }}</div>
           <el-tag v-for="tag in item.tags" :key="tag" size="small" effect="plain" class="message-tag">{{ tag }}</el-tag>
         </div>
@@ -112,7 +173,7 @@ onMounted(persist)
       <div class="chat-input"><el-input v-model="message" :disabled="streaming" placeholder="对 NPC 说点什么…" @keyup.enter="send()" /><el-button v-if="streaming" type="danger" @click="stop">停止</el-button><el-button v-else type="primary" :disabled="!message.trim()" @click="send()">发送</el-button></div>
     </div>
     <div class="debug-side">
-      <div class="panel panel-body"><h3>本次会话</h3><el-form label-position="top"><el-form-item label="Player ID"><el-input v-model="playerId" @change="persist" /></el-form-item><el-form-item label="Session ID"><el-input v-model="sessionId" @change="persist" /></el-form-item><el-form-item label="剧情阶段"><el-input-number v-model="stage" :min="0" :max="999" /></el-form-item><el-form-item label="好感度"><el-input-number v-model="favorability" :min="-100" :max="100" /></el-form-item></el-form></div>
+      <div class="panel panel-body"><h3>本次会话</h3><el-form label-position="top"><el-form-item label="Player ID"><el-input v-model="playerId" @change="onSessionIdentityChange" /></el-form-item><el-form-item label="Session ID"><el-input v-model="sessionId" @change="onSessionIdentityChange" /></el-form-item><el-form-item label="剧情阶段"><el-input-number v-model="stage" :min="0" :max="999" /></el-form-item><el-form-item label="好感度"><el-input-number v-model="favorability" :min="-100" :max="100" /></el-form-item><el-form-item label="推理内容"><el-switch v-model="showReasoning" inline-prompt active-text="显示" inactive-text="隐藏" @change="persistReasoningPreference" /><div class="field-hint">仅控制调试台显示，不影响模型请求。</div></el-form-item></el-form></div>
       <div class="panel panel-body"><h3>A/B 模型对比</h3><p class="hint">当前输入会分别请求默认模型和覆盖模型，不写入主会话。</p><el-input v-model="compareModel" placeholder="覆盖模型，例如 deepseek-chat" /><el-button class="compare-button" :loading="streaming" :disabled="!message.trim() || !compareModel.trim()" @click="compare">⚔ 开始对比</el-button><div v-if="compareResult" class="compare-result"><div><b>默认模型</b><p>{{ compareResult.default || '无回复' }}</p></div><div><b>覆盖模型</b><p>{{ compareResult.override || '无回复' }}</p></div></div></div>
     </div>
   </div>
@@ -133,6 +194,7 @@ onMounted(persist)
 .chat-input .el-input { flex: 1; }
 .debug-side { display: grid; gap: 20px; align-content: start; }
 .panel-body h3 { margin: 0 0 16px; font-size: 15px; }
+.field-hint { margin-top: 6px; color: #7b879b; font-size: 12px; line-height: 1.5; }
 .hint { color: #7b879b; font-size: 12px; line-height: 1.6; }
 .compare-button { width: 100%; margin-top: 12px; }
 .compare-result { display: grid; gap: 10px; margin-top: 16px; }

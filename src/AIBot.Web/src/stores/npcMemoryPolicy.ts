@@ -3,6 +3,10 @@ import { ref } from 'vue'
 import { memoryApi } from '@/api/memory'
 import type { EffectiveMemoryPolicy, MemorySettings } from '@/types/memory'
 
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
 export const useNpcMemoryPolicyStore = defineStore('npc-memory-policy', () => {
   const settings = ref<MemorySettings | null>(null)
   const effective = ref<EffectiveMemoryPolicy | null>(null)
@@ -14,7 +18,7 @@ export const useNpcMemoryPolicyStore = defineStore('npc-memory-policy', () => {
     loading.value = true
     try {
       const result = await memoryApi.npcPolicy(gameId, npcId)
-      settings.value = structuredClone(result.npc)
+      settings.value = cloneJson(result.npc)
       effective.value = result.effective
     } finally { loading.value = false }
   }

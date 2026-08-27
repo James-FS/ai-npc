@@ -1,8 +1,8 @@
 # 记忆管理与 Vue 控制台设计方案
 
-> 文档版本：v1.4（2026-08-26）  
+> 文档版本：v1.5（2026-08-26）
 > 状态：阶段 A、B、C、D 已实施  
-> 适用范围：AIBot.Core、AIBot.Server、`AIBot.Web` Vue 管理端
+> 适用范围：AIBot.Core、Unity 运行时、AIBot.Server、`AIBot.Web` Vue 管理端
 
 ## 1. 结论
 
@@ -10,7 +10,8 @@
 
 1. **AIBot.Core**：定义统一的记忆策略、结构化事实和最终生效配置，保证 Server 与 Unity 使用相同语义。
 2. **AIBot.Server**：负责配置分层合并、安全上限、记忆持久化、迁移、管理 API 和审计。
-3. **Vue 管理端**：负责游戏级策略、NPC 覆盖、玩家记忆检查与自定义字段的可视化管理。
+3. **Unity 运行时**：只消费 Core 契约和一个 `ILlmBackend`，支持 Local 直连或 Server 中转，不直接连接数据库。
+4. **Vue 管理端**：负责游戏级策略、NPC 覆盖、玩家记忆检查与自定义字段的可视化管理。
 
 原单文件管理台的调试能力统一迁移到现有 Vue 工程；`wwwroot/index.html` 仅作为根路径跳转入口，正式控制台不再维护两套前端。
 
@@ -22,7 +23,7 @@
 - 策划可以配置 NPC 记忆偏好，但不能接触 API key、文件路径等敏感项。
 - 测试人员可以查看、纠正、删除、重新摘要玩家记忆。
 - 支持游戏自定义记忆字段，同时避免 Core DTO 无限增加游戏专属字段。
-- 保持现有 JSON 存储可用，并为未来 SQLite/PostgreSQL/Redis 留出替换接口。
+- 保持现有 JSON 存储可用，同时提供 MySQL+Dapper 替换实现；两种存储由 Server 配置切换。
 - 对现有 session JSON 做兼容迁移，不要求一次性停机转换全部数据。
 
 ## 3. 非目标
@@ -38,7 +39,7 @@
 ## 4. 总体架构
 
 ```text
-┌──────────────────────── Vue 管理端 ────────────────────────┐
+┌──────────────────────── Vue 管理端（可选后台工具） ───────┐
 │ 系统边界 │ 游戏策略 │ NPC覆盖 │ 记忆检查器 │ extensions 高级字段 │ 审计 │
 └──────────────────────────┬─────────────────────────────────┘
                            │ 管理 API
@@ -58,6 +59,20 @@
 │ MemoryPolicyResolver / MemorySummarizer / ContextBuilder    │
 └────────────────────────────────────────────────────────────┘
 ```
+
+### 客户端部署边界
+
+Unity 游戏运行时不属于 Vue 管理端，也不直接连接 MySQL。Unity 只打包 `AIBot.Core`、`AIBot.Unity` 和一个 `ILlmBackend` 实现：
+
+```text
+Local 开发模式：Unity → OpenAI 兼容 LLM
+Server 正式模式：Unity → AIBot.Server → LLM / MySQL
+Vue 管理端：Vue → AIBot.Server → MySQL
+```
+
+Local 模式用于 Demo、单机和离线联调；Server 模式用于在线游戏，负责隐藏模型 Key、统一校验游戏状态、保存玩家长期记忆、审计和限流。Vue、ASP.NET Core、MySQL、Dapper 和管理 API 都不进入 Unity 构建包。两种模式通过同一 `NpcAgent.ChatAsync()` 和事件契约切换，游戏业务层无需改写。
+
+当前 Unity 包已实现 `UnityWebRequestBackend`（Local 模式）和 `UnityServerBackend`（Server 模式）。在 `AgentConfigAsset` 或 NPC JSON 中设置 `runtimeMode=server`、`serverBaseUrl`，并在 `NpcAgent` 上填写可选的 `playerId/sessionId` 即可通过 Server 中转；鉴权暂不强制，后续可在传输层增加。
 
 ## 5. 配置分层
 
@@ -411,6 +426,8 @@ Server 玩家长期记忆默认采用后台摘要；Unity 或没有后台宿主�
 - `summaryThreshold=0` 表示关闭自动摘要：Session 范围直接丢弃窗口外消息；玩家范围保留最近一个短期窗口，供管理端手动摘要，但不会无限积累。
 - 摘要任务带玩家级 generation。删除长期记忆或保留期清理时，旧 generation 立即失效，并在同一玩家互斥区间完成长期文件删除和全部关联 Session 清理。
 - 后台摘要只有在长期记忆、必写审计和 Session 确认落盘均成功后，才会移除待摘要消息；任一步失败都会保留批次等待重试。
+- 单个后台任务自动重试 3 次；耗尽后记录游戏/NPC/玩家/Session、错误和时间，状态为 `failed`。失败批次仍保存在 `evictedMessages` 中，可通过管理 API 或 Vue 重新排队。
+- 会话摘要状态统一为 `idle`、`waiting`、`pending`、`failed`，用于管理台展示和人工判断。
 
 ### 9.3 存储接口
 
@@ -424,7 +441,15 @@ public interface IMemoryRepository
 }
 ```
 
-第一版仍使用 JSON，并采用逐文件信号量、乐观版本检查、临时文件 + 原子替换，避免并发覆盖或进程中断产生半个 JSON 文件。Session 由 `SessionStore` 独立管理，不与长期记忆仓储耦合。
+JSON 仍是默认开发存储，并采用逐文件信号量、乐观版本检查、临时文件 + 原子替换。MySQL 模式使用 Dapper、InnoDB 事务和 `memoryVersion` 乐观锁；长期记忆、Session、聊天日志和审计分别落到数据库表，Server API 契约保持不变。Session 由 `SessionStore` 独立管理，不与长期记忆仓储耦合。
+
+当前 MySQL 表结构位于 `database/mysql/schema.sql`，Server 也支持 `Storage:MySql:AutoMigrate=true` 自动建表。现有 JSON 长期记忆可通过 `dotnet run -- --migrate-json --exit-after-migrate` 幂等迁移；鉴权/登录不作为本阶段前置条件。
+
+开发环境可直接执行项目根目录的 `docker compose -f docker.yml up -d mysql` 启动 MySQL。该 Compose 文件只包含数据库服务，不会把 Unity、Vue 或 Server 打包进容器。默认使用宿主机 `3306`；若被其他 MySQL 占用，可在 `.env` 设置 `AIBOT_MYSQL_PORT`（本机示例为 `3307`），Server 连接宿主机映射端口，容器内部仍使用 `mysql:3306`。
+
+本机联调示例账号为 `aibot` / `123456`。宿主机 Server 的连接串需要包含 `SslMode=None;AllowPublicKeyRetrieval=True` 以兼容本地 Docker MySQL 的 `caching_sha2_password`；线上部署应使用 TLS 与独立强密码。
+
+Windows 本地开发可从项目根目录执行 `.\start-server-mysql.ps1`。该脚本读取 `.env` 中的数据库名、账号、密码和映射端口，确保 MySQL 容器健康后为当前 AIBot.Server 进程生成连接串；不需要永久写入 Windows 用户环境变量。
 
 ### 9.4 管理 API
 
@@ -481,10 +506,19 @@ POST /api/games/{gid}/sessions/{sid}/migrate-memory?npcId=&playerId=
 GET /api/games/{gid}/memory-audit?npcId=&playerId=&date=
 ```
 
-所有写接口沿用管理 Bearer 鉴权，并记录操作前后差异。API key 始终不回传。
+所有写接口记录操作前后差异。管理 Bearer 鉴权保持可选，当前本地默认关闭；API key 始终不回传。
 管理端可通过 `X-AIBot-Actor` 标记操作人；未提供时使用管理端 IP 作为兼容身份。
 
 人工修改、删除、迁移、策略变更和后台摘要使用 `RecordRequired`：短暂 I/O 故障最多重试三次，最终失败时管理 API 返回 HTTP 503；后台任务不确认消费待摘要批次。
+
+#### 摘要队列
+
+```text
+GET  /api/admin/memory-summary-queue
+POST /api/admin/memory-summary-queue/retry
+```
+
+查询接口返回 `pending`、`failedCurrent`、`failedTotal` 和 `failures` 明细。重试接口可传入 `gameId`、`npcId`、`playerId`、`sessionId` 进行过滤；空对象表示重试全部当前失败任务。会话列表额外返回 `summaryStatus`、`summaryError` 与 `summaryFailedUtc`。
 
 #### 保留期清理
 
@@ -544,6 +578,8 @@ src/AIBot.Web/
 - 最大事实数。
 - 保留天数。
 - 摘要队列长度、并发数和失败数。
+- 当前失败任务明细、错误时间和一键重试。
+- 记忆检查器显示每个关联 Session 的摘要状态；失败时可针对单个 Session 重试。
 - 原始消息持久化是否允许。
 
 #### Game 记忆策略
@@ -738,7 +774,7 @@ memory.audit
 
 - 引入 playerId。
 - 拆分 session 短期记忆与 player/NPC 长期记忆。
-- 实现 `IMemoryRepository` 和 JSON 版本。
+- 实现 `IMemoryRepository`、JSON 版本和 MySQL/Dapper 版本。
 - 实现后台摘要队列、版本控制和失败重试。
 - 实现旧数据懒迁移。
 
@@ -750,6 +786,7 @@ memory.audit
 - 长期记忆采用 `memories/{npcId}/{playerId}.json`，带 `schemaVersion` 与乐观 `memoryVersion`。
 - `MemorySummaryQueue` 在 `reply/done` 刷新后投递，使用有界 Channel、任务去重、三次失败重试和启动恢复扫描。
 - 只有长期记忆提交和审计写入都成功后才消费 session 的待摘要消息；失败与进程重启均保留原始批次。
+- 失败任务在队列中保留可查询明细；管理端可按范围重新排队，成功后清除失败记录。会话列表返回 `idle/waiting/pending/failed` 状态，Vue 记忆检查器提供全局和会话级重试入口。
 - 后台处理使用玩家级任务代数和互斥锁；清空记忆时旧任务先失效，再在同一独占区间删除长期文件并清理全部 Session，避免并发摘要复活数据。
 - `summaryThreshold=0` 统一表示关闭自动摘要：Session 范围丢弃窗口外消息，玩家范围仅保留最近一个短期窗口供手动摘要。
 - v1 session 的摘要和字符串事实按需幂等迁移，成功后写 v2 玩家会话并归档旧文件。
@@ -759,7 +796,7 @@ memory.audit
 
 - 实现策略、记忆检查、事实编辑、重新摘要和审计 API。
 - 增加导出、清空与数据保留接口。
-- 完成鉴权、参数校验和敏感字段过滤。
+- 完成参数校验和敏感字段过滤；管理 API 鉴权保持可选，当前本地默认关闭。
 
 实现补充：
 
@@ -809,6 +846,14 @@ memory.audit
 - Session 持久化文件删除失败时保留内存状态并返回明确错误，避免 API 误报成功后重启复活。
 - 前端预设和清理确认取消均被正常吞掉，不再产生未处理 Promise rejection。
 - 回归结果：xUnit 68/68、Server 0 warning/0 error、Vue 强制全量类型检查和生产构建通过。
+
+### 摘要稳定性收尾（✅ 2026-08-27 已完成）
+
+- 摘要任务耗尽 3 次自动重试后记录失败明细，原始 `evictedMessages` 保留不删除。
+- 新增摘要队列查询与失败重试 API，支持按 Game/NPC/Player/Session 过滤。
+- 会话列表返回 `idle`、`waiting`、`pending`、`failed` 状态及最近失败原因。
+- Vue 记忆检查器增加队列概览、当前/累计失败统计、失败提示和全局/会话级重试入口。
+- 验收重点：摘要写入、审计写入、Session 确认落盘三者全部成功后才消费待摘要消息；服务重启和重试均保持幂等。
 
 验证命令：
 

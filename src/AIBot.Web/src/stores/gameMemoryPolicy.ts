@@ -3,6 +3,10 @@ import { ref } from 'vue'
 import { memoryApi } from '@/api/memory'
 import type { EffectiveMemoryPolicy, MemoryPolicy, MemoryPolicyLimits } from '@/types/memory'
 
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
 export const useGameMemoryPolicyStore = defineStore('game-memory-policy', () => {
   const policy = ref<MemoryPolicy | null>(null)
   const limits = ref<MemoryPolicyLimits | null>(null)
@@ -14,7 +18,7 @@ export const useGameMemoryPolicyStore = defineStore('game-memory-policy', () => 
     loading.value = true
     try {
       const result = await memoryApi.gamePolicy(gameId)
-      policy.value = structuredClone(result.policy)
+      policy.value = cloneJson(result.policy)
       limits.value = result.limits
       effective.value = null
     } finally { loading.value = false }
@@ -25,7 +29,7 @@ export const useGameMemoryPolicyStore = defineStore('game-memory-policy', () => 
     saving.value = true
     try {
       effective.value = await memoryApi.saveGamePolicy(gameId, policy.value)
-      policy.value = structuredClone(effective.value.policy)
+      policy.value = cloneJson(effective.value.policy)
     } finally { saving.value = false }
   }
 

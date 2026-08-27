@@ -3,6 +3,7 @@ import type {
   EffectiveMemoryPolicy, MemoryAuditEntry, MemoryFact, MemoryListPage,
   MemoryPolicy, MemoryPolicyLimits, MemorySettings, MigrationCandidate,
   PlayerLongTermMemory, SessionSummary,
+  MemorySummaryQueueState,
 } from '@/types/memory'
 
 const enc = encodeURIComponent
@@ -10,7 +11,8 @@ const gamePath = (gameId: string, path: string) => `/api/games/${enc(gameId)}${p
 
 export const memoryApi = {
   limits: () => request<MemoryPolicyLimits>('/api/admin/memory-limits'),
-  queue: () => request<{ pending: number; failed: number }>('/api/admin/memory-summary-queue'),
+  queue: () => request<MemorySummaryQueueState>('/api/admin/memory-summary-queue'),
+  retrySummaryQueue: (filter?: { gameId?: string; npcId?: string; playerId?: string; sessionId?: string }) => request<{ retried: number; pending: number; failedCurrent: number }>('/api/admin/memory-summary-queue/retry', { method: 'POST', body: JSON.stringify(filter ?? {}) }),
   retention: () => request<{ retentionDays: number; scope: string; clearsRelatedSessions: boolean }>('/api/admin/memory-retention'),
   npcIds: (gameId: string) => request<{ gameId: string; npcs: string[] }>(gamePath(gameId, '/npcs')),
   gamePolicy: (gameId: string) => request<{ exists: boolean; policy: MemoryPolicy; limits: MemoryPolicyLimits }>(gamePath(gameId, '/memory-policy')),

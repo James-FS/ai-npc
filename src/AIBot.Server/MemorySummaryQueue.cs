@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ using AIBot.Core.Logging;
 using AIBot.Core.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace AIBot.Server
@@ -26,6 +28,31 @@ namespace AIBot.Server
         public long Generation;
     }
 
+    public sealed class MemorySummaryFailure
+    {
+        [JsonProperty("gameId")]
+        public string GameId;
+        [JsonProperty("npcId")]
+        public string NpcId;
+        [JsonProperty("playerId")]
+        public string PlayerId;
+        [JsonProperty("sessionId")]
+        public string SessionId;
+        [JsonProperty("attempts")]
+        public int Attempts;
+        [JsonProperty("error")]
+        public string Error;
+        [JsonProperty("failedUtc")]
+        public DateTime FailedUtc;
+    }
+
+    public sealed class MemorySummarySessionStatus
+    {
+        public string Status;
+        public string Error;
+        public DateTime? FailedUtc;
+    }
+
     /// <summary>有界、去重的后台摘要服务；成功写长期记忆后才确认消费待摘要消息。</summary>
     public sealed class MemorySummaryQueue : BackgroundService
     {
@@ -36,6 +63,8 @@ namespace AIBot.Server
             new ConcurrentDictionary<string, long>();
         private readonly ConcurrentDictionary<string, SemaphoreSlim> _playerGates =
             new ConcurrentDictionary<string, SemaphoreSlim>();
+        private readonly ConcurrentDictionary<string, MemorySummaryFailure> _failures =
+            new ConcurrentDictionary<string, MemorySummaryFailure>();
         private readonly PlayerMemoryService _memoryService;
         private readonly IConfiguration _configuration;
         private readonly MemoryAuditService _audit;
@@ -59,6 +88,54 @@ namespace AIBot.Server
 
         public int PendingCount { get { return _scheduled.Count; } }
         public long FailedJobs { get { return Interlocked.Read(ref _failedJobs); } }
+        public int CurrentFailureCount { get { return _failures.Count; } }
+
+        public List<MemorySummaryFailure> FailureSnapshot()
+        {
+            return _failures.Values.OrderByDescending(x => x.FailedUtc).ToList();
+        }
+
+        public MemorySummarySessionStatus GetSessionStatus(string gameId, string npcId,
+            string playerId, string sessionId, int pendingMessages)
+        {
+            string key = CurrentKey(gameId, npcId, playerId, sessionId);
+            if (_scheduled.ContainsKey(key))
+                return new MemorySummarySessionStatus { Status = "pending" };
+            if (_failures.TryGetValue(key, out MemorySummaryFailure failure))
+            {
+                return new MemorySummarySessionStatus
+                {
+                    Status = "failed",
+                    Error = failure.Error,
+                    FailedUtc = failure.FailedUtc
+                };
+            }
+            return new MemorySummarySessionStatus
+            {
+                Status = pendingMessages > 0 ? "waiting" : "idle"
+            };
+        }
+
+        public int RetryFailures(string gameId, string npcId, string playerId, string sessionId,
+            string actor)
+        {
+            int accepted = 0;
+            foreach (KeyValuePair<string, MemorySummaryFailure> pair in _failures.ToArray())
+            {
+                MemorySummaryFailure failure = pair.Value;
+                if (gameId != null && failure.GameId != gameId) continue;
+                if (npcId != null && failure.NpcId != npcId) continue;
+                if (playerId != null && failure.PlayerId != playerId) continue;
+                if (sessionId != null && failure.SessionId != sessionId) continue;
+                if (EnqueueInternal(failure.GameId, failure.NpcId, failure.PlayerId,
+                    failure.SessionId, true, actor))
+                {
+                    _failures.TryRemove(pair.Key, out _);
+                    accepted++;
+                }
+            }
+            return accepted;
+        }
 
         public bool Enqueue(string gameId, string npcId, string playerId, string sessionId)
         {
@@ -81,6 +158,11 @@ namespace AIBot.Server
             {
                 if (key.StartsWith(scheduledPrefix, StringComparison.Ordinal))
                     _scheduled.TryRemove(key, out _);
+            }
+            foreach (string key in _failures.Keys)
+            {
+                if (key.StartsWith(scheduledPrefix, StringComparison.Ordinal))
+                    _failures.TryRemove(key, out _);
             }
         }
 
@@ -153,8 +235,22 @@ namespace AIBot.Server
                     if (last != null)
                     {
                         Interlocked.Increment(ref _failedJobs);
+                        _failures[key] = new MemorySummaryFailure
+                        {
+                            GameId = job.GameId,
+                            NpcId = job.NpcId,
+                            PlayerId = job.PlayerId,
+                            SessionId = job.SessionId,
+                            Attempts = 3,
+                            Error = SafeError(last),
+                            FailedUtc = DateTime.UtcNow
+                        };
                         _log.Log(LogLevel.Warning, "后台记忆摘要重试耗尽，待摘要消息仍保留: " + key
                             + " - " + last.Message);
+                    }
+                    else
+                    {
+                        _failures.TryRemove(key, out _);
                     }
                 }
                 finally
@@ -270,6 +366,19 @@ namespace AIBot.Server
             // generation 必须属于去重键；旧任务结束时不能误删删除后新一代任务的 scheduled 标记。
             return PlayerKey(job.GameId, job.NpcId, job.PlayerId) + "|" + job.SessionId
                 + "|g" + job.Generation;
+        }
+
+        private string CurrentKey(string gameId, string npcId, string playerId, string sessionId)
+        {
+            return PlayerKey(gameId, npcId, playerId) + "|" + sessionId
+                + "|g" + CurrentGeneration(gameId, npcId, playerId);
+        }
+
+        private static string SafeError(Exception error)
+        {
+            string message = error?.Message ?? "unknown error";
+            message = message.Replace("\r", " ").Replace("\n", " ").Trim();
+            return message.Length <= 500 ? message : message.Substring(0, 500);
         }
 
         private long CurrentGeneration(string gameId, string npcId, string playerId)

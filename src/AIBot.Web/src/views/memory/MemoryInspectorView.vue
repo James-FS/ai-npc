@@ -32,6 +32,20 @@ async function search(reset = false) {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '记忆列表加载失败') }
 }
 
+async function refreshQueue() {
+  try { await store.loadQueue() }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '摘要队列状态加载失败') }
+}
+
+async function retryFailedSummaries() {
+  try {
+    const result = await memoryApi.retrySummaryQueue()
+    ElMessage.success(result.retried > 0 ? `已重新排队 ${result.retried} 个失败任务` : '当前没有可重试的失败任务')
+    await refreshQueue()
+    if (store.detail) await openDetail(store.detail.npcId, store.detail.playerId)
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '摘要重试失败') }
+}
+
 async function openDetail(npcId: string, playerId: string) {
   try {
     await store.open(app.gameId, npcId, playerId)
@@ -108,6 +122,7 @@ async function summarize(sessionId: string) {
   try {
     const result = await memoryApi.summarize(app.gameId, store.detail.npcId, store.detail.playerId, sessionId)
     ElMessage.success(`摘要任务已排队，待处理 ${result.pendingMessages} 条消息`)
+    await openDetail(store.detail.npcId, store.detail.playerId)
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '摘要任务提交失败') }
 }
 
@@ -132,14 +147,23 @@ async function deleteMemory() {
   }
 }
 
-watch(() => app.gameId, () => search(true))
-onMounted(() => search(true))
+watch(() => app.gameId, async () => { await search(true); await refreshQueue() })
+onMounted(async () => { await search(true); await refreshQueue() })
 </script>
 
 <template>
   <PageHeader title="玩家记忆检查器" description="按 NPC 与 playerId 查看、纠正和删除长期摘要及结构化事实；所有人工写操作使用版本控制并记录审计。">
     <el-button :loading="store.loading" @click="search()">刷新</el-button>
+    <el-button :loading="store.queueLoading" @click="refreshQueue">刷新队列</el-button>
+    <el-button type="warning" plain :disabled="store.queue.failedCurrent < 1" @click="retryFailedSummaries">重试失败任务</el-button>
   </PageHeader>
+
+  <div class="queue-strip">
+    <span class="queue-label">摘要队列</span>
+    <el-tag type="info" effect="plain">待处理 {{ store.queue.pending }}</el-tag>
+    <el-tag :type="store.queue.failedCurrent > 0 ? 'danger' : 'success'" effect="plain">当前失败 {{ store.queue.failedCurrent }}</el-tag>
+    <span class="queue-note">累计失败 {{ store.queue.failedTotal }}；失败不会删除待摘要消息</span>
+  </div>
 
   <div class="panel">
     <div class="filter-bar">
@@ -188,8 +212,9 @@ onMounted(() => search(true))
           <el-table-column prop="sessionId" label="Session ID" min-width="220" />
           <el-table-column prop="messageCount" label="窗口消息" width="100" align="center" />
           <el-table-column prop="pendingSummaryMessages" label="待摘要" width="100" align="center" />
+          <el-table-column label="摘要状态" width="110" align="center"><template #default="scope"><el-tooltip v-if="scope.row.summaryError" :content="scope.row.summaryError" placement="top"><el-tag :type="scope.row.summaryStatus === 'failed' ? 'danger' : scope.row.summaryStatus === 'pending' ? 'warning' : 'info'" effect="plain">{{ scope.row.summaryStatus === 'failed' ? '失败' : scope.row.summaryStatus === 'pending' ? '处理中' : scope.row.summaryStatus === 'waiting' ? '待触发' : '空闲' }}</el-tag></el-tooltip><el-tag v-else :type="scope.row.summaryStatus === 'failed' ? 'danger' : scope.row.summaryStatus === 'pending' ? 'warning' : 'info'" effect="plain">{{ scope.row.summaryStatus === 'failed' ? '失败' : scope.row.summaryStatus === 'pending' ? '处理中' : scope.row.summaryStatus === 'waiting' ? '待触发' : '空闲' }}</el-tag></template></el-table-column>
           <el-table-column label="最后活跃" min-width="180"><template #default="scope">{{ formatDate(scope.row.lastActiveUtc) }}</template></el-table-column>
-          <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="primary" :disabled="scope.row.pendingSummaryMessages < 1" @click="summarize(scope.row.sessionId)">立即摘要</el-button></template></el-table-column>
+          <el-table-column label="操作" width="120"><template #default="scope"><el-button link type="primary" :disabled="scope.row.pendingSummaryMessages < 1 || scope.row.summaryStatus === 'pending'" @click="summarize(scope.row.sessionId)">{{ scope.row.summaryStatus === 'failed' ? '重试摘要' : '立即摘要' }}</el-button></template></el-table-column>
           <template #empty><div class="empty-state">暂无关联 Session</div></template>
         </el-table>
       </div>
@@ -209,6 +234,9 @@ onMounted(() => search(true))
 
 <style scoped>
 .filter-count { margin-left: auto; color: #7b879a; font-size: 12px; }
+.queue-strip { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 11px 14px; border: 1px solid #e8edf5; border-radius: 8px; background: #fbfcfe; color: #66748b; font-size: 12px; }
+.queue-label { color: #35445d; font-weight: 600; }
+.queue-note { margin-left: auto; color: #8994a7; }
 .pagination { display: flex; justify-content: flex-end; padding: 16px 18px; border-top: 1px solid #edf0f5; }
 .detail-stack { display: grid; gap: 18px; }
 .detail-toolbar { display: flex; align-items: center; gap: 12px; color: #748096; font-size: 12px; }

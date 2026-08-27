@@ -2,6 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import { memoryApi } from '@/api/memory'
 import { useAppStore } from '@/stores/app'
 import { useMemoryLimitsStore } from '@/stores/memoryLimits'
 
@@ -13,6 +14,14 @@ const retentionScopeLabel = computed(() => store.retention.clearsRelatedSessions
 
 async function load() {
   try { await store.load() } catch (error) { ElMessage.error(error instanceof Error ? error.message : '系统边界加载失败') }
+}
+
+async function retryFailed() {
+  try {
+    const result = await memoryApi.retrySummaryQueue()
+    ElMessage.success(result.retried > 0 ? `已重新排队 ${result.retried} 个失败任务` : '当前没有可重试的失败任务')
+    await load()
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '摘要重试失败') }
 }
 
 onMounted(load)
@@ -38,7 +47,8 @@ onMounted(load)
         <div><span>支持的摘要触发器</span><span><el-tag v-for="item in store.limits?.supportedSummaryTriggers" :key="item" class="tag-gap" effect="plain">{{ item }}</el-tag></span></div>
         <div><span>支持的记忆范围</span><span><el-tag v-for="item in store.limits?.supportedMemoryScopes" :key="item" class="tag-gap" effect="plain">{{ item }}</el-tag></span></div>
         <div><span>摘要队列等待任务</span><strong>{{ store.queue.pending }}</strong></div>
-        <div><span>摘要失败累计</span><strong :class="{ danger: store.queue.failed > 0 }">{{ store.queue.failed }}</strong></div>
+        <div><span>摘要当前失败</span><strong :class="{ danger: store.queue.failedCurrent > 0 }">{{ store.queue.failedCurrent }}</strong></div>
+        <div><span>摘要失败累计</span><strong :class="{ danger: store.queue.failedTotal > 0 }">{{ store.queue.failedTotal }}</strong><el-button size="small" type="warning" plain :disabled="store.queue.failedCurrent < 1" @click="retryFailed">重试失败任务</el-button></div>
       </div>
     </div>
 

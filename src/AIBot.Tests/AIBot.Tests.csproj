@@ -16,11 +16,15 @@
     <Compile Include="..\AIBot.Server\MemoryAuditService.cs" Link="Server\MemoryAuditService.cs" />
     <Compile Include="..\AIBot.Server\PlayerMemoryService.cs" Link="Server\PlayerMemoryService.cs" />
     <Compile Include="..\AIBot.Server\SessionStore.cs" Link="Server\SessionStore.cs" />
+    <Compile Include="..\AIBot.Server\MySqlConnectionFactory.cs" Link="Server\MySqlConnectionFactory.cs" />
+    <Compile Include="..\AIBot.Server\MySqlSessionPersistence.cs" Link="Server\MySqlSessionPersistence.cs" />
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
     <PackageReference Include="xunit" Version="2.7.0" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.5.7" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Dapper" Version="2.1.66" />
+    <PackageReference Include="MySqlConnector" Version="2.4.0" />
   </ItemGroup>
 
 </Project>

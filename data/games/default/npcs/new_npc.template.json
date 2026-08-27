@@ -47,5 +47,7 @@
     "emotions": ["neutral", "happy", "angry", "sad", "surprised"],
     "actions": ["idle", "wave", "point", "offer"]
   },
-  "configVersion": 1
+  "configVersion": 1,
+  "runtimeMode": "local",
+  "serverBaseUrl": "http://127.0.0.1:5000"
 }

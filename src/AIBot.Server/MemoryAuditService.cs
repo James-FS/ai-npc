@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Data;
 using AIBot.Core.Logging;
+using Dapper;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -34,13 +36,21 @@ namespace AIBot.Server
     {
         private static readonly object FileLock = new object();
         private readonly Func<string> _dataRoot;
+        private readonly MySqlConnectionFactory _mysql;
         private readonly ILogSink _log = new ConsoleLogSink();
 
-        public MemoryAuditService() : this(DataStore.FindDataRoot) { }
+        public MemoryAuditService() : this(DataStore.FindDataRoot, null) { }
+
+        public MemoryAuditService(MySqlConnectionFactory mysql) : this(null, mysql) { }
 
         public MemoryAuditService(Func<string> dataRoot)
+            : this(dataRoot, null) { }
+
+        private MemoryAuditService(Func<string> dataRoot, MySqlConnectionFactory mysql)
         {
-            _dataRoot = dataRoot ?? throw new ArgumentNullException(nameof(dataRoot));
+            if (dataRoot == null && mysql == null) throw new ArgumentNullException(nameof(dataRoot));
+            _dataRoot = dataRoot;
+            _mysql = mysql;
         }
 
         public bool Record(MemoryAuditEntry entry)
@@ -88,6 +98,11 @@ namespace AIBot.Server
             entry.id = string.IsNullOrEmpty(entry.id) ? "audit-" + Guid.NewGuid().ToString("N") : entry.id;
             entry.ts = string.IsNullOrEmpty(entry.ts) ? DateTime.UtcNow.ToString("o") : entry.ts;
             entry.actor = string.IsNullOrWhiteSpace(entry.actor) ? "admin" : entry.actor;
+            if (_mysql != null)
+            {
+                WriteMySql(entry);
+                return;
+            }
             string dir = AuditDirectory(entry.gameId);
             if (dir == null) throw new IOException("data/ 根目录未找到");
             DateTimeOffset stamp;
@@ -119,6 +134,7 @@ namespace AIBot.Server
         {
             DateTime day;
             if (string.IsNullOrWhiteSpace(date) || !DateTime.TryParse(date, out day)) day = DateTime.UtcNow;
+            if (_mysql != null) return QueryMySql(gameId, npcId, playerId, action, day, limit, offset);
             string dir = AuditDirectory(gameId);
             string file = dir == null ? null : Path.Combine(dir, day.ToString("yyyy-MM-dd") + ".jsonl");
             var matches = new List<JObject>();
@@ -156,6 +172,97 @@ namespace AIBot.Server
             if (!DataStore.IsValidId(gameId)) return null;
             string root = _dataRoot();
             return root == null ? null : Path.Combine(root, "logs", gameId, "memory-audit");
+        }
+
+        private void WriteMySql(MemoryAuditEntry entry)
+        {
+            using (IDbConnection connection = _mysql.OpenConnection())
+            {
+                if (connection.ExecuteScalar<int>("SELECT COUNT(*) FROM memory_audits WHERE id=@Id",
+                    new { Id = entry.id }) > 0) return;
+                connection.Execute(@"
+INSERT INTO memory_audits
+ (id,ts,game_id,npc_id,player_id,actor,action,before_json,after_json,metadata_json)
+VALUES (@Id,@Ts,@GameId,@NpcId,@PlayerId,@Actor,@Action,@Before,@After,@Metadata)", new
+                {
+                    Id = entry.id, Ts = ParseUtc(entry.ts), GameId = entry.gameId, NpcId = entry.npcId,
+                    PlayerId = entry.playerId, Actor = entry.actor, Action = entry.action,
+                    Before = entry.before?.ToString(Formatting.None), After = entry.after?.ToString(Formatting.None),
+                    Metadata = entry.metadata?.ToString(Formatting.None)
+                });
+            }
+        }
+
+        private JObject QueryMySql(string gameId, string npcId, string playerId, string action,
+            DateTime day, int limit, int offset)
+        {
+            var parameters = new
+            {
+                GameId = gameId, NpcId = npcId, PlayerId = playerId, Action = action,
+                StartUtc = day.Date.ToUniversalTime(), EndUtc = day.Date.AddDays(1).ToUniversalTime(),
+                Limit = Math.Max(1, Math.Min(200, limit)), Offset = Math.Max(0, offset)
+            };
+            using (IDbConnection connection = _mysql.OpenConnection())
+            {
+                string where = @"game_id=@GameId AND ts>=@StartUtc AND ts<@EndUtc
+ AND (@NpcId IS NULL OR npc_id=@NpcId) AND (@PlayerId IS NULL OR player_id=@PlayerId)
+ AND (@Action IS NULL OR action=@Action)";
+                int total = connection.ExecuteScalar<int>("SELECT COUNT(*) FROM memory_audits WHERE " + where, parameters);
+                IEnumerable<AuditRow> rows = connection.Query<AuditRow>(@"
+SELECT id AS Id, ts AS Ts, game_id AS GameId, npc_id AS NpcId, player_id AS PlayerId,
+ actor AS Actor, action AS Action, before_json AS BeforeJson, after_json AS AfterJson, metadata_json AS MetadataJson
+FROM memory_audits WHERE " + where + " ORDER BY ts DESC LIMIT @Limit OFFSET @Offset", parameters);
+                return new JObject
+                {
+                    ["date"] = day.ToString("yyyy-MM-dd"), ["total"] = total,
+                    ["limit"] = parameters.Limit, ["offset"] = parameters.Offset,
+                    ["items"] = new JArray(rows.Select(ToJson))
+                };
+            }
+        }
+
+        private static DateTime ParseUtc(string value)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.RoundtripKind, out parsed)
+                ? parsed.ToUniversalTime() : DateTime.UtcNow;
+        }
+
+        private static JObject ToJson(AuditRow row)
+        {
+            return new JObject
+            {
+                ["id"] = row.Id, ["ts"] = row.Ts, ["gameId"] = row.GameId,
+                ["npcId"] = row.NpcId, ["playerId"] = row.PlayerId, ["actor"] = row.Actor,
+                ["action"] = row.Action, ["before"] = ParseToken(row.BeforeJson),
+                ["after"] = ParseToken(row.AfterJson), ["metadata"] = ParseObject(row.MetadataJson)
+            };
+        }
+
+        private static JToken ParseToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return JValue.CreateNull();
+            try { return JToken.Parse(value); } catch { return new JValue(value); }
+        }
+
+        private static JObject ParseObject(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            try { return JObject.Parse(value); } catch { return new JObject { ["raw"] = value }; }
+        }
+
+        private sealed class AuditRow
+        {
+            public string Id { get; set; }
+            public DateTime Ts { get; set; }
+            public string GameId { get; set; }
+            public string NpcId { get; set; }
+            public string PlayerId { get; set; }
+            public string Actor { get; set; }
+            public string Action { get; set; }
+            public string BeforeJson { get; set; }
+            public string AfterJson { get; set; }
+            public string MetadataJson { get; set; }
         }
     }
 }

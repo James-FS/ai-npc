@@ -107,6 +107,27 @@ export interface SessionSummary {
   hasSummary: boolean
   factCount: number
   lastActiveUtc: string
+  summaryStatus?: 'idle' | 'waiting' | 'pending' | 'failed' | string
+  summaryError?: string | null
+  summaryFailedUtc?: string | null
+}
+
+export interface MemorySummaryFailure {
+  gameId: string
+  npcId: string
+  playerId: string
+  sessionId: string
+  attempts: number
+  error: string
+  failedUtc: string
+}
+
+export interface MemorySummaryQueueState {
+  pending: number
+  failed: number
+  failedCurrent: number
+  failedTotal: number
+  failures: MemorySummaryFailure[]
 }
 
 export interface MigrationCandidate {

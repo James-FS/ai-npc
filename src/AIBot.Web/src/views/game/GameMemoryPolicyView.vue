@@ -28,7 +28,7 @@ async function applyPreset(name: string) {
   if (!policy.value) return
   try {
     await ElMessageBox.confirm(`将“${name}”预设应用到当前表单？保存前仍可调整。`, '应用预设', { type: 'info' })
-    policy.value = { ...structuredClone(policy.value), ...presets[name] }
+    policy.value = { ...JSON.parse(JSON.stringify(policy.value)), ...presets[name] }
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error instanceof Error ? error.message : '预设应用失败')
