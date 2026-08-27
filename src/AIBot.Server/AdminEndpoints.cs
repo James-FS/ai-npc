@@ -77,6 +77,7 @@ namespace AIBot.Server
             PlayerMemoryService playerMemories = app.Services.GetRequiredService<PlayerMemoryService>();
             MemorySummaryQueue summaryQueue = app.Services.GetRequiredService<MemorySummaryQueue>();
             MemoryAuditService audit = app.Services.GetRequiredService<MemoryAuditService>();
+            RuntimeLogService runtimeLogs = app.Services.GetRequiredService<RuntimeLogService>();
 
             app.MapGet("/api/admin/memory-limits", () =>
                 JsonNet(MemoryPolicyService.LoadLimits(app.Configuration)));
@@ -88,6 +89,11 @@ namespace AIBot.Server
                 failedTotal = summaryQueue.FailedJobs,
                 failures = summaryQueue.FailureSnapshot()
             }));
+            app.MapGet("/api/admin/runtime-logs", (string date, string level, string category,
+                string requestId, int? limit, int? offset) => JsonNet(runtimeLogs.Query(
+                    date, level, category, requestId,
+                    limit.HasValue && limit > 0 && limit <= 200 ? limit.Value : 50,
+                    offset.HasValue && offset > 0 ? offset.Value : 0)));
             app.MapPost("/api/admin/memory-summary-queue/retry",
                 (RetryMemorySummaryRequest body, HttpContext http) =>
             {
@@ -807,10 +813,14 @@ namespace AIBot.Server
                 catch (Exception ex)
                 {
                     sw.Stop();
+                    ModelErrorInfo info = ModelErrorContract.Classify(ex);
                     return JsonNet(new JObject
                     {
                         ["ok"] = false,
-                        ["error"] = ex.Message,
+                        ["error"] = info.Message,
+                        ["code"] = info.Code,
+                        ["status"] = info.Status,
+                        ["retryable"] = info.Retryable,
                         ["diagnosis"] = ModelDiagnostics.Diagnose(ex),
                         ["endpoint"] = settings.baseUrl,
                         ["model"] = settings.model

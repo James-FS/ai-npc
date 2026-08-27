@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
@@ -31,8 +32,34 @@ namespace AIBot.Server
             }
             using (var connection = factory.OpenConnection())
             {
-                foreach (string statement in MySqlSchema.Statements)
-                    await connection.ExecuteAsync(new CommandDefinition(statement, cancellationToken: ct));
+                await connection.ExecuteAsync(new CommandDefinition(@"
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INT NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  applied_utc DATETIME(6) NOT NULL,
+  PRIMARY KEY (version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci", cancellationToken: ct));
+                var applied = (await connection.QueryAsync<int>(new CommandDefinition(
+                    "SELECT version FROM schema_migrations", cancellationToken: ct))).ToHashSet();
+                foreach (MySqlSchema.Migration migration in MySqlSchema.Migrations)
+                {
+                    if (applied.Contains(migration.Version)) continue;
+                    // MySQL DDL 会隐式提交，迁移语句保持幂等，完成后再记录版本。
+                    if (migration.Version == 1)
+                    {
+                        foreach (string statement in MySqlSchema.Statements)
+                            await connection.ExecuteAsync(new CommandDefinition(statement,
+                                cancellationToken: ct));
+                    }
+                    else
+                    {
+                        await connection.ExecuteAsync(new CommandDefinition(migration.Sql,
+                            cancellationToken: ct));
+                    }
+                    await connection.ExecuteAsync(new CommandDefinition(
+                        "INSERT INTO schema_migrations(version,name,applied_utc) VALUES (@Version,@Name,UTC_TIMESTAMP(6))",
+                        new { Version = migration.Version, Name = migration.Name }, cancellationToken: ct));
+                }
             }
         }
     }

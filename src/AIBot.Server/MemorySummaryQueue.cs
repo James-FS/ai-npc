@@ -68,15 +68,20 @@ namespace AIBot.Server
         private readonly PlayerMemoryService _memoryService;
         private readonly IConfiguration _configuration;
         private readonly MemoryAuditService _audit;
-        private readonly ILogSink _log = new ConsoleLogSink();
+        private readonly ILogSink _log;
+        private readonly MySqlMemorySummaryJobPersistence _jobPersistence;
         private long _failedJobs;
 
         public MemorySummaryQueue(PlayerMemoryService memoryService, IConfiguration configuration,
-            MemoryAuditService audit)
+            MemoryAuditService audit, RuntimeLogService runtimeLogs = null,
+            MySqlConnectionFactory mysqlFactory = null)
         {
             _memoryService = memoryService;
             _configuration = configuration;
             _audit = audit;
+            _jobPersistence = mysqlFactory == null ? null : new MySqlMemorySummaryJobPersistence(mysqlFactory);
+            _log = runtimeLogs == null ? (ILogSink)new ConsoleLogSink()
+                : new ServerLogSink(runtimeLogs, "SummaryQueue");
             int capacity = Math.Max(16, configuration.GetValue<int?>("Memory:SummaryQueueCapacity") ?? 256);
             _channel = Channel.CreateBounded<MemorySummaryJob>(new BoundedChannelOptions(capacity)
             {
@@ -164,6 +169,11 @@ namespace AIBot.Server
                 if (key.StartsWith(scheduledPrefix, StringComparison.Ordinal))
                     _failures.TryRemove(key, out _);
             }
+            try { _jobPersistence?.DeleteForPlayer(gameId, npcId, playerId); }
+            catch (Exception ex)
+            {
+                _log.Log(LogLevel.Warning, "摘要任务持久化清理失败: " + playerKey + " - " + ex.Message);
+            }
         }
 
         /// <summary>
@@ -196,6 +206,16 @@ namespace AIBot.Server
             };
             string key = Key(job);
             if (!_scheduled.TryAdd(key, 0)) return true;
+            try
+            {
+                _jobPersistence?.UpsertPending(job, key);
+            }
+            catch (Exception ex)
+            {
+                _scheduled.TryRemove(key, out _);
+                _log.Log(LogLevel.Warning, "摘要任务持久化失败，保留 session 待摘要消息: " + key + " - " + ex.Message);
+                return false;
+            }
             if (_channel.Writer.TryWrite(job)) return true;
             _scheduled.TryRemove(key, out _);
             _log.Log(LogLevel.Warning, "记忆摘要队列已满，任务保留在 session 文件中等待下次恢复: " + key);
@@ -204,6 +224,25 @@ namespace AIBot.Server
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            if (_jobPersistence != null)
+            {
+                try
+                {
+                    foreach (MemorySummaryJobRecord failed in _jobPersistence.LoadFailed())
+                        _failures[failed.JobKey] = new MemorySummaryFailure
+                        {
+                            GameId = failed.GameId, NpcId = failed.NpcId, PlayerId = failed.PlayerId,
+                            SessionId = failed.SessionId, Attempts = failed.Attempts,
+                            Error = failed.LastError, FailedUtc = failed.UpdatedUtc
+                        };
+                    foreach (MemorySummaryJobRecord record in _jobPersistence.LoadRecoverable())
+                        EnqueueRecovered(record);
+                }
+                catch (Exception ex)
+                {
+                    _log.Log(LogLevel.Warning, "摘要任务持久化恢复失败: " + ex.Message);
+                }
+            }
             foreach (PendingMemorySession pending in SessionStore.ScanPendingPlayerSessions())
                 Enqueue(pending.GameId, pending.NpcId, pending.PlayerId, pending.SessionId);
 
@@ -212,6 +251,7 @@ namespace AIBot.Server
                 string key = Key(job);
                 try
                 {
+                    TryPersist(() => _jobPersistence?.MarkProcessing(key), "mark processing", key);
                     Exception last = null;
                     for (int attempt = 0; attempt < 3; attempt++)
                     {
@@ -245,12 +285,14 @@ namespace AIBot.Server
                             Error = SafeError(last),
                             FailedUtc = DateTime.UtcNow
                         };
+                        TryPersist(() => _jobPersistence?.MarkFailed(key, SafeError(last)), "mark failed", key);
                         _log.Log(LogLevel.Warning, "后台记忆摘要重试耗尽，待摘要消息仍保留: " + key
                             + " - " + last.Message);
                     }
                     else
                     {
                         _failures.TryRemove(key, out _);
+                        TryPersist(() => _jobPersistence?.MarkSucceeded(key), "mark succeeded", key);
                     }
                 }
                 finally
@@ -368,6 +410,22 @@ namespace AIBot.Server
                 + "|g" + job.Generation;
         }
 
+        private void EnqueueRecovered(MemorySummaryJobRecord record)
+        {
+            if (record == null || !DataStore.IsValidId(record.GameId)
+                || !DataStore.IsValidId(record.NpcId) || !DataStore.IsValidPlayerId(record.PlayerId)
+                || !DataStore.IsValidSessionId(record.SessionId)) return;
+            var job = new MemorySummaryJob
+            {
+                GameId = record.GameId, NpcId = record.NpcId, PlayerId = record.PlayerId,
+                SessionId = record.SessionId, Force = record.Force, Actor = record.Actor,
+                Generation = record.Generation
+            };
+            string key = string.IsNullOrWhiteSpace(record.JobKey) ? Key(job) : record.JobKey;
+            if (_scheduled.TryAdd(key, 0) && !_channel.Writer.TryWrite(job))
+                _scheduled.TryRemove(key, out _);
+        }
+
         private string CurrentKey(string gameId, string npcId, string playerId, string sessionId)
         {
             return PlayerKey(gameId, npcId, playerId) + "|" + sessionId
@@ -379,6 +437,16 @@ namespace AIBot.Server
             string message = error?.Message ?? "unknown error";
             message = message.Replace("\r", " ").Replace("\n", " ").Trim();
             return message.Length <= 500 ? message : message.Substring(0, 500);
+        }
+
+        private void TryPersist(Action action, string operation, string key)
+        {
+            if (_jobPersistence == null) return;
+            try { action(); }
+            catch (Exception ex)
+            {
+                _log.Log(LogLevel.Warning, "摘要任务状态持久化失败(" + operation + "): " + key + " - " + ex.Message);
+            }
         }
 
         private long CurrentGeneration(string gameId, string npcId, string playerId)

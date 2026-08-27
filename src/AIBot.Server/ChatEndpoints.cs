@@ -43,6 +43,7 @@ namespace AIBot.Server
             IConfiguration config = app.Configuration;
             PlayerMemoryService playerMemories = app.Services.GetRequiredService<PlayerMemoryService>();
             MemorySummaryQueue summaryQueue = app.Services.GetRequiredService<MemorySummaryQueue>();
+            RuntimeLogService runtimeLogs = app.Services.GetRequiredService<RuntimeLogService>();
 
             app.MapGet("/api/games/{gid}/npcs", (string gid) =>
                 DataStore.IsValidId(gid)
@@ -190,7 +191,15 @@ namespace AIBot.Server
                 new AIBot.Core.Tools.SimulatedToolHost(session.SimState).RegisterAll(toolRegistry);
 
                 var backend = new HttpLlmBackend(cfg.model);
-                var loop = new AgentLoop(backend, new ConsoleLogSink(),
+                var loop = new AgentLoop(backend, new ServerLogSink(runtimeLogs, "Agent",
+                    new RuntimeLogContext
+                    {
+                        RequestId = http.TraceIdentifier,
+                        GameId = gid,
+                        NpcId = body.NpcId,
+                        PlayerId = body.PlayerId,
+                        SessionId = body.SessionId
+                    }),
                     backendFactory: settings => new HttpLlmBackend(settings));
                 var input = new AgentRunInput
                 {
@@ -355,7 +364,12 @@ namespace AIBot.Server
 
             public void OnError(Exception ex)
             {
-                Write(new JObject { ["type"] = "error", ["message"] = ex.Message });
+                ModelErrorInfo info = ModelErrorContract.Classify(ex);
+                Write(new JObject
+                {
+                    ["type"] = "error", ["code"] = info.Code, ["status"] = info.Status,
+                    ["message"] = info.Message, ["retryable"] = info.Retryable
+                });
             }
 
             public void OnToolCall(ToolCallDto call) { }            // 聚合回调不下发；执行事件走 OnToolExecuted

@@ -1,4 +1,4 @@
-import { request } from './http'
+import { ApiError, apiErrorFromResponse, request } from './http'
 import { useAppStore } from '@/stores/app'
 import type {
   DebugAgentConfig, DebugChatEvent, DebugLogPage, DebugSession, DebugSessionDetail,
@@ -28,6 +28,11 @@ export const debugApi = {
   session: (gameId: string, npcId: string, playerId: string, sessionId: string) => request<DebugSessionDetail>(gamePath(gameId, `/sessions/${enc(sessionId)}?npcId=${enc(npcId)}&playerId=${enc(playerId)}`)),
   deleteSession: (gameId: string, npcId: string, playerId: string, sessionId: string) => request<{ ok: boolean }>(gamePath(gameId, `/sessions/${enc(sessionId)}?npcId=${enc(npcId)}&playerId=${enc(playerId)}`), { method: 'DELETE', headers: authHeaders() }),
   logs: (gameId: string, date: string, npcId: string, limit = 50, offset = 0) => request<DebugLogPage>(gamePath(gameId, `/logs?date=${enc(date)}&npcId=${enc(npcId)}&limit=${limit}&offset=${offset}`)),
+  runtimeLogs: (query: { date?: string; level?: string; category?: string; requestId?: string; limit?: number; offset?: number } = {}) => {
+    const params = new URLSearchParams()
+    Object.entries(query).forEach(([key, value]) => { if (value !== undefined && value !== '') params.set(key, String(value)) })
+    return request<DebugLogPage>(`/api/admin/runtime-logs?${params}`)
+  },
   stats: (gameId: string) => request<DebugStats>(gamePath(gameId, '/stats')),
   testConnection: (gameId: string, npcId: string, body: { baseUrl?: string; model?: string; apiKey?: string }) => request<Record<string, unknown>>(gamePath(gameId, `/npcs/${enc(npcId)}/test-connection`), { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) }),
 }
@@ -40,10 +45,21 @@ export async function streamChat(
 ) {
   const app = useAppStore()
   const url = `${app.serverBase.replace(/\/$/, '')}${gamePath(gameId, '/chat/stream')}`
-  const response = await fetch(url, {
-    method: 'POST', headers: authHeaders(), body: JSON.stringify(body), signal,
-  })
-  if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`)
+  let response: Response
+  try {
+    response = await fetch(url, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify(body), signal,
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    throw new ApiError(0, '无法连接 Server，请确认服务已启动', null, 'network_error')
+  }
+  if (!response.ok) {
+    const text = await response.text()
+    let payload: unknown = text
+    try { payload = text ? JSON.parse(text) : null } catch { /* plain text */ }
+    throw apiErrorFromResponse(response, payload)
+  }
   if (!response.body) throw new Error('Server 未返回流式响应')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()

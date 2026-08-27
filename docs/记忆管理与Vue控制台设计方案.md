@@ -443,7 +443,7 @@ public interface IMemoryRepository
 
 JSON 仍是默认开发存储，并采用逐文件信号量、乐观版本检查、临时文件 + 原子替换。MySQL 模式使用 Dapper、InnoDB 事务和 `memoryVersion` 乐观锁；长期记忆、Session、聊天日志和审计分别落到数据库表，Server API 契约保持不变。Session 由 `SessionStore` 独立管理，不与长期记忆仓储耦合。
 
-当前 MySQL 表结构位于 `database/mysql/schema.sql`，Server 也支持 `Storage:MySql:AutoMigrate=true` 自动建表。现有 JSON 长期记忆可通过 `dotnet run -- --migrate-json --exit-after-migrate` 幂等迁移；鉴权/登录不作为本阶段前置条件。
+当前 MySQL 表结构位于 `database/mysql/schema.sql`，Server 也支持 `Storage:MySql:AutoMigrate=true` 自动建表。迁移由 `schema_migrations` 版本表管理，当前版本 001 为基础表、002 为 `memory_summary_jobs` 摘要任务表；人工迁移 SQL 参考位于 `database/mysql/migrations/`。现有 JSON 长期记忆可通过 `dotnet run -- --migrate-json --exit-after-migrate` 幂等迁移；鉴权/登录不作为本阶段前置条件。
 
 开发环境可直接执行项目根目录的 `docker compose -f docker.yml up -d mysql` 启动 MySQL。该 Compose 文件只包含数据库服务，不会把 Unity、Vue 或 Server 打包进容器。默认使用宿主机 `3306`；若被其他 MySQL 占用，可在 `.env` 设置 `AIBOT_MYSQL_PORT`（本机示例为 `3307`），Server 连接宿主机映射端口，容器内部仍使用 `mysql:3306`。
 
@@ -845,7 +845,7 @@ memory.audit
 - 统一 Vue 控制台的危险操作提示与实际行为对齐，明确整份删除和保留期清理会同时清空关联 Session 消息与待摘要队列。
 - Session 持久化文件删除失败时保留内存状态并返回明确错误，避免 API 误报成功后重启复活。
 - 前端预设和清理确认取消均被正常吞掉，不再产生未处理 Promise rejection。
-- 回归结果：xUnit 74/74、Server 0 warning/0 error、Vue 强制全量类型检查和生产构建通过。
+- 回归结果：xUnit 76/76、Server 0 warning/0 error、Vue 强制全量类型检查和生产构建通过。
 
 ### 摘要稳定性收尾（✅ 2026-08-27 已完成）
 
@@ -856,7 +856,23 @@ memory.audit
 
 - Server 对 `SupportedSummaryTriggers`、`SupportedMemoryScopes` 做大小写不敏感去重和空值清理，策略预览与控制台不会再出现重复能力标签。
 - 摘要队列增加幂等入队、玩家级失效后重新入队、非法标识拒绝和失败重试空队列等回归测试。
+- MySQL 模式下摘要任务持久化保存 pending/processing/failed 状态，Server 重启后恢复未完成任务；成功后删除任务记录，失败记录保留供后台重试。
+- 新增 `/api/ready` 就绪探针，检查 MySQL/表结构、LLM 配置、默认 NPC 和摘要队列，未就绪返回 503。
+- 模型连接错误统一返回稳定错误码和 `retryable` 标志，便于 Vue、Unity 端按错误类型提示和重试。
 - Server 启动时输出存储提供方、JSON data 根目录或 MySQL 目标、MySQL 必需表存在性、记忆边界/能力、全局 LLM Key 是否配置及 default NPC 发现结果；不会输出任何密钥或完整连接字符串。
+
+### 统一 API 错误处理（✅ 2026-08-27 已完成）
+
+- Server 错误契约统一包含 `error`、`code`、`status`、`requestId` 和可选 `details` 字段；全局异常、管理 API 鉴权失败和聊天限流均使用该契约。
+- Server 通过 `X-Request-Id` 贯穿请求和响应，内部错误只记录服务端日志，不向客户端暴露堆栈或敏感配置。
+- Vue API 层统一兼容结构化错误、RFC 7807 ProblemDetails、纯文本和网络断开，并将 400/401/403/404/409/429/5xx 映射为一致的中文提示；流式对话和文件下载也使用同一解析逻辑。
+
+### 小规模日志优化（✅ 2026-08-27 已完成）
+
+- Server 运行日志由 `RuntimeLogService` 同时输出标准控制台和按日 JSONL，默认位于 `data/logs/runtime/`，保留 14 天；可通过 `Logging:RuntimeFileEnabled`、`Logging:RuntimeDirectory` 和 `Logging:RuntimeRetentionDays` 调整。
+- API 请求完成、未处理异常、限流和日志写入失败均带 `requestId`、HTTP 状态和耗时；运行日志默认只保存脱敏后的消息，不记录 API Key、Bearer Token 或完整敏感连接信息。
+- 新增 `GET /api/admin/runtime-logs`，支持按日期、级别、类别和 requestId 查询，Vue“请求日志”页可切换查看对话日志或 Server 运行日志。
+- `LogMaintenanceService` 每 24 小时清理过期数据：JSON 运行/审计日志按保留期删除；MySQL 模式清理 `chat_logs`（默认 30 天）和 `memory_audits`（默认 365 天）。
 - 会话列表返回 `idle`、`waiting`、`pending`、`failed` 状态及最近失败原因。
 - Vue 记忆检查器增加队列概览、当前/累计失败统计、失败提示和全局/会话级重试入口。
 - 验收重点：摘要写入、审计写入、Session 确认落盘三者全部成功后才消费待摘要消息；服务重启和重试均保持幂等。

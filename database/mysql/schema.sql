@@ -2,6 +2,12 @@ CREATE DATABASE IF NOT EXISTS ai_npc CHARACTER SET utf8mb4 COLLATE utf8mb4_unico
 USE ai_npc;
 
 -- 与 AIBot.Server 内置 DatabaseMigrator 相同；可直接在 MySQL 客户端执行。
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INT NOT NULL,
+  name VARCHAR(128) NOT NULL,
+  applied_utc DATETIME(6) NOT NULL,
+  PRIMARY KEY (version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS player_memories (
   game_id VARCHAR(64) NOT NULL,
   npc_id VARCHAR(64) NOT NULL,
@@ -91,4 +97,24 @@ CREATE TABLE IF NOT EXISTS memory_facts (
   KEY ix_memory_facts_owner (game_id, npc_id, player_id, updated_utc),
   CONSTRAINT fk_memory_facts_memory FOREIGN KEY (game_id, npc_id, player_id)
     REFERENCES player_memories (game_id, npc_id, player_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS memory_summary_jobs (
+  job_key VARCHAR(512) NOT NULL,
+  game_id VARCHAR(64) NOT NULL,
+  npc_id VARCHAR(64) NOT NULL,
+  player_id VARCHAR(128) NOT NULL,
+  session_id VARCHAR(128) NOT NULL,
+  force TINYINT(1) NOT NULL DEFAULT 0,
+  actor VARCHAR(128) NULL,
+  generation BIGINT NOT NULL DEFAULT 0,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts INT NOT NULL DEFAULT 0,
+  last_error VARCHAR(500) NULL,
+  available_utc DATETIME(6) NOT NULL,
+  created_utc DATETIME(6) NOT NULL,
+  updated_utc DATETIME(6) NOT NULL,
+  PRIMARY KEY (job_key),
+  KEY ix_summary_jobs_status (status, updated_utc),
+  KEY ix_summary_jobs_owner (game_id, npc_id, player_id, session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

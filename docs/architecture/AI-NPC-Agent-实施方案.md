@@ -2,8 +2,8 @@
 
 > 一个可插拔的 NPC 智能Agent平台：纯 C# 核心（AIBot.Core）+ Unity 包 + 独立管理服务（AIBot.Server）+ Web 管理台。接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM），NPC 具备自由对话、剧情人设、两级记忆、工具调用与结构化输出的完整 agent 能力。
 >
-> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v2.8（2026-08-27）
-> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（74/74）与真实模型端到端验证。**
+> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v3.0（2026-08-27）
+> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（76/76）与真实模型端到端验证。**
 
 | 版本 | 变更 |
 |---|---|
@@ -20,11 +20,14 @@
 | v2.2 | 记忆管理阶段D：Vue 3 正式记忆控制台、NPC 实时策略预览、记忆检查/迁移/审计页面与 `/app/` 静态部署 |
 | v2.3 | 四阶段 P1 加固：动态短期窗口、摘要禁用边界、Unity/Server 后台语义、删除与摘要互斥、类别约束、必写审计及 Vue 可重复构建 |
 | v2.4 | P1 运行加固：策略能力去重、摘要队列幂等/失效回归测试、启动期存储与数据库诊断 |
+| v2.5 | 摘要任务 MySQL 持久化、`/api/ready` 就绪检查、模型错误码契约、数据库迁移版本表 |
 | v2.4 | 四阶段 P2 加固：保留期按最旧批次清理、清理预演防过期、危险操作说明对齐、Session 删除失败保留状态及前端取消处理 |
 | v2.5 | 调试台 Vue 统一：原生调试台能力迁移至 `AIBot.Web`，根路径统一跳转 `/app/#/debug/chat`，日志/统计/会话/Prompt/NPC/世界观/流式对话共用一套控制台 |
 | v2.6 | 客户端轻量化部署：Unity 运行时与 Server/Vue/MySQL 解耦，支持 Local/Server 双模式；数据库和管理控制台不进入 Unity 包，正式在线模式通过 Server 中转 |
 | v2.7 | Server 持久化升级：Dapper + MySQL 可选存储、长期记忆/Session/日志/审计表、自动建表与 JSON→MySQL 长期记忆迁移；鉴权和登录仍保持可选/关闭 |
 | v2.8 | 摘要链路收尾：失败任务明细与手动重试、会话级摘要状态、Vue 队列监控与生命周期说明 |
+| v2.9 | 统一 API 错误处理：错误码/状态/requestId 契约、全局异常与限流响应、Vue 网络和 ProblemDetails 兼容解析 |
+| v3.0 | 小规模日志优化：Server 运行日志按日 JSONL、请求生命周期记录、敏感信息脱敏、MySQL/JSON 保留期清理与 Vue 运行日志查询 |
 
 ---
 
@@ -73,9 +76,9 @@ Unity 和 Vue 都不直接连接 MySQL；数据库账号、模型 API Key 和记
 - **供应商可切换**：已实测三种接法（见 §2），编辑器下拉一键填充 + ⚡连接测试带中文诊断
 - **Agent 能力**：工具调用闭环（`give_item`/`change_favor`/`advance_stage` 真实读写会话状态）、结构化输出（`{say,emotion,action}` 三层容错+截断挽救）、玩家级两层记忆（session 短期窗口 + player/NPC 结构化长期记忆）
 - **护栏**：防注入包裹与检测（命中标记进日志与统计）、行为规则、兜底台词链
-- **可观测**：Prompt 七层预览（token 估算）、对话日志（按日 jsonl、30 天轮转）、用量统计、注入尝试计数
+- **可观测**：Prompt 七层预览（token 估算）、对话/运行日志（按日 JSONL）、用量统计、注入尝试计数和 requestId 关联
 - **记忆治理**：长期摘要和结构化事实可检查/纠正/固定/删除，支持显式迁移、保留期清理预演与变更审计
-- **持久化**：会话消息/待摘要队列/模拟状态每轮落盘，玩家长期摘要与结构化事实独立版本化保存；重启自动恢复后台摘要
+- **持久化**：会话消息/待摘要队列/模拟状态每轮落盘，玩家长期摘要与结构化事实独立版本化保存；MySQL 模式下摘要任务写入 `memory_summary_jobs`，重启自动恢复未完成任务
 
 ### 1.4 非目标（未做）
 
@@ -148,7 +151,7 @@ D:\Code\aibot\
 │   │   ├── npcs/new_npc.template.json# 创建模板（可提交，含三供应商速查）
 │   │   ├── sessions/{npcId}/{playerId}/{sid}.json # 玩家短期会话与待摘要消息
 │   │   └── memories/{npcId}/{playerId}.json       # 玩家/NPC 长期摘要与结构化事实
-│   └── logs/default/yyyy-MM-dd.jsonl # 对话日志（30天自动清理）
+│   └── logs/                          # 对话、审计和 Server 运行日志（按日 JSONL）
 ├── Packages/com.aibot.npcagent/      # Unity 包
 │   ├── Runtime/Core/                 # ★ AIBot.Core（noEngineReferences）
 │   │   ├── AgentLoop.cs / IClock.cs
@@ -167,7 +170,7 @@ D:\Code\aibot\
     │   ├── wwwroot/index.html        # 根入口重定向到 Vue 调试工作台（不再独立维护原生调试台）
     │   └── wwwroot/app/              # Vue 正式控制台生产构建产物
     ├── AIBot.Web/                    # Vue 3 + TypeScript + Vite + Pinia + Element Plus
-    └── AIBot.Tests/                  # 74 项 xUnit（Mock 后端免网全链路）
+    └── AIBot.Tests/                  # 76 项 xUnit（Mock 后端免网全链路）
 ```
 
 ---
@@ -239,7 +242,9 @@ public class SimGameState { stage, favorability, extras, items }           // �
 | `GET …/memory-migrations`、`POST …/sessions/{sid}/migrate-memory` | 旧 session 迁移检查与显式迁移 |
 | `GET …/memory-audit`、`POST …/memories/cleanup` | 审计查询与保留期清理预演/执行；清理从最旧批次开始并返回 `hasMoreCandidates` |
 | `GET …/logs?date=&npcId=&limit=&offset=` | 日志分页查询（最新在前） |
+| `GET /api/admin/runtime-logs?date=&level=&category=&requestId=` | Server 运行日志分页查询（默认脱敏，按 requestId 关联） |
 | `GET …/stats`、`GET /api/health` | 用量统计（含注入尝试数）/ 健康检查 |
+| `GET /api/ready` | 就绪检查：存储连接与表结构、LLM 配置、NPC 配置、摘要队列；未就绪返回 503 |
 
 ### 6.2 持久化与日志
 
@@ -251,6 +256,7 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - **并发删除**：玩家级任务代数与互斥锁共同保护“失效旧任务 → 删除长期记忆 → 清空全部 Session”，避免旧摘要任务把已删除记忆重新写回
 - **摘要关闭**：`summaryThreshold=0` 时 Session 丢弃窗口外消息；玩家范围仅保留最近一个短期窗口供手动摘要，不会无界增长
 - **保留期清理**：按更新时间倒序分页的末尾读取最旧批次；执行结果返回 `totalMemoryCount`、`batchLimit`、`candidateCount` 与 `hasMoreCandidates`，前端按批次继续预演
+- **运行日志**：`logs/runtime/yyyy-MM-dd.jsonl` 保存 Server 请求生命周期、异常、限流、摘要队列和 Core Agent 事件；默认保留 14 天。MySQL 模式的 `chat_logs` 默认保留 30 天、`memory_audits` 默认保留 365 天，由后台维护服务每日清理。
 - **清理预演一致性**：Vue 只允许执行当前 `gameId + inactiveDays` 对应的最新预演；修改任一条件后必须重新预演
 - **删除一致性**：删除长期记忆会同步清空该玩家/NPC 的 Session 消息与待摘要队列；Session 持久化删除失败时保留缓存状态并返回错误
 
@@ -262,6 +268,8 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - `player_memories` 使用事务和 `memoryVersion` 乐观并发；Session 消息窗口、待摘要消息和模拟状态以 JSON 文档存入数据库。
 - `player_memories.summary` 只保存一段滚动摘要，`memory_facts` 保存可独立更新的结构化事实；`sessions.has_pending_memory` 与 `payload_json.evictedMessages` 共同表示尚未确认消费的摘要批次。
 - `Storage:MySql:AutoMigrate=true` 可在本地启动时自动建表；也可直接执行 `database/mysql/schema.sql`。
+- 内置迁移使用 `schema_migrations(version,name,applied_utc)` 记录已执行版本；当前包含基础表迁移 `001` 和摘要任务表迁移 `002`，人工 SQL 参考位于 `database/mysql/migrations/`。
+- 模型错误统一使用 `model_timeout`、`model_rate_limited`、`model_unauthorized`、`model_forbidden`、`model_not_found`、`model_network_error`、`model_invalid_response` 等错误码；流式 SSE `error` 事件与连接测试接口均返回 `code/status/retryable`。
 - `dotnet run -- --migrate-json --exit-after-migrate` 将指定游戏（默认 `default`）的玩家长期记忆从 JSON 幂等迁移到 MySQL。
 - 项目根目录 `docker.yml` 只负责启动 MySQL；`database/mysql/schema.sql` 会在容器首次初始化时自动执行，数据保存在 `ai_npc_mysql_data` volume。默认映射宿主机 `3306`，如果端口冲突可通过 `.env` 的 `AIBOT_MYSQL_PORT` 改为其他端口（本机示例使用 `3307`），Server 仍可在宿主机运行并连接对应的 `127.0.0.1:<port>`。
 - 当前本机联调账号为 `aibot`，密码为 `123456`。宿主机连接 Docker MySQL 时使用 `SslMode=None;AllowPublicKeyRetrieval=True`，仅用于本地开发连接；生产环境应改用 TLS 和独立强密码。
@@ -345,7 +353,7 @@ Ox Alpha（免费）：完整一轮对话约 650-800 prompt tokens + 150-420 com
 ## 13. 快速开始
 
 ```bash
-# 测试（免网免key，74项）
+# 测试（免网免key，76项）
 cd src/AIBot.Tests && dotnet test
 # Server 编译回归（避免占用正在运行的 apphost）
 cd ../AIBot.Server && dotnet build --no-restore -p:UseAppHost=false

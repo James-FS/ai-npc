@@ -5,6 +5,7 @@ using System.Data;
 using System.IO;
 using System.Linq;
 using AIBot.Core.Logging;
+using Microsoft.Extensions.Configuration;
 using Dapper;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -14,12 +15,19 @@ namespace AIBot.Server
     /// <summary>对话日志：按日 jsonl 落盘（保留 30 天），内存聚合用量统计。</summary>
     public static class ChatLogService
     {
-        private const int RetentionDays = 30;
+        private static int RetentionDays = 30;
         private static readonly object FileLock = new object();
         private static readonly ILogSink Log = new ConsoleLogSink();
         private static MySqlConnectionFactory MySqlStorage;
+        private static RuntimeLogService RuntimeLogs;
 
         public static void UseMySql(MySqlConnectionFactory factory) { MySqlStorage = factory; }
+
+        public static void Configure(IConfiguration configuration, RuntimeLogService runtimeLogs)
+        {
+            RetentionDays = Math.Max(1, configuration.GetValue<int?>("Logging:ChatRetentionDays") ?? 30);
+            RuntimeLogs = runtimeLogs;
+        }
 
         // ---- 统计（内存聚合，重启清零；明细见 jsonl 日志）----
         public sealed class NpcAgg
@@ -63,6 +71,8 @@ namespace AIBot.Server
             catch (Exception ex)
             {
                 Log.Log(LogLevel.Warning, "日志写入失败: " + ex.Message);
+                RuntimeLogs?.Write(LogLevel.Warning, "ChatLog", "write_failed",
+                    "对话日志写入失败: " + ex.Message, null, ex);
             }
             Aggregate(gameId, entry);
         }

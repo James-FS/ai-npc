@@ -1,0 +1,2 @@
+-- 基础表结构。新部署可直接执行 database/mysql/schema.sql；Server AutoMigrate 会按版本记录。
+-- 该文件保留为人工审查和生产迁移参考。

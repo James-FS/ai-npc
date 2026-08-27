@@ -20,7 +20,8 @@ namespace AIBot.Server
     {
         private static readonly string[] RequiredTables =
         {
-            "player_memories", "memory_facts", "memory_audits", "chat_logs", "sessions"
+            "schema_migrations", "player_memories", "memory_facts", "memory_audits", "chat_logs", "sessions",
+            "memory_summary_jobs"
         };
 
         public static async Task RunAsync(StorageOptions storage, MySqlConnectionFactory mysql,

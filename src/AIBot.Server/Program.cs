@@ -17,6 +17,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.IncludeFields = true;        // Core DTO 使用公共字段（SimGameState 等）
 });
 builder.Services.AddSingleton(storageOptions);
+builder.Services.AddSingleton<RuntimeLogService>();
 if (storageOptions.IsMySql)
 {
     builder.Services.AddSingleton(mySqlFactory);
@@ -32,10 +33,17 @@ else
 builder.Services.AddSingleton<PlayerMemoryService>();
 builder.Services.AddSingleton<MemorySummaryQueue>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<MemorySummaryQueue>());
+builder.Services.AddHostedService<LogMaintenanceService>();
 int chatRequestsPerMinute = builder.Configuration.GetValue<int?>("Security:ChatRequestsPerMinute") ?? 60;
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.Headers["Retry-After"] = "60";
+        await ApiErrorWriter.WriteAsync(context.HttpContext, StatusCodes.Status429TooManyRequests,
+            "rate_limited", "请求过于频繁，请稍后重试", null, cancellationToken);
+    };
     options.AddPolicy("chat", context => RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions
@@ -49,11 +57,14 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+app.UseAIBotApiErrors();
+
 if (storageOptions.IsMySql)
 {
     SessionStore.UseMySql(mySqlFactory);
     ChatLogService.UseMySql(mySqlFactory);
 }
+ChatLogService.Configure(builder.Configuration, app.Services.GetRequiredService<RuntimeLogService>());
 
 if (storageOptions.IsMySql && storageOptions.AutoMigrate)
 {
@@ -90,8 +101,8 @@ app.Use(async (context, next) =>
         string auth = context.Request.Headers.Authorization.ToString();
         if (!string.Equals(auth, "Bearer " + adminToken, StringComparison.Ordinal))
         {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsync("管理 API 需要有效的 Bearer token");
+            await ApiErrorWriter.WriteAsync(context, StatusCodes.Status401Unauthorized,
+                "admin_auth_required", "管理 API 需要有效的 Bearer token");
             return;
         }
     }
@@ -105,11 +116,18 @@ app.UseRateLimiter();
 app.MapGet("/api/health", () => Microsoft.AspNetCore.Http.Results.Ok(new
 {
     ok = true,
-    version = "0.3.0-m3",
+    version = "0.3.0-m4",
     storage = storageOptions.Provider,
     dataRoot = DataStore.FindDataRoot(),
     npcs = DataStore.ListNpcIds("default")
 }));
+
+app.MapGet("/api/ready", async (HttpContext http) =>
+{
+    var result = await ReadinessService.CheckAsync(storageOptions, mySqlFactory,
+        app.Services.GetRequiredService<MemorySummaryQueue>(), app.Configuration, http.RequestAborted);
+    return Results.Json(result.Body, statusCode: result.Ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+});
 
 app.MapAIBotChat();
 app.MapAIBotAdmin();
