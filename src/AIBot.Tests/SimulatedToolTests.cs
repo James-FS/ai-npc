@@ -21,6 +21,12 @@ namespace AIBot.Tests
         }
 
         [Fact]
+        public void Registry_ReportsRegisteredToolCount()
+        {
+            Assert.Equal(3, Registry(new SimGameState()).Count);
+        }
+
+        [Fact]
         public async Task ChangeFavor_ModifiesState()
         {
             var state = new SimGameState { stage = 1, favorability = 30 };

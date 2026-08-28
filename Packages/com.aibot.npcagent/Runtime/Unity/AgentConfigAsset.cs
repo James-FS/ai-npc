@@ -44,6 +44,8 @@ namespace AIBot.Unity
         [Header("模型")]
         public string baseUrl = "https://api.deepseek.com";
         public string model = "deepseek-chat";
+        [Tooltip("仅开发期使用；正式项目建议通过环境变量或 Server 模式提供 Key。")]
+        public string apiKey;
         [Range(0f, 2f)] public float temperature = 0.8f;
         public int maxTokens = 500;
         public int timeoutMs = 20000;
@@ -55,6 +57,19 @@ namespace AIBot.Unity
         [Header("输出枚举（与游戏 Animator 参数对齐）")]
         public List<string> emotions = new List<string> { "neutral", "happy", "angry", "sad", "surprised" };
         public List<string> actions = new List<string> { "idle", "wave", "point", "offer" };
+
+        private void OnValidate()
+        {
+            shortTermTurns = Mathf.Max(1, shortTermTurns);
+            summaryThreshold = Mathf.Max(0, summaryThreshold);
+            maxTokens = Mathf.Max(1, maxTokens);
+            timeoutMs = Mathf.Max(1000, timeoutMs);
+            loreBlocks = loreBlocks ?? new List<LoreEntry>();
+            enabledToolIds = enabledToolIds ?? new List<string>();
+            fallbackReplies = fallbackReplies ?? new List<string>();
+            emotions = emotions ?? new List<string>();
+            actions = actions ?? new List<string>();
+        }
 
         public AgentConfigDto ToDto()
         {
@@ -71,6 +86,7 @@ namespace AIBot.Unity
                 {
                     baseUrl = baseUrl,
                     model = model,
+                    apiKey = apiKey,
                     temperature = temperature,
                     maxTokens = maxTokens,
                     timeoutMs = timeoutMs
@@ -106,7 +122,7 @@ namespace AIBot.Unity
                 ? AgentRuntimeMode.Server : AgentRuntimeMode.Local;
             serverBaseUrl = string.IsNullOrEmpty(dto.serverBaseUrl) ? "http://127.0.0.1:5000" : dto.serverBaseUrl;
             enabledToolIds = dto.enabledToolIds; fallbackReplies = dto.fallbackReplies;
-            baseUrl = dto.model.baseUrl; model = dto.model.model;
+            baseUrl = dto.model.baseUrl; model = dto.model.model; apiKey = dto.model.apiKey;
             temperature = dto.model.temperature; maxTokens = dto.model.maxTokens; timeoutMs = dto.model.timeoutMs;
             shortTermTurns = dto.memory?.shortTermTurns ?? 12;
             summaryThreshold = dto.memory?.summaryThreshold ?? 20;

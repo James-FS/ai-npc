@@ -64,7 +64,7 @@ namespace AIBot.Unity.EditorTools
             chat.bubble = bubble;
 
             Selection.activeGameObject = npcGo;
-            Debug.Log("[AIBot] Demo 场景已生成。请在 data/ 的 NPC 配置里填入 apiKey 后进入 Play 模式对话。");
+            Debug.Log("[AIBot] Demo 场景已生成。可使用 data/ 下的 NPC JSON，或在 NpcAgent 上指定 AgentConfigAsset 进行 Local 模式配置。");
         }
 
         private static void SetAnchors(RectTransform rt, Vector2 min, Vector2 max)

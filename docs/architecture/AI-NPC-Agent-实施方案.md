@@ -74,7 +74,7 @@ Unity 和 Vue 都不直接连接 MySQL；数据库账号、模型 API Key 和记
 
 - **开发期接入**：写一份 JSON 配置（或在管理台表单编辑）→ 挂到角色/测试台即可对话，改配置即生效
 - **供应商可切换**：已实测三种接法（见 §2），编辑器下拉一键填充 + ⚡连接测试带中文诊断
-- **Agent 能力**：工具调用闭环（`give_item`/`change_favor`/`advance_stage` 真实读写会话状态）、结构化输出（`{say,emotion,action}` 三层容错+截断挽救）、玩家级两层记忆（session 短期窗口 + player/NPC 结构化长期记忆）
+- **Agent 能力**：工具调用闭环（Local 或调试 Server 中由 `SimulatedToolHost` 真实读写会话模拟状态）、结构化输出（`{say,emotion,action}` 三层容错+截断挽救）、玩家级两层记忆（session 短期窗口 + player/NPC 结构化长期记忆）
 - **护栏**：防注入包裹与检测（命中标记进日志与统计）、行为规则、兜底台词链
 - **可观测**：Prompt 七层预览（token 估算）、对话/运行日志（按日 JSONL）、用量统计、注入尝试计数和 requestId 关联
 - **记忆治理**：长期摘要和结构化事实可检查/纠正/固定/删除，支持显式迁移、保留期清理预演与变更审计
@@ -213,7 +213,7 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - **短期**：`ShortTermMemory` 窗口（默认12条）+ 淘汰队列；运行中策略改变 `shortTermTurns` 会立即 `Resize`，缩小窗口的消息进入待摘要队列
 - **长期**：`MemorySummarizer` 用 summaryModel（空则主模型，0.3温度、json_object、400 tokens）把淘汰消息滚动压缩为 ≤80 字摘要 + ≤8 条事实；结构化玩家记忆使用独立 JSON 文件和乐观版本
 - **摘要关闭**：`summaryThreshold=0` 时 Session 范围丢弃窗口外消息，玩家范围保留有界的最近短期窗口供手动摘要
-- **模拟工具** `SimulatedToolHost`：`give_item`（背包累积）/ `change_favor` / `advance_stage`，真实读写 SimGameState 并随会话持久化；游戏端替换为真实 IAgentTool 即可（接口不变）
+- **模拟工具** `SimulatedToolHost`：`give_item`（背包累积）/ `change_favor` / `advance_stage`，真实读写 `SimGameState` 并随会话持久化。当前 Server 模式仅使用这组调试模拟工具，不能直接修改正式游戏状态；Local 模式可由游戏端替换为真实 `IAgentTool`，Server 的正式业务工具接入另行设计。
 
 ---
 
@@ -304,11 +304,11 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 ## 8. Unity 适配层（代码就绪，待编辑器联调）
 
-`NpcAgent`（MonoBehaviour）：配置来源 SO 或 `data/` JSON 直读（`DevConfigStore` 自动定位）；通过 `runtimeMode=local/server` 选择后端；事件 `onToken/onReasoning/onReply/onError`（UnityEvent）。Local 模式使用 `UnityWebRequestBackend` 和本地 AgentLoop；Server 模式使用 `UnityServerBackend` 直接调用 `/api/games/{gid}/chat/stream`，由 Server 负责 AgentLoop、长期记忆、摘要、工具和日志，避免两端重复执行。Server 请求只携带 Game/NPC/Player/Session/消息，不携带模型 API Key，也不直接访问 MySQL。菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。配置分发三段管线：开发期直读 data/ → 构建期拷 StreamingAssets（`BuildConfigCopier`，M3）→ 热更远端拉取（M6）。
+`NpcAgent`（MonoBehaviour）：配置来源 SO 或 `data/` JSON 直读（`DevConfigStore` 自动定位）；通过 `runtimeMode=local/server` 选择后端；事件 `onToken/onReasoning/onReply/onError`（UnityEvent）。Local 模式使用 `UnityWebRequestBackend` 和本地 AgentLoop；Server 模式使用 `UnityServerBackend` 直接调用 `/api/games/{gid}/chat/stream`，由 Server 负责 AgentLoop、长期记忆、摘要、调试模拟工具和日志，避免两端重复执行。当前 Server 工具不能直接修改正式游戏状态。Server 请求携带 Game/NPC/Player/Session/消息及可选的游戏状态快照，不携带模型 API Key，也不直接访问 MySQL。菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。配置分发三段管线：开发期直读 data/ → 构建期拷 StreamingAssets（`BuildConfigCopier`，M3）→ 热更远端拉取（M6）。
 
 Unity 运行时边界：
 
-- 必需：`AIBot.Core`、`AIBot.Unity`、一个 `ILlmBackend` 实现、游戏自己的 `IGameContext` 和真实工具注册。
+- 必需：`AIBot.Core`、`AIBot.Unity`、一个 `ILlmBackend` 实现、游戏自己的 `IGameContext`。Local 模式如需改变游戏状态，再注册游戏自己的真实工具；Server 当前只提供调试模拟工具，不能直接修改正式游戏状态。
 - 不打包：`AIBot.Server`、`AIBot.Web`、MySQL/Dapper、管理 API、审计查询和运营页面。
 - 直连 LLM 只用于 Local 开发或明确接受客户端密钥风险的单机项目；在线发布默认禁止直连。
 
@@ -331,7 +331,7 @@ Unity 运行时边界：
 
 - **xUnit 74/74**：覆盖 SSE/聚合/结构化解析/上下文/防注入/AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 清理与必写审计失败、保留期最旧批次选择、Session 删除失败保护、摘要队列幂等入队/玩家失效/非法标识及策略能力去重
 - **构建回归**：Server 独立输出目录编译 0 警告/0 错误；Vue 强制全量 `vue-tsc -b --force` 与生产 `npm run build` 均通过，可在生成 `components.d.ts` 后重复执行
-- **真实端到端已验证**：Ox Alpha 流式对话（角色扮演+结构化输出）、拒绝白送矿石（工具决策）、重启记忆恢复、注入攻击被记录且模型保持角色、连接测试诊断（6.3s 成功 / 错误配置给出原因）
+- **端到端已验证**：Ox Alpha 流式对话（角色扮演+结构化输出）、调试模拟工具决策、重启记忆恢复、注入攻击被记录且模型保持角色、连接测试诊断（6.3s 成功 / 错误配置给出原因）。其中 Server 工具验证仅针对会话模拟状态，不代表已接入正式游戏业务。
 - **已知环境限制**：ZCode 内嵌浏览器不派发点击事件（页面代码经 DOM/截图/后端全链路验证，真实浏览器正常）
 
 ## 11. 成本与延迟实测

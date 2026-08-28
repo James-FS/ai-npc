@@ -74,6 +74,8 @@ Local 模式用于 Demo、单机和离线联调；Server 模式用于在线游�
 
 当前 Unity 包已实现 `UnityWebRequestBackend`（Local 模式）和 `UnityServerBackend`（Server 模式）。在 `AgentConfigAsset` 或 NPC JSON 中设置 `runtimeMode=server`、`serverBaseUrl`，并在 `NpcAgent` 上填写可选的 `playerId/sessionId` 即可通过 Server 中转；鉴权暂不强制，后续可在传输层增加。
 
+当前 Server 模式中的工具仅用于调试模拟，使用 `SimulatedToolHost` 修改会话内的 `SimGameState`，不能直接修改正式游戏的背包、任务、好感度或其他业务状态。正式游戏接入前，Server 应继续被视为对话、记忆和管理后台，不应把这些模拟结果当作生产业务写入。
+
 ## 5. 配置分层
 
 ### 5.1 Server 全局边界

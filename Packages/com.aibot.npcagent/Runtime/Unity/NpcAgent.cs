@@ -15,7 +15,7 @@ namespace AIBot.Unity
 {
     /// <summary>
     /// NPC Agent 主组件：挂到角色上，调用 Chat(message) 获得流式回复。
-    /// 配置来源二选一：configAsset（SO）或 npcId + gameId（data/ 下的 JSON）。
+    /// 配置来源：Server 连接 Profile、configAsset（SO）或 npcId + gameId（data/ 下的 JSON）。
     /// </summary>
     public class NpcAgent : MonoBehaviour
     {
@@ -28,8 +28,17 @@ namespace AIBot.Unity
         [Tooltip("Server 模式下的会话 ID；同一会话持续对话即可复用短期记忆。")]
         public string sessionId = "s-unity";
 
-        [Tooltip("留空则从 data/games/{gameId}/npcs/{npcId}.json 加载")]
+        [Tooltip("Local 模式留空则从 data/games/{gameId}/npcs/{npcId}.json 加载；Server Profile 模式下可留空")]
         public AgentConfigAsset configAsset;
+
+        [Tooltip("Local 模式可选。填写后无需从 data/ 目录加载 world.json。")]
+        public WorldConfigAsset worldConfigAsset;
+
+        [Tooltip("Server 模式推荐使用。填写后无需在 Unity 本地保存 NPC 人设、模型或 API Key。")]
+        public AIBotConnectionProfile connectionProfile;
+
+        [Tooltip("可选：挂载一个实现 AIBot.Core.Context.IGameContext 的游戏状态组件；留空则使用内置 GameContextRelay。")]
+        public MonoBehaviour gameContextProvider;
 
         [Tooltip("仅开发期使用。留空时依次使用配置 JSON 与环境变量 AIBOT_LLM_KEY；正式发布应走服务端中转。")]
         public string apiKeyOverride;
@@ -41,6 +50,8 @@ namespace AIBot.Unity
         public UnityEngine.Events.UnityEvent<string> onReasoning;    // 推理模型的思考过程增量（可接 UI/调试）
         public UnityEngine.Events.UnityEvent<StructuredReply> onReply;
         public UnityEngine.Events.UnityEvent<string> onError;
+        public UnityEngine.Events.UnityEvent onBusy;
+        public UnityEngine.Events.UnityEvent<string> onServerStatus;
 
         private AgentConfigDto _config;
         private WorldConfigDto _world;
@@ -53,6 +64,12 @@ namespace AIBot.Unity
         private CancellationTokenSource _lifetimeCts;
         private CancellationTokenSource _requestCts;
         private bool _running;
+        private bool _capabilityWarningIssued;
+        private string _loadedGameId;
+        private string _loadedNpcId;
+
+        /// <summary>当前是否正在处理一轮对话。</summary>
+        public bool IsBusy { get { return _running; } }
 
         private string _sessionSummary;
         private System.Collections.Generic.List<string> _sessionFacts;
@@ -82,7 +99,7 @@ namespace AIBot.Unity
             _memoryPolicy = _memoryPolicy ?? MemoryPolicy.Defaults();
             int turns = _memoryPolicy.shortTermTurns;
             _memory = new ShortTermMemory(Math.Max(2, turns * 2));
-            if (gameContext == null) gameContext = gameObject.AddComponent<GameContextRelay>();
+            EnsureGameContext();
         }
 
         private void OnEnable()
@@ -104,6 +121,36 @@ namespace AIBot.Unity
             _requestCts?.Cancel();
         }
 
+        /// <summary>
+        /// 主动检查当前 Server 配置。不会自动调用，避免给 Local 模式或每次聊天增加网络开销。
+        /// </summary>
+        public async Task<bool> CheckServerAsync()
+        {
+            if (_config == null) LoadConfig();
+            if (_config == null || !IsServerMode() || _serverBackend == null)
+            {
+                onServerStatus?.Invoke("当前不是 Server 模式");
+                return false;
+            }
+
+            try
+            {
+                ServerConnectionResult result = await _serverBackend.CheckConnectionAsync(
+                    _lifetimeCts == null ? CancellationToken.None : _lifetimeCts.Token);
+                string status = result.Message
+                    + (string.IsNullOrEmpty(result.Version) ? "" : "（" + result.Version + "）");
+                onServerStatus?.Invoke(status);
+                return result.Reachable && result.Ready && result.NpcFound;
+            }
+            catch (OperationCanceledException) { return false; }
+            catch (Exception ex)
+            {
+                string status = "AIBot.Server 连接失败：" + ex.Message;
+                onServerStatus?.Invoke(status);
+                return false;
+            }
+        }
+
         public async void Chat(string message)
         {
             await ChatAsync(message);
@@ -112,9 +159,15 @@ namespace AIBot.Unity
         /// <summary>可等待、可测试的对话入口；Chat(string) 仅作为 UnityEvent 兼容包装。</summary>
         public async Task<AgentLoopResult> ChatAsync(string message)
         {
-            if (_running) { Debug.LogWarning("[AIBot] 上一轮对话未结束，忽略新输入"); return null; }
+            if (_running)
+            {
+                Debug.LogWarning("[AIBot] 上一轮对话未结束，忽略新输入");
+                onBusy?.Invoke();
+                return null;
+            }
             if (_config == null) LoadConfig();
             if (_config == null) { EmitError("配置加载失败：" + gameId + "/" + npcId); return null; }
+            ValidateRuntimeCapabilities();
 
             _running = true;
             _requestCts?.Dispose();
@@ -147,7 +200,7 @@ namespace AIBot.Unity
                 {
                     Config = _config,
                     World = _world,
-                    Game = gameContext,
+                    Game = GetGameContext(),
                     UserMessage = message,
                     Memory = _memory,
                     Tools = _tools,
@@ -183,21 +236,82 @@ namespace AIBot.Unity
 
         private void LoadConfig()
         {
-            _config = configAsset != null ? configAsset.ToDto() : DevConfigStore.LoadNpc(gameId, npcId);
+            bool useConnectionProfile = connectionProfile != null;
+            string resolvedGameId = useConnectionProfile && !string.IsNullOrWhiteSpace(connectionProfile.gameId)
+                ? connectionProfile.gameId : gameId;
+            string resolvedNpcId = useConnectionProfile && !string.IsNullOrWhiteSpace(connectionProfile.npcId)
+                ? connectionProfile.npcId : npcId;
+
+            if (useConnectionProfile
+                && (string.IsNullOrWhiteSpace(resolvedGameId) || string.IsNullOrWhiteSpace(resolvedNpcId)))
+            {
+                Debug.LogError("[AIBot] Server Connection Profile 必须填写 gameId 和 npcId");
+                _config = null;
+                return;
+            }
+
+            if (useConnectionProfile)
+            {
+                // Server 模式不需要加载完整 NPC 配置；仅构造一个本地运行时占位 DTO。
+                _config = new AgentConfigDto
+                {
+                    npcId = resolvedNpcId,
+                    worldId = resolvedGameId,
+                    runtimeMode = "server",
+                    serverBaseUrl = connectionProfile.serverBaseUrl,
+                    model = new ModelSettings { timeoutMs = connectionProfile.timeoutMs }
+                };
+            }
+            else
+            {
+                _config = configAsset != null ? configAsset.ToDto() : DevConfigStore.LoadNpc(gameId, npcId);
+            }
             if (_config == null) return;
+            _loadedGameId = resolvedGameId;
+            _loadedNpcId = resolvedNpcId;
             if (_config.model == null) _config.model = new ModelSettings();
-            if (!string.IsNullOrEmpty(apiKeyOverride)) _config.model.apiKey = apiKeyOverride;
-            if (string.IsNullOrEmpty(_config.model.apiKey))
-                _config.model.apiKey = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY");
-            MemoryPolicy gameMemoryPolicy = DevConfigStore.LoadMemoryPolicy(gameId);
-            _memoryPolicy = MemoryPolicyResolver.Resolve(gameMemoryPolicy, _config.memory, null).policy;
-            _world = DevConfigStore.LoadWorld(gameId, _config.worldId);
+            if (!useConnectionProfile)
+            {
+                if (!string.IsNullOrEmpty(apiKeyOverride)) _config.model.apiKey = apiKeyOverride;
+                if (string.IsNullOrEmpty(_config.model.apiKey))
+                    _config.model.apiKey = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY");
+                if (configAsset != null)
+                {
+                    // 使用 Unity Asset 时完全脱离外部 data/ 目录；Game 策略和世界观均可选。
+                    _memoryPolicy = MemoryPolicyResolver.Resolve(null, _config.memory, null).policy;
+                }
+                else
+                {
+                    MemoryPolicy gameMemoryPolicy = DevConfigStore.LoadMemoryPolicy(resolvedGameId);
+                    _memoryPolicy = MemoryPolicyResolver.Resolve(gameMemoryPolicy, _config.memory, null).policy;
+                }
+                if (worldConfigAsset != null)
+                    _world = worldConfigAsset.ToDto();
+                else if (configAsset == null)
+                    _world = DevConfigStore.LoadWorld(resolvedGameId, _config.worldId);
+                else
+                    _world = new WorldConfigDto { worldId = _config.worldId };
+            }
+            else
+            {
+                _memoryPolicy = MemoryPolicy.Defaults();
+                _world = null;
+            }
             if (IsServerMode())
             {
                 string serverUrl = string.IsNullOrWhiteSpace(_config.serverBaseUrl)
                     ? "http://127.0.0.1:5000" : _config.serverBaseUrl;
-                _serverBackend = new UnityServerBackend(serverUrl, gameId, npcId,
-                    playerId, sessionId, _config.model.timeoutMs);
+                string resolvedPlayerId = useConnectionProfile ? connectionProfile.playerId : playerId;
+                string resolvedSessionId = useConnectionProfile ? connectionProfile.sessionId : sessionId;
+                int resolvedTimeoutMs = useConnectionProfile
+                    ? connectionProfile.timeoutMs : _config.model.timeoutMs;
+                _serverBackend = new UnityServerBackend(serverUrl, resolvedGameId, resolvedNpcId,
+                    resolvedPlayerId, resolvedSessionId, resolvedTimeoutMs,
+                    () =>
+                    {
+                        IGameContext context = GetGameContext();
+                        return context == null ? null : context.SnapshotJson;
+                    });
                 _backend = null;
                 _loop = null;
             }
@@ -214,6 +328,93 @@ namespace AIBot.Unity
         {
             return _config != null && string.Equals(_config.runtimeMode, "server",
                 StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// 重新读取配置并重建后端。适合开发期热切换 NPC、运行模式或模型配置。
+        /// 对话进行中不会强制打断，调用方可在下一轮重试。
+        /// </summary>
+        public bool ReloadConfig()
+        {
+            if (_running)
+            {
+                Debug.LogWarning("[AIBot] 对话进行中，暂不能重载配置");
+                return false;
+            }
+
+            string previousGameId = _loadedGameId;
+            string previousNpcId = _loadedNpcId;
+            _config = null;
+            _world = null;
+            _backend = null;
+            _serverBackend = null;
+            _loop = null;
+            _capabilityWarningIssued = false;
+            LoadConfig();
+
+            if (_config == null) return false;
+            int turns = _memoryPolicy == null ? 12 : _memoryPolicy.shortTermTurns;
+            if (_memory == null) _memory = new ShortTermMemory(Math.Max(2, turns * 2));
+            else _memory.Resize(Math.Max(2, turns * 2));
+
+            // 切换到另一个 NPC 或世界时，不能沿用旧角色的会话记忆。
+            if (!string.Equals(previousNpcId, _loadedNpcId, StringComparison.Ordinal)
+                || !string.Equals(previousGameId, _loadedGameId, StringComparison.Ordinal))
+            {
+                _memory.Clear();
+                _sessionSummary = null;
+                _sessionFacts = null;
+            }
+            return true;
+        }
+
+        private void ValidateRuntimeCapabilities()
+        {
+            if (_capabilityWarningIssued || _config == null) return;
+
+            bool serverMode = IsServerMode();
+            if (serverMode)
+            {
+                if (_tools != null && _tools.Count > 0)
+                {
+                    Debug.LogWarning("[AIBot] 当前为 Server 模式，NpcAgent 上注册的 Unity 本地工具不会由 Server 执行；请将工具注册到 AIBot.Server，或切换为 Local 模式。");
+                    _capabilityWarningIssued = true;
+                }
+                return;
+            }
+
+            if (_config.enabledToolIds == null || _config.enabledToolIds.Count == 0) return;
+            if (_tools == null)
+            {
+                Debug.LogWarning("[AIBot] Local 配置启用了工具，但 NpcAgent 尚未注册任何本地工具；这些工具调用将无法执行。");
+                _capabilityWarningIssued = true;
+                return;
+            }
+
+            foreach (string id in _config.enabledToolIds)
+            {
+                if (string.IsNullOrEmpty(id)) continue;
+                IAgentTool tool;
+                if (!_tools.TryGet(id, out tool))
+                {
+                    Debug.LogWarning("[AIBot] Local 配置启用了未注册的工具：" + id);
+                    _capabilityWarningIssued = true;
+                    return;
+                }
+            }
+        }
+
+        private void EnsureGameContext()
+        {
+            if (gameContextProvider is IGameContext) return;
+            if (gameContext == null) gameContext = gameObject.AddComponent<GameContextRelay>();
+        }
+
+        private IGameContext GetGameContext()
+        {
+            if (gameContextProvider is IGameContext external) return external;
+            EnsureGameContext();
+            return gameContext;
         }
 
         private void EmitError(string message)

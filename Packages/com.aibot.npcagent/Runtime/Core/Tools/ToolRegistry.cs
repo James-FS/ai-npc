@@ -27,6 +27,9 @@ namespace AIBot.Core.Tools
     {
         private readonly Dictionary<string, IAgentTool> _tools = new Dictionary<string, IAgentTool>();
 
+        /// <summary>当前宿主已注册的工具数量，供运行时能力提示使用。</summary>
+        public int Count { get { return _tools.Count; } }
+
         public void Register(IAgentTool tool)
         {
             if (tool == null || string.IsNullOrEmpty(tool.Id)) throw new ArgumentException("tool id required");

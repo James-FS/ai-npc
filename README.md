@@ -18,7 +18,69 @@ database/mysql/schema.sql     MySQL + Dapper 的表结构
 database/mysql/migrations     按版本维护的增量迁移 SQL（当前 001/002）
 ```
 
+## 架构概览
+
+项目采用“共享 Core + 可选 Server + Vue 管理台”的分层设计。Unity 游戏和 Server 共用同一套 `AIBot.Core` 代码，避免不同运行端出现 Prompt、记忆和工具行为不一致；Vue 只负责管理和调试，不直接接触数据库或模型密钥。
+
+```text
+┌──────────────────── Unity 游戏 ────────────────────┐
+│ AIBot.Unity / NpcAgent                             │
+│  local：UnityWebRequestBackend → LLM                │
+│  server：UnityServerBackend ───────────────┐        │
+└─────────────────────────────────────────────┼────────┘
+                                              │ HTTP/SSE
+┌──────────────────────── AIBot.Server ───────▼────────┐
+│ ASP.NET Core 宿主                                    │
+│  Chat API → AgentLoop → Prompt/工具/结构化输出        │
+│      ├→ ShortTermMemory（Session 短期窗口）           │
+│      ├→ PlayerMemoryService（玩家/NPC 长期摘要+事实） │
+│      ├→ MemorySummaryQueue（后台摘要、重试、恢复）    │
+│      └→ ChatLog / RuntimeLog / Audit                 │
+│  Admin API / Health / Ready / 静态托管 Vue            │
+└───────────────┬───────────────────────┬──────────────┘
+                │ Dapper                │ OpenAI 兼容 HTTP
+        ┌───────▼────────┐       ┌─────▼────────────────┐
+        │ MySQL（可选）   │       │ OpenCode/DeepSeek/GLM │
+        │ 记忆/Session/日志│       │ 主模型与摘要模型      │
+        └────────────────┘       └──────────────────────┘
+
+┌────────────── Vue 3 控制台 ──────────────┐
+│ 对话、NPC、世界观、Prompt、Session、记忆、日志、统计 │
+│ 通过 Server API 管理配置和查看运行状态              │
+└─────────────────────────────────────────┘
+```
+
+### 各层职责
+
+- **AIBot.Core**：跨 Unity/Server 共享的 Agent 引擎，包括 Prompt 组装、上下文、SSE 聚合、工具调用、结构化回复、短期记忆和摘要契约。它不依赖 ASP.NET Core、Vue 或 MySQL。
+- **AIBot.Unity**：Unity 适配层，提供 `NpcAgent`、`UnityWebRequestBackend` 和 `UnityServerBackend`。单机可直连模型；多人或需要集中管理时调用 Server。
+- **AIBot.Server**：唯一的业务编排和数据边界。负责 NPC/世界观配置、对话流式 API、记忆读写、后台摘要、日志、审计、限流和可选管理 API 鉴权。
+- **AIBot.Web**：Vue 3 + TypeScript 管理台，通过 HTTP/SSE 调用 Server。生产构建产物由 Server 的 `wwwroot/app` 静态托管。
+- **MySQL + Dapper**：Server 的可选持久化实现。保存玩家长期记忆、结构化事实、Session、对话日志、审计和摘要任务；默认仍可使用 JSON 文件，便于单机开发。
+
+### 一次对话的处理链路
+
+1. Unity 或 Vue 向 `POST /api/games/{gameId}/chat/stream` 发送 NPC、玩家、Session 和消息。
+2. Server 读取 NPC/世界观配置，解析最终记忆策略，并加载 Session 短期窗口。
+3. 如果启用玩家范围记忆，Server 合并长期摘要和结构化事实，交给 Core 的 `AgentLoop` 生成 Prompt。
+4. `AgentLoop` 调用 OpenAI 兼容模型，实时输出 `token`、`reasoning`、`tool_call`、`reply`、`done` SSE 事件。
+5. Server 保存 Session、对话日志和用量；达到阈值的淘汰消息进入 `MemorySummaryQueue`。
+6. 后台摘要任务将消息压缩为一段滚动摘要和多条事实，成功写入长期记忆后才确认消费；失败任务保留并支持重试。
+
+### 记忆与数据边界
+
+短期记忆属于具体 Session，保存最近对话和待摘要消息；长期记忆属于 `gameId + npcId + playerId`，保存滚动摘要和可独立编辑的结构化事实。Unity 与 Vue 都不直接连接 MySQL，API Key、数据库连接串和审计数据只由 Server 管理。MySQL 模式下摘要任务存放在 `memory_summary_jobs`，迁移版本记录在 `schema_migrations`。
+
+### 两种运行模式
+
+| 模式 | 调用链路 | 适用场景 |
+| --- | --- | --- |
+| `local` | Unity → LLM | 单机 Demo、离线原型、无需集中记忆 |
+| `server` | Unity → AIBot.Server → LLM/MySQL | 集中配置、玩家长期记忆、日志审计、多客户端共享 |
+
 Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包含 Vue、ASP.NET Core、MySQL 或 Dapper。开发/单机可使用 `UnityWebRequestBackend` 直连模型；Server 模式使用已实现的 `UnityServerBackend`，通过 `AIBot.Server` 统一处理对话、记忆和日志。Unity 与 Vue 都不直接连接 MySQL；当前 Server 本地运行默认不强制鉴权。
+
+Server 模式推荐在 Unity 中创建 `AI NPC → Server Connection Profile`，只填写 Server 地址、Game/NPC ID 以及可选的 Player/Session ID；NPC 人设、模型、API Key、记忆策略和工具由后台统一管理。原有的 `AgentConfigAsset` + `runtimeMode=server` 配置仍保持兼容。
 
 Server 默认使用 JSON，启用 MySQL 时由 Dapper 访问数据库；两种存储可通过配置切换，鉴权和登录不属于当前必选项。
 
@@ -99,3 +161,13 @@ API key 永不入库（.gitignore 已隔离含 key 的真实配置；模板见 `
 `local` 模式由 Unity 直连模型；`server` 模式由 Unity 调用
 `/api/games/{gameId}/chat/stream`，长期记忆、摘要、工具和日志由 Server 处理。
 `NpcAgent` 上的 `playerId` 可选，填写后启用玩家范围长期记忆；`sessionId` 用于复用短期会话。
+
+如果使用 Server Connection Profile，则不需要在 Unity 中保存完整 NPC 配置或模型 API Key；Profile 会直接以 Server 模式初始化连接。Local 模式仍建议使用 `AgentConfigAsset`，这样不依赖后台即可运行。
+
+Local 模式还可以在 `NpcAgent.worldConfigAsset` 指定 `World Config` 资源，并在 `AgentConfigAsset` 中填写开发期模型 Key；这样整个 Demo 不需要复制仓库的 `data/` 目录。真实项目请勿把含 Key 的 Asset 提交到公共仓库。
+
+工具能力按运行模式隔离：Local 模式由 Unity 通过 `NpcAgent.Tools` 注册并执行；Server 模式由 `AIBot.Server` 注册和执行，Unity 本地注册的工具不会自动上传。插件会在检测到模式与工具配置不匹配时给出运行时警告。
+
+当前版本的 Server 工具仅使用 `SimulatedToolHost` 做调试模拟（背包、好感度和剧情阶段会写入会话模拟状态），不能直接修改正式游戏状态。正式游戏接入真实业务工具前，应将其视为对话、记忆和管理台能力，不能把模拟工具当作生产交易或任务系统。
+
+Server 模式可调用 `await agent.CheckServerAsync()` 主动检查后台连接、就绪状态和当前 NPC 是否存在；结果会通过 `onServerStatus` 事件通知，不会给每次聊天额外增加检查请求。
