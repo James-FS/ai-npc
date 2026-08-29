@@ -49,15 +49,18 @@ export interface DebugChatEvent {
   say?: string
   emotion?: string
   action?: string
+  callId?: string
   name?: string
   args?: unknown
   success?: boolean
   result?: string
   message?: string
   fallback?: boolean
+  diagnostic?: { code?: string; status?: number; message?: string; retryable?: boolean }
   usage?: { promptTokens: number; completionTokens: number }
   elapsedMs?: number
   sessionId?: string
+  requestId?: string
 }
 
 export interface DebugSession {

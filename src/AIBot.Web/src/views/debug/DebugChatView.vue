@@ -94,10 +94,12 @@ function addEvent(target: ChatMessage, event: DebugChatEvent) {
   if (event.type === 'reasoning' && event.delta) target.reasoning = (target.reasoning || '') + event.delta
   if (event.type === 'tool_call' && event.name) (target.tags ||= []).push(`${event.name}${event.success === false ? ' · 失败' : ''}`)
   if (event.type === 'reply' && event.say) {
-    // token 事件可能包含模型生成的原始 JSON；结构化 reply 才是最终展示内容。
+    // token 是纯台词增量；reply 是最终权威结果，用于校准完整文本和动作信息。
     target.content = event.say
     if (event.emotion) (target.tags ||= []).push(`情绪：${event.emotion}`)
     if (event.action) (target.tags ||= []).push(`动作：${event.action}`)
+    if (event.fallback) (target.tags ||= []).push('兜底回复')
+    if (event.diagnostic?.message) (target.tags ||= []).push(event.diagnostic.message)
   }
   if (event.type === 'error') (target.tags ||= []).push(event.message || 'Server 错误')
 }
@@ -112,7 +114,7 @@ async function send(text = message.value) {
   controller.value = new AbortController()
   persist()
   try {
-    await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: sessionId.value, message: text, simState: simState.value }, event => addEvent(target, event), controller.value.signal)
+    await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: sessionId.value, message: text, simState: simState.value, toolMode: 'simulated' }, event => addEvent(target, event), controller.value.signal)
   } catch (error) {
     if ((error as Error).name !== 'AbortError') ElMessage.error(error instanceof Error ? error.message : '对话失败')
   } finally { streaming.value = false; controller.value = null }
@@ -125,11 +127,11 @@ async function compare() {
   streaming.value = true
   controller.value = new AbortController()
   try {
-    await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: `${sessionId.value}-ab-default`, message: text, simState: simState.value }, event => {
+    await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: `${sessionId.value}-ab-default`, message: text, simState: simState.value, toolMode: 'simulated' }, event => {
       if (event.type === 'token' && event.delta) compareResult.value!.default = (compareResult.value!.default || '') + event.delta
       if (event.type === 'reply' && event.say) compareResult.value!.default = event.say
     }, controller.value.signal)
-    await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: `${sessionId.value}-ab-override`, message: text, simState: simState.value, override: { model: compareModel.value } }, event => {
+    await streamChat(app.gameId, { npcId: npcId.value, playerId: playerId.value, sessionId: `${sessionId.value}-ab-override`, message: text, simState: simState.value, toolMode: 'simulated', override: { model: compareModel.value } }, event => {
       if (event.type === 'token' && event.delta) compareResult.value!.override = (compareResult.value!.override || '') + event.delta
       if (event.type === 'reply' && event.say) compareResult.value!.override = event.say
     }, controller.value.signal)

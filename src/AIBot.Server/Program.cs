@@ -6,8 +6,13 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
+// Windows 默认 EventLog provider 在普通用户进程下可能因无写权限抛异常，
+// 甚至会截断原本已经生成的 4xx/5xx 响应。Server 明确使用跨平台控制台日志。
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
 StorageOptions storageOptions = StorageOptions.From(builder.Configuration);
 storageOptions.Validate();
 MySqlConnectionFactory mySqlFactory = storageOptions.IsMySql

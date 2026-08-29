@@ -24,8 +24,27 @@ namespace AIBot.Server
         public List<string> Facts = new List<string>();
         public AIBot.Core.Context.SimGameState SimState = new AIBot.Core.Context.SimGameState();
         public DateTime LastActiveUtc = DateTime.UtcNow;
+        public List<ChatRequestRecord> RecentRequests = new List<ChatRequestRecord>();
         internal string LegacySourcePath;
         public readonly SemaphoreSlim Gate = new SemaphoreSlim(1, 1);
+    }
+
+    /// <summary>持久化的一轮聊天请求状态，用于 requestId 去重与断线后的 SSE 重放。</summary>
+    public sealed class ChatRequestRecord
+    {
+        public string requestId;
+        public string fingerprint;
+        public string status;
+        public List<string> events = new List<string>();
+        public DateTime createdUtc;
+        public DateTime completedUtc;
+    }
+
+    public static class ChatRequestStatuses
+    {
+        public const string Processing = "processing";
+        public const string Completed = "completed";
+        public const string Failed = "failed";
     }
 
     public sealed class PendingMemorySession
@@ -56,7 +75,7 @@ namespace AIBot.Server
 
         public sealed class SessionFileDto
         {
-            public int schemaVersion = 2;
+            public int schemaVersion = 3;
             public string npcId;
             public string playerId;
             public string sessionId;
@@ -65,6 +84,7 @@ namespace AIBot.Server
             public AIBot.Core.Context.SimGameState simState;
             public List<LlmMessage> messages = new List<LlmMessage>();
             public List<LlmMessage> evictedMessages = new List<LlmMessage>();
+            public List<ChatRequestRecord> recentRequests = new List<ChatRequestRecord>();
             public DateTime lastActiveUtc;
         }
 
@@ -163,6 +183,7 @@ namespace AIBot.Server
                     simState = session.SimState,
                     messages = session.Memory.Messages.Select(CopyMessage).ToList(),
                     evictedMessages = session.Memory.SnapshotEvicted().Select(CopyMessage).ToList(),
+                    recentRequests = CopyRequests(session.RecentRequests),
                     lastActiveUtc = session.LastActiveUtc
                 };
                 if (MySqlPersistence != null)
@@ -249,6 +270,7 @@ namespace AIBot.Server
                         Summary = dto.summary,
                         Facts = dto.facts ?? new List<string>(),
                         SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
+                        RecentRequests = CopyRequests(dto.recentRequests),
                         LastActiveUtc = dto.lastActiveUtc == default(DateTime) ? File.GetLastWriteTimeUtc(path) : dto.lastActiveUtc
                     };
                 }
@@ -306,6 +328,7 @@ namespace AIBot.Server
                     session.Memory.Clear();
                     session.Summary = null;
                     session.Facts = new List<string>();
+                    session.RecentRequests = new List<ChatRequestRecord>();
                     savedAll = Save(session) && savedAll;
                 }
                 finally { session.Gate.Release(); }
@@ -378,6 +401,7 @@ namespace AIBot.Server
                 Summary = dto.summary,
                 Facts = dto.facts ?? new List<string>(),
                 SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
+                RecentRequests = CopyRequests(dto.recentRequests),
                 LastActiveUtc = dto.lastActiveUtc == default(DateTime)
                     ? (fileTime ?? DateTime.UtcNow) : dto.lastActiveUtc,
                 LegacySourcePath = legacySourcePath
@@ -397,6 +421,66 @@ namespace AIBot.Server
             {
                 if (File.Exists(temp)) File.Delete(temp);
             }
+        }
+
+        public static ChatRequestRecord FindRequest(SessionState session, string requestId)
+        {
+            if (session == null || string.IsNullOrEmpty(requestId)) return null;
+            return (session.RecentRequests ?? new List<ChatRequestRecord>())
+                .FirstOrDefault(item => string.Equals(item.requestId, requestId, StringComparison.Ordinal));
+        }
+
+        public static ChatRequestRecord BeginRequest(SessionState session, string requestId, string fingerprint)
+        {
+            if (session == null) throw new ArgumentNullException(nameof(session));
+            if (string.IsNullOrEmpty(requestId)) throw new ArgumentException("requestId required", nameof(requestId));
+            session.RecentRequests = session.RecentRequests ?? new List<ChatRequestRecord>();
+            ChatRequestRecord existing = FindRequest(session, requestId);
+            if (existing != null) return existing;
+            var created = new ChatRequestRecord
+            {
+                requestId = requestId,
+                fingerprint = fingerprint,
+                status = ChatRequestStatuses.Processing,
+                createdUtc = DateTime.UtcNow
+            };
+            session.RecentRequests.Add(created);
+            PruneRequests(session);
+            return created;
+        }
+
+        public static void CompleteRequest(ChatRequestRecord record, IEnumerable<string> events, bool failed = false)
+        {
+            if (record == null) return;
+            record.status = failed ? ChatRequestStatuses.Failed : ChatRequestStatuses.Completed;
+            record.events = events == null ? new List<string>() : events.ToList();
+            record.completedUtc = DateTime.UtcNow;
+        }
+
+        private static void PruneRequests(SessionState session)
+        {
+            const int maxRequests = 20;
+            if (session.RecentRequests.Count <= maxRequests) return;
+            session.RecentRequests = session.RecentRequests
+                .OrderByDescending(item => item.completedUtc == default(DateTime) ? item.createdUtc : item.completedUtc)
+                .Take(maxRequests)
+                .ToList();
+        }
+
+        private static List<ChatRequestRecord> CopyRequests(IEnumerable<ChatRequestRecord> source)
+        {
+            return (source ?? Enumerable.Empty<ChatRequestRecord>())
+                .Where(item => item != null && !string.IsNullOrEmpty(item.requestId))
+                .Select(item => new ChatRequestRecord
+                {
+                    requestId = item.requestId,
+                    fingerprint = item.fingerprint,
+                    status = item.status,
+                    events = item.events == null ? new List<string>() : new List<string>(item.events),
+                    createdUtc = item.createdUtc,
+                    completedUtc = item.completedUtc
+                })
+                .ToList();
         }
 
         private static int ToMessageCapacity(int turns)

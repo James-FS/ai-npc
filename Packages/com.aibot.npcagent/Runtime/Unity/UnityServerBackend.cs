@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AIBot.Core.Llm;
 using AIBot.Core.Output;
+using AIBot.Core.Protocol;
+using AIBot.Core.Tools;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
@@ -25,10 +28,13 @@ namespace AIBot.Unity
         private readonly string _sessionId;
         private readonly int _timeoutMs;
         private readonly Func<string> _stateSnapshotProvider;
+        private readonly bool _enableSimulatedTools;
+
+        public string LastRequestId { get; private set; }
 
         public UnityServerBackend(string baseUrl, string gameId, string npcId,
             string playerId, string sessionId, int timeoutMs,
-            Func<string> stateSnapshotProvider = null)
+            Func<string> stateSnapshotProvider = null, bool enableSimulatedTools = false)
         {
             if (string.IsNullOrWhiteSpace(baseUrl)) throw new ArgumentException("Server 地址不能为空", nameof(baseUrl));
             if (string.IsNullOrWhiteSpace(gameId)) throw new ArgumentException("gameId 不能为空", nameof(gameId));
@@ -40,18 +46,24 @@ namespace AIBot.Unity
             _sessionId = string.IsNullOrWhiteSpace(sessionId) ? "s-unity" : sessionId;
             _timeoutMs = Math.Max(1000, timeoutMs);
             _stateSnapshotProvider = stateSnapshotProvider;
+            _enableSimulatedTools = enableSimulatedTools;
         }
 
         /// <summary>调用 Server 聊天接口并消费其 SSE 事件。</summary>
-        public async Task<ServerChatResult> ChatAsync(string message, ILlmStreamSink sink, CancellationToken ct)
+        public async Task<ServerChatResult> ChatAsync(string message, ILlmStreamSink sink, CancellationToken ct,
+            string requestId = null)
         {
             if (string.IsNullOrWhiteSpace(message)) throw new ArgumentException("消息不能为空", nameof(message));
-            bool streamed = false;
+            requestId = string.IsNullOrWhiteSpace(requestId) ? ChatRequestIds.NewId() : requestId;
+            if (!ChatRequestIds.IsValid(requestId)) throw new ArgumentException("requestId 格式无效", nameof(requestId));
+            LastRequestId = requestId;
+            var gate = new GateSink(sink);
             for (int attempt = 0; ; attempt++)
             {
+                gate.BeginAttempt();
                 try
                 {
-                    return await OnceAsync(message, new GateSink(sink, () => streamed = true), ct);
+                    return await OnceAsync(message, requestId, gate, ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -61,9 +73,9 @@ namespace AIBot.Unity
                 {
                     bool retryable = ex.StatusCode == 0 || ex.StatusCode == 408
                         || ex.StatusCode == 429 || ex.StatusCode >= 500;
-                    if (retryable && attempt < 1 && !streamed)
+                    if (retryable && attempt < 2 && !ex.CompletedResponse)
                     {
-                        await Task.Delay(500, ct);
+                        await Task.Delay(500 * (attempt + 1), ct);
                         continue;
                     }
                     var fallback = new LlmFallbackException(ex.Message, ex);
@@ -181,14 +193,17 @@ namespace AIBot.Unity
             sink?.OnCompleted(JsonConvert.SerializeObject(result.Reply), result.Usage);
         }
 
-        private async Task<ServerChatResult> OnceAsync(string message, GateSink sink, CancellationToken ct)
+        private async Task<ServerChatResult> OnceAsync(string message, string requestId,
+            GateSink sink, CancellationToken ct)
         {
             string url = _baseUrl + "/api/games/" + Uri.EscapeDataString(_gameId) + "/chat/stream";
             var body = new JObject
             {
                 ["npcId"] = _npcId,
                 ["message"] = message,
-                ["sessionId"] = _sessionId
+                ["sessionId"] = _sessionId,
+                ["requestId"] = requestId,
+                ["toolMode"] = _enableSimulatedTools ? ServerToolModes.Simulated : ServerToolModes.None
             };
             if (!string.IsNullOrEmpty(_playerId)) body["playerId"] = _playerId;
             string stateSnapshot = _stateSnapshotProvider == null ? null : _stateSnapshotProvider();
@@ -215,6 +230,7 @@ namespace AIBot.Unity
                 req.uploadHandler = new UploadHandlerRaw(bytes);
                 req.SetRequestHeader("Content-Type", "application/json");
                 req.SetRequestHeader("Accept", "text/event-stream");
+                req.SetRequestHeader("X-Request-Id", requestId);
                 req.timeout = Math.Max(1, (_timeoutMs + 999) / 1000);
 
                 AsyncOperation operation = req.SendWebRequest();
@@ -230,14 +246,17 @@ namespace AIBot.Unity
                     throw new ServerTransportException((int)req.responseCode,
                         string.IsNullOrEmpty(text) ? req.error : Truncate(text, 500));
                 }
+                sink.Replayed = sink.Replayed || string.Equals(req.GetResponseHeader("X-AIBot-Replayed"),
+                    "true", StringComparison.OrdinalIgnoreCase);
             }
 
             parser.Flush();
+            // Server 可能把上游模型故障降级为 fallback reply；只要收到有效 reply，就应优先交付。
+            ServerChatResult completed = sink.Result;
+            if (completed != null) return completed;
             if (sink.ErrorMessage != null)
-                throw new ServerTransportException(500, sink.ErrorMessage);
-            if (sink.Result == null)
-                throw new ServerTransportException(502, "AIBot.Server 流结束但未返回 reply");
-            return sink.Result;
+                throw new ServerTransportException(sink.ErrorStatus, sink.ErrorMessage, completedResponse: true);
+            throw new ServerTransportException(502, "AIBot.Server 流结束但未返回 reply");
         }
 
         private static string Truncate(string value, int max)
@@ -286,72 +305,126 @@ namespace AIBot.Unity
         private sealed class GateSink : ILlmStreamSink, IReasoningSink
         {
             private readonly ILlmStreamSink _inner;
-            private readonly Action _markStreamed;
-            private readonly StructuredReplyStreamExtractor _speech = new StructuredReplyStreamExtractor();
-            private readonly StringBuilder _raw = new StringBuilder();
-            public ServerChatResult Result;
-            public string ErrorMessage;
+            private readonly ServerChatResponseState _state = new ServerChatResponseState();
+            private readonly StringBuilder _deliveredTokens = new StringBuilder();
+            private readonly StringBuilder _attemptTokens = new StringBuilder();
+            private readonly StringBuilder _deliveredReasoning = new StringBuilder();
+            private readonly StringBuilder _attemptReasoning = new StringBuilder();
+            private readonly HashSet<string> _deliveredTools = new HashSet<string>(StringComparer.Ordinal);
+            private string _transportErrorMessage;
 
-            public GateSink(ILlmStreamSink inner, Action markStreamed)
+            public bool Replayed { get; set; }
+
+            public ServerChatResult Result
+            {
+                get
+                {
+                    ServerChatEvent reply = _state.ReplyEvent;
+                    return reply == null ? null : new ServerChatResult
+                    {
+                        Reply = reply.Reply,
+                        Usage = reply.Usage,
+                        UsedFallback = reply.Fallback,
+                        ElapsedMs = reply.ElapsedMs,
+                        Diagnostic = reply.Diagnostic,
+                        RequestId = _state.RequestId,
+                        Replayed = Replayed
+                    };
+                }
+            }
+
+            public string ErrorMessage
+            {
+                get { return _transportErrorMessage ?? _state.CompletionError?.Message; }
+            }
+
+            public int ErrorStatus
+            {
+                get { return _state.CompletionError?.Status ?? 500; }
+            }
+
+            public GateSink(ILlmStreamSink inner)
             {
                 _inner = inner;
-                _markStreamed = markStreamed;
+            }
+
+            public void BeginAttempt()
+            {
+                _attemptTokens.Clear();
+                _attemptReasoning.Clear();
+                _transportErrorMessage = null;
             }
 
             public void HandleDataLine(string data)
             {
-                JObject payload;
-                try { payload = JObject.Parse(data); }
-                catch { return; }
-                string type = (string)payload["type"];
-                if (type == "token")
+                if (!ServerChatEventParser.TryParse(data, out ServerChatEvent parsed)) return;
+                _state.Apply(parsed);
+                if (parsed.Kind == ServerChatEventKind.Token)
                 {
-                    string delta = (string)payload["delta"] ?? string.Empty;
-                    _raw.Append(delta);
-                    if (!string.IsNullOrEmpty(delta)) _markStreamed();
-                    string speech = _speech.Push(delta);
-                    if (!string.IsNullOrEmpty(speech))
+                    string delta = parsed.Delta ?? string.Empty;
+                    // Server token 已经是 AgentLoop 提取后的纯台词，不能再次按 {"say":...} 解析。
+                    ForwardReplaySafe(delta, _attemptTokens, _deliveredTokens, value => _inner?.OnToken(value));
+                }
+                else if (parsed.Kind == ServerChatEventKind.Reasoning)
+                {
+                    var reasoning = _inner as IReasoningSink;
+                    ForwardReplaySafe(parsed.Delta ?? string.Empty, _attemptReasoning, _deliveredReasoning,
+                        value => reasoning?.OnReasoningToken(value));
+                }
+                else if (parsed.Kind == ServerChatEventKind.ToolCall)
+                {
+                    string toolKey = !string.IsNullOrEmpty(parsed.ToolCallId)
+                        ? parsed.ToolCallId
+                        : (parsed.ToolName ?? "") + "|" + (parsed.ToolArgumentsJson ?? "{}") + "|" + (parsed.ToolResult ?? "");
+                    if (!_deliveredTools.Add(toolKey)) return;
+                    var toolSink = _inner as IToolExecutionSink;
+                    if (toolSink != null)
                     {
-                        _inner?.OnToken(speech);
+                        toolSink.OnToolExecuted(new ToolExecution
+                        {
+                            Call = new ToolCallDto
+                            {
+                                Id = parsed.ToolCallId,
+                                Function = new FunctionCall
+                                {
+                                    Name = parsed.ToolName,
+                                    Arguments = parsed.ToolArgumentsJson ?? "{}"
+                                }
+                            },
+                            Result = new ToolResult
+                            {
+                                Success = parsed.ToolSuccess,
+                                MessageForModel = parsed.ToolResult
+                            }
+                        });
                     }
                 }
-                else if (type == "reasoning")
+            }
+
+            private static void ForwardReplaySafe(string delta, StringBuilder attempt,
+                StringBuilder delivered, Action<string> forward)
+            {
+                if (string.IsNullOrEmpty(delta)) return;
+                attempt.Append(delta);
+                string current = attempt.ToString();
+                if (current.Length <= delivered.Length)
                 {
-                    _markStreamed();
-                    var reasoning = _inner as IReasoningSink;
-                    if (reasoning != null) reasoning.OnReasoningToken((string)payload["delta"] ?? string.Empty);
+                    if (!delivered.ToString().StartsWith(current, StringComparison.Ordinal))
+                        throw new InvalidOperationException("Server 对同一 requestId 返回了不一致的重放内容");
+                    return;
                 }
-                else if (type == "error")
-                {
-                    ErrorMessage = (string)payload["message"] ?? "Server 返回未知错误";
-                }
-                else if (type == "reply")
-                {
-                    JObject usage = payload["usage"] as JObject;
-                    Result = new ServerChatResult
-                    {
-                        Reply = new StructuredReply
-                        {
-                            say = (string)payload["say"] ?? string.Empty,
-                            emotion = (string)payload["emotion"] ?? "neutral",
-                            action = (string)payload["action"] ?? "idle"
-                        },
-                        Usage = new Usage
-                        {
-                            PromptTokens = usage == null ? 0 : (int?)usage["promptTokens"] ?? 0,
-                            CompletionTokens = usage == null ? 0 : (int?)usage["completionTokens"] ?? 0
-                        },
-                        UsedFallback = (bool?)payload["fallback"] ?? false,
-                        ElapsedMs = (long?)payload["elapsedMs"] ?? 0
-                    };
-                    Result.Usage.TotalTokens = Result.Usage.PromptTokens + Result.Usage.CompletionTokens;
-                }
+                if (delivered.Length > 0
+                    && !current.StartsWith(delivered.ToString(), StringComparison.Ordinal))
+                    throw new InvalidOperationException("Server 对同一 requestId 返回了不一致的重放内容");
+                string suffix = current.Substring(delivered.Length);
+                delivered.Append(suffix);
+                forward?.Invoke(suffix);
             }
 
             public void OnToken(string delta) { _inner?.OnToken(delta); }
             public void OnToolCall(ToolCallDto call) { _inner?.OnToolCall(call); }
             public void OnCompleted(string fullText, Usage usage) { _inner?.OnCompleted(fullText, usage); }
-            public void OnError(Exception ex) { ErrorMessage = ex?.Message ?? "Server 流错误"; _inner?.OnError(ex); }
+            public void OnError(Exception ex) { _transportErrorMessage = ex?.Message ?? "Server 流错误"; _inner?.OnError(ex); }
             public void OnReasoningToken(string delta)
             {
                 var reasoning = _inner as IReasoningSink;
@@ -389,11 +462,13 @@ namespace AIBot.Unity
         private sealed class ServerTransportException : Exception
         {
             public readonly int StatusCode;
+            public readonly bool CompletedResponse;
 
-            public ServerTransportException(int statusCode, string message)
+            public ServerTransportException(int statusCode, string message, bool completedResponse = false)
                 : base("AIBot.Server HTTP " + statusCode + (string.IsNullOrEmpty(message) ? "" : ": " + message))
             {
                 StatusCode = statusCode;
+                CompletedResponse = completedResponse;
             }
         }
     }
@@ -404,6 +479,9 @@ namespace AIBot.Unity
         public Usage Usage = new Usage();
         public bool UsedFallback;
         public long ElapsedMs;
+        public ServerModelDiagnostic Diagnostic;
+        public string RequestId;
+        public bool Replayed;
     }
 
     public sealed class ServerHealthResult

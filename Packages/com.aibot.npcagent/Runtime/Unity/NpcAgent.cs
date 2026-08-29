@@ -7,12 +7,23 @@ using AIBot.Core.Context;
 using AIBot.Core.Llm;
 using AIBot.Core.Memory;
 using AIBot.Core.Output;
+using AIBot.Core.Protocol;
 using AIBot.Core.Tools;
 using Newtonsoft.Json;
 using UnityEngine;
 
 namespace AIBot.Unity
 {
+    /// <summary>Local/Server 共用的工具执行通知；它只报告结果，不会重复执行工具。</summary>
+    [Serializable]
+    public sealed class AgentToolExecutionEvent
+    {
+        public string toolName;
+        public string argumentsJson;
+        public bool success;
+        public string result;
+    }
+
     /// <summary>
     /// NPC Agent 主组件：挂到角色上，调用 Chat(message) 获得流式回复。
     /// 配置来源：Server 连接 Profile、configAsset（SO）或 npcId + gameId（data/ 下的 JSON）。
@@ -48,6 +59,7 @@ namespace AIBot.Unity
         [Header("事件")]
         public UnityEngine.Events.UnityEvent<string> onToken;
         public UnityEngine.Events.UnityEvent<string> onReasoning;    // 推理模型的思考过程增量（可接 UI/调试）
+        public UnityEngine.Events.UnityEvent<AgentToolExecutionEvent> onToolExecuted;
         public UnityEngine.Events.UnityEvent<StructuredReply> onReply;
         public UnityEngine.Events.UnityEvent<string> onError;
         public UnityEngine.Events.UnityEvent onBusy;
@@ -70,6 +82,8 @@ namespace AIBot.Unity
 
         /// <summary>当前是否正在处理一轮对话。</summary>
         public bool IsBusy { get { return _running; } }
+        /// <summary>最近一次 Server 对话的幂等请求 ID，可用于显式断线恢复。</summary>
+        public string LastServerRequestId { get { return _serverBackend?.LastRequestId; } }
 
         private string _sessionSummary;
         private System.Collections.Generic.List<string> _sessionFacts;
@@ -157,7 +171,19 @@ namespace AIBot.Unity
         }
 
         /// <summary>可等待、可测试的对话入口；Chat(string) 仅作为 UnityEvent 兼容包装。</summary>
-        public async Task<AgentLoopResult> ChatAsync(string message)
+        public Task<AgentLoopResult> ChatAsync(string message)
+        {
+            return ChatInternalAsync(message, null);
+        }
+
+        /// <summary>使用原 requestId 恢复 Server 请求；相同 ID 必须搭配完全相同的消息与上下文。</summary>
+        public Task<AgentLoopResult> RetryServerRequestAsync(string message, string requestId)
+        {
+            if (!ChatRequestIds.IsValid(requestId)) throw new ArgumentException("requestId 格式无效", nameof(requestId));
+            return ChatInternalAsync(message, requestId);
+        }
+
+        private async Task<AgentLoopResult> ChatInternalAsync(string message, string requestId)
         {
             if (_running)
             {
@@ -179,7 +205,7 @@ namespace AIBot.Unity
                 if (IsServerMode())
                 {
                     ServerChatResult serverResult = await _serverBackend.ChatAsync(
-                        message, new UnityStreamSink(this), _requestCts.Token);
+                        message, new UnityStreamSink(this), _requestCts.Token, requestId);
                     if (serverResult == null || serverResult.Reply == null)
                     {
                         EmitError("AIBot.Server 未返回有效回复");
@@ -305,13 +331,16 @@ namespace AIBot.Unity
                 string resolvedSessionId = useConnectionProfile ? connectionProfile.sessionId : sessionId;
                 int resolvedTimeoutMs = useConnectionProfile
                     ? connectionProfile.timeoutMs : _config.model.timeoutMs;
+                bool enableSimulatedTools = useConnectionProfile
+                    ? connectionProfile.enableSimulatedTools
+                    : configAsset != null && configAsset.enableServerSimulatedTools;
                 _serverBackend = new UnityServerBackend(serverUrl, resolvedGameId, resolvedNpcId,
                     resolvedPlayerId, resolvedSessionId, resolvedTimeoutMs,
                     () =>
                     {
                         IGameContext context = GetGameContext();
                         return context == null ? null : context.SnapshotJson;
-                    });
+                    }, enableSimulatedTools);
                 _backend = null;
                 _loop = null;
             }
@@ -423,13 +452,24 @@ namespace AIBot.Unity
             else Debug.LogError("[AIBot] " + message);
         }
 
-        private sealed class UnityStreamSink : ILlmStreamSink, IReasoningSink
+        private sealed class UnityStreamSink : ILlmStreamSink, IReasoningSink, IToolExecutionSink
         {
             private readonly NpcAgent _agent;
             public UnityStreamSink(NpcAgent agent) { _agent = agent; }
             public void OnToken(string delta) { _agent.onToken?.Invoke(delta); }
             public void OnReasoningToken(string delta) { _agent.onReasoning?.Invoke(delta); }
             public void OnToolCall(ToolCallDto call) { }
+            public void OnToolExecuted(ToolExecution execution)
+            {
+                if (execution == null) return;
+                _agent.onToolExecuted?.Invoke(new AgentToolExecutionEvent
+                {
+                    toolName = execution.Call?.Function?.Name,
+                    argumentsJson = execution.Call?.Function?.Arguments ?? "{}",
+                    success = execution.Result != null && execution.Result.Success,
+                    result = execution.Result?.MessageForModel
+                });
+            }
             public void OnCompleted(string fullText, Usage usage) { }
             public void OnError(Exception ex) { Debug.LogWarning("[AIBot] 流错误：" + ex.Message); }
         }

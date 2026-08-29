@@ -22,6 +22,10 @@ namespace AIBot.Unity
         [Header("连接")]
         public int timeoutMs = 20000;
 
+        [Header("工具（仅调试）")]
+        [Tooltip("显式启用 Server 的 SimulatedToolHost。它只修改会话模拟状态，不能修改正式游戏背包、任务或好感度。")]
+        public bool enableSimulatedTools;
+
         private void OnValidate()
         {
             timeoutMs = Mathf.Max(1000, timeoutMs);

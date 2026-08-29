@@ -12,7 +12,7 @@
 Packages/com.aibot.npcagent   Unity 包（Runtime/Core = 三端共享的 AIBot.Core 源码）
 src/AIBot.Server              ASP.NET Core 独立宿主 + 静态托管（根入口跳转 wwwroot/app）
 src/AIBot.Web                 Vue 3 + TypeScript 统一管理/调试控制台（可选后台）
-src/AIBot.Tests               xUnit 测试（76 项，Core/记忆仓储/摘要队列/运行日志与审计免网全链路）
+src/AIBot.Tests               xUnit 测试（98 项，Core/协议/请求幂等/工具边界/记忆仓储/摘要队列/运行日志与审计免网全链路）
 data/games/{gameId}           NPC 配置/世界观/JSON 兼容存储（MySQL 模式下为迁移源/配置源）
 database/mysql/schema.sql     MySQL + Dapper 的表结构
 database/mysql/migrations     按版本维护的增量迁移 SQL（当前 001/002）
@@ -129,15 +129,18 @@ $env:AIBOT_ADMIN_TOKEN="请换成长随机值"
 # 4) curl 调试对话（中文请存 UTF-8 文件后 --data-binary @chat.json）
 curl -N -X POST http://localhost:5000/api/games/default/chat/stream \
   -H "Content-Type: application/json" \
-  -d '{"npcId":"blacksmith_wang","sessionId":"s1","message":"hello"}'
+  -H "X-Request-Id: req-demo-001" \
+  -d '{"requestId":"req-demo-001","npcId":"blacksmith_wang","sessionId":"s1","message":"hello"}'
 ```
 
 返回 SSE 事件流（主方案附录B）：`token` → `reasoning`（推理模型思考过程）→ `tool_call` → `reply` → `done`。
 **没填 key 也能调通**：返回兜底台词（`"fallback":true`）。
 
+每轮对话应携带稳定且唯一的 `requestId`。客户端断线后使用完全相同的请求体和 `requestId` 重试，Server 会等待原请求完成或从 Session 重放已持久化的完整 SSE，并返回 `X-AIBot-Replayed: true`；相同 ID 携带不同内容返回 `409 request_id_conflict`。若 Server 在处理过程中异常退出，重启后该 ID 返回 `409 request_in_doubt`，避免不确定副作用被自动执行第二次。
+
 摘要链路说明：短期窗口淘汰的消息会在达到 `summaryThreshold` 后进入后台队列。单个任务自动重试 3 次；失败时不会删除 Session 中的 `evictedMessages`，可在 `/app/#/memories` 的会话详情中点击“重试摘要”，或调用 `POST /api/admin/memory-summary-queue/retry`。队列状态接口会返回待处理数、当前失败数、累计失败数和失败明细。
 
-MySQL 模式会把摘要任务状态持久化到 `memory_summary_jobs`，Server 重启后自动恢复 pending/processing 任务；数据库迁移由 `schema_migrations` 管理。`GET /api/ready` 可用于启动探针，未连接数据库、缺少表、未配置模型或没有默认 NPC 时返回 503。模型错误在 SSE `error` 事件和连接测试接口中提供稳定的 `code/status/retryable` 字段。
+MySQL 模式会把摘要任务状态持久化到 `memory_summary_jobs`，Server 重启后自动恢复 pending/processing 任务；数据库迁移由 `schema_migrations` 管理。`GET /api/ready` 可用于启动探针，未连接数据库、缺少表、未配置模型或没有默认 NPC 时返回 503。模型故障若已由 AgentLoop 降级为兜底回复，会在 SSE `reply.diagnostic` 中提供稳定的 `code/status/retryable` 字段；只有无法返回任何有效回复的终止故障才使用 `error` 事件。连接测试接口继续返回同一套错误码契约。
 
 Docker MySQL 首次初始化会自动执行 `database/mysql/schema.sql`，数据保存在 `ai_npc_mysql_data` volume。`docker.yml` 默认映射宿主机 `3306`；如果该端口已被其他 MySQL 服务占用，可在根目录 `.env` 中设置 `AIBOT_MYSQL_PORT=3307`（本机当前示例已使用 3307），此时宿主机运行 Server 要连接 `127.0.0.1:3307`。以后若把 Server 也容器化，连接地址改为 `mysql:3306`。停止容器使用 `docker compose -f docker.yml down`，不要随意使用 `down -v`，否则会删除数据库卷。
 
@@ -168,6 +171,7 @@ Local 模式还可以在 `NpcAgent.worldConfigAsset` 指定 `World Config` 资�
 
 工具能力按运行模式隔离：Local 模式由 Unity 通过 `NpcAgent.Tools` 注册并执行；Server 模式由 `AIBot.Server` 注册和执行，Unity 本地注册的工具不会自动上传。插件会在检测到模式与工具配置不匹配时给出运行时警告。
 
-当前版本的 Server 工具仅使用 `SimulatedToolHost` 做调试模拟（背包、好感度和剧情阶段会写入会话模拟状态），不能直接修改正式游戏状态。正式游戏接入真实业务工具前，应将其视为对话、记忆和管理台能力，不能把模拟工具当作生产交易或任务系统。
+Server 聊天默认 `toolMode=none`，不会注册模拟工具。Vue 调试台或 Unity Profile 显式选择 `toolMode=simulated` 后，才会启用 `SimulatedToolHost`（背包、好感度和剧情阶段只写入会话模拟状态）。Local/Server 的工具执行结果都会通过 Unity `onToolExecuted` 统一通知，但该事件只报告执行结果，不会把 Server 模拟结果写入正式游戏。生产交易、任务和背包仍应接入真实业务工具。
 
 Server 模式可调用 `await agent.CheckServerAsync()` 主动检查后台连接、就绪状态和当前 NPC 是否存在；结果会通过 `onServerStatus` 事件通知，不会给每次聊天额外增加检查请求。
+`UnityServerBackend` 会自动为每轮生成 `requestId` 并最多恢复重试两次，同时消除重放 token、reasoning 和工具事件。需要显式恢复时可读取 `agent.LastServerRequestId`，再调用 `RetryServerRequestAsync(message, requestId)`。

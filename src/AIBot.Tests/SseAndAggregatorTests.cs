@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using AIBot.Core.Llm;
+using AIBot.Core.Protocol;
 using Xunit;
 
 namespace AIBot.Tests
@@ -116,6 +117,169 @@ namespace AIBot.Tests
             parser.Feed("data: [DONE]\n\n");
 
             Assert.Equal("ok", sink.CompletedText);
+        }
+    }
+
+    public class ServerChatEventParserTests
+    {
+        [Theory]
+        [InlineData(null, ServerToolModes.None)]
+        [InlineData("", ServerToolModes.None)]
+        [InlineData(" SIMULATED ", ServerToolModes.Simulated)]
+        public void ToolMode_NormalizesSupportedValues(string input, string expected)
+        {
+            Assert.True(ServerToolModes.TryNormalize(input, out string normalized));
+            Assert.Equal(expected, normalized);
+        }
+
+        [Fact]
+        public void ToolMode_RejectsUnknownValue()
+        {
+            Assert.False(ServerToolModes.TryNormalize("remote", out string normalized));
+            Assert.Null(normalized);
+        }
+
+        [Fact]
+        public void Token_IsAlreadyDisplayText()
+        {
+            Assert.True(ServerChatEventParser.TryParse(
+                "{\"type\":\"token\",\"delta\":\"你好，旅行者\"}", out ServerChatEvent parsed));
+
+            Assert.Equal(ServerChatEventKind.Token, parsed.Kind);
+            Assert.Equal("你好，旅行者", parsed.Delta);
+        }
+
+        [Fact]
+        public void FallbackReply_PreservesReplyAndDiagnostic()
+        {
+            const string json = "{\"type\":\"reply\",\"say\":\"稍后再谈。\",\"emotion\":\"neutral\"," +
+                "\"action\":\"idle\",\"fallback\":true,\"usage\":{\"promptTokens\":10,\"completionTokens\":2}," +
+                "\"elapsedMs\":123,\"diagnostic\":{\"code\":\"model_timeout\",\"status\":504," +
+                "\"message\":\"模型请求超时\",\"retryable\":true}}";
+
+            Assert.True(ServerChatEventParser.TryParse(json, out ServerChatEvent parsed));
+
+            Assert.Equal(ServerChatEventKind.Reply, parsed.Kind);
+            Assert.True(parsed.Fallback);
+            Assert.Equal("稍后再谈。", parsed.Reply.say);
+            Assert.Equal(12, parsed.Usage.TotalTokens);
+            Assert.Equal("model_timeout", parsed.Diagnostic.Code);
+            Assert.True(parsed.Diagnostic.Retryable);
+        }
+
+        [Fact]
+        public void Error_DefaultsToTerminal()
+        {
+            Assert.True(ServerChatEventParser.TryParse(
+                "{\"type\":\"error\",\"message\":\"Server 故障\"}", out ServerChatEvent parsed));
+
+            Assert.Equal(ServerChatEventKind.Error, parsed.Kind);
+            Assert.True(parsed.Terminal);
+            Assert.Equal("Server 故障", parsed.Diagnostic.Message);
+        }
+
+        [Fact]
+        public void Reasoning_ParsesDelta()
+        {
+            Assert.True(ServerChatEventParser.TryParse(
+                "{\"type\":\"reasoning\",\"delta\":\"先检查任务状态\"}", out ServerChatEvent parsed));
+
+            Assert.Equal(ServerChatEventKind.Reasoning, parsed.Kind);
+            Assert.Equal("先检查任务状态", parsed.Delta);
+        }
+
+        [Fact]
+        public void ToolCall_ParsesExecutionFields()
+        {
+            const string json = "{\"type\":\"tool_call\",\"callId\":\"call-7\",\"name\":\"give_item\"," +
+                "\"args\":{\"item_id\":\"iron_ore\",\"count\":3},\"success\":true," +
+                "\"result\":\"已给玩家铁矿 x3\"}";
+
+            Assert.True(ServerChatEventParser.TryParse(json, out ServerChatEvent parsed));
+
+            Assert.Equal(ServerChatEventKind.ToolCall, parsed.Kind);
+            Assert.Equal("call-7", parsed.ToolCallId);
+            Assert.Equal("give_item", parsed.ToolName);
+            Assert.Equal("{\"item_id\":\"iron_ore\",\"count\":3}", parsed.ToolArgumentsJson);
+            Assert.True(parsed.ToolSuccess);
+            Assert.Equal("已给玩家铁矿 x3", parsed.ToolResult);
+        }
+
+        [Fact]
+        public void Done_ParsesSessionId()
+        {
+            Assert.True(ServerChatEventParser.TryParse(
+                "{\"type\":\"done\",\"sessionId\":\"s-123\",\"requestId\":\"req-123\"}", out ServerChatEvent parsed));
+
+            Assert.Equal(ServerChatEventKind.Done, parsed.Kind);
+            Assert.Equal("s-123", parsed.SessionId);
+            Assert.Equal("req-123", parsed.RequestId);
+        }
+
+        [Theory]
+        [InlineData("req-123")]
+        [InlineData("unity:session.turn_1")]
+        public void RequestId_AcceptsProtocolSafeValues(string value)
+        {
+            Assert.True(ChatRequestIds.IsValid(value));
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("contains space")]
+        [InlineData("包含中文")]
+        public void RequestId_RejectsUnsafeValues(string value)
+        {
+            Assert.False(ChatRequestIds.IsValid(value));
+        }
+
+        [Fact]
+        public void MalformedAndUnknownEvents_AreRejected()
+        {
+            Assert.False(ServerChatEventParser.TryParse("not-json", out _));
+            Assert.False(ServerChatEventParser.TryParse("{\"type\":\"future_event\"}", out _));
+        }
+
+        [Fact]
+        public void ResponseState_FallbackReplyOverridesEarlierError()
+        {
+            var state = new ServerChatResponseState();
+            Assert.True(ServerChatEventParser.TryParse(
+                "{\"type\":\"error\",\"message\":\"模型超时\",\"terminal\":true}", out ServerChatEvent error));
+            Assert.True(ServerChatEventParser.TryParse(
+                "{\"type\":\"reply\",\"say\":\"稍后再谈。\",\"fallback\":true}", out ServerChatEvent reply));
+
+            state.Apply(error);
+            Assert.Equal("模型超时", state.CompletionError.Message);
+            state.Apply(reply);
+
+            Assert.NotNull(state.ReplyEvent);
+            Assert.True(state.ReplyEvent.Fallback);
+            Assert.Null(state.CompletionError);
+        }
+
+        [Fact]
+        public void FragmentedSse_PreservesUnicodeAndTerminalState()
+        {
+            var events = new List<ServerChatEvent>();
+            var state = new ServerChatResponseState();
+            var parser = new SseLineParser(payload =>
+            {
+                if (!ServerChatEventParser.TryParse(payload, out ServerChatEvent parsed)) return;
+                events.Add(parsed);
+                state.Apply(parsed);
+            });
+            string script = "data: {\"type\":\"token\",\"delta\":\"你好\"}\n\n" +
+                "data: {\"type\":\"reply\",\"say\":\"你好，旅行者\"}\n\n" +
+                "data: {\"type\":\"done\",\"sessionId\":\"s-中文\"}\n\n";
+            foreach (char value in script) parser.Feed(value.ToString());
+            parser.Flush();
+
+            Assert.Equal(3, events.Count);
+            Assert.Equal("你好", events[0].Delta);
+            Assert.Equal("你好，旅行者", state.ReplyEvent.Reply.say);
+            Assert.True(state.Done);
+            Assert.Equal("s-中文", state.SessionId);
         }
     }
 }

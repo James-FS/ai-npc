@@ -26,6 +26,8 @@ namespace AIBot.Unity
         [Tooltip("local 直连模型；server 通过 AIBot.Server 中转。")]
         public AgentRuntimeMode runtimeMode = AgentRuntimeMode.Local;
         public string serverBaseUrl = "http://127.0.0.1:5000";
+        [Tooltip("仅旧版 Server 配置兼容使用。启用后只执行 Server 会话模拟工具，不会修改 Unity 正式游戏状态。")]
+        public bool enableServerSimulatedTools;
 
         [Serializable]
         public class LoreEntry

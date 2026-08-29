@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using AIBot.Core;
@@ -8,6 +10,7 @@ using AIBot.Core.Context;
 using AIBot.Core.Llm;
 using AIBot.Core.Logging;
 using AIBot.Core.Memory;
+using AIBot.Core.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -23,10 +26,12 @@ namespace AIBot.Server
         public string NpcId { get; set; }
         public string PlayerId { get; set; }
         public string SessionId { get; set; } = "s-local";
+        public string RequestId { get; set; }
         public string Message { get; set; }
         public SimGameState SimState { get; set; }
         public OverrideSettings Override { get; set; }
         public MemoryPolicyOverrides MemoryOverride { get; set; } // 管理端调试临时覆盖，Server 最终仍应用安全上限
+        public string ToolMode { get; set; } = ServerToolModes.None; // none（正式默认）/ simulated（仅调试）
     }
 
     public class OverrideSettings
@@ -67,6 +72,46 @@ namespace AIBot.Server
                     await http.Response.WriteAsync("npcId 与 message 必填");
                     return;
                 }
+                if (!ServerToolModes.TryNormalize(body.ToolMode, out string toolMode))
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("toolMode 仅支持 none 或 simulated");
+                    return;
+                }
+                bool useSimulatedTools = toolMode == ServerToolModes.Simulated;
+                if (useSimulatedTools && !CanUseAdminOverrides(http, config))
+                {
+                    http.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    await http.Response.WriteAsync("simulated 工具仅允许授权的调试请求使用");
+                    return;
+                }
+                string headerRequestId = http.Request.Headers["X-Request-Id"].ToString();
+                if (!string.IsNullOrWhiteSpace(headerRequestId) && !ChatRequestIds.IsValid(headerRequestId))
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("X-Request-Id 格式无效");
+                    return;
+                }
+                if (!string.IsNullOrWhiteSpace(headerRequestId)
+                    && !string.IsNullOrWhiteSpace(body.RequestId)
+                    && !string.Equals(headerRequestId, body.RequestId, StringComparison.Ordinal))
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("X-Request-Id 与请求体 requestId 必须一致");
+                    return;
+                }
+                string requestId = !string.IsNullOrWhiteSpace(body.RequestId)
+                    ? body.RequestId
+                    : !string.IsNullOrWhiteSpace(headerRequestId) ? headerRequestId : http.TraceIdentifier;
+                if (!ChatRequestIds.IsValid(requestId))
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("requestId 非法（仅允许字母数字及 _ . : -，最长80位）");
+                    return;
+                }
+                body.RequestId = requestId;
+                http.TraceIdentifier = requestId;
+                http.Response.Headers["X-Request-Id"] = requestId;
                 if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(body.NpcId))
                 {
                     http.Response.StatusCode = 400;
@@ -136,31 +181,70 @@ namespace AIBot.Server
 
                 SessionState session = SessionStore.GetOrCreate(gid, body.NpcId, body.PlayerId, body.SessionId,
                     effectiveMemory.policy.shortTermTurns);
+                string fingerprint = BuildRequestFingerprint(body, toolMode);
 
                 try
                 {
-                    await session.Gate.WaitAsync(http.RequestAborted);
+                    // 请求一旦通过校验就由 Server 承担完成责任；客户端断线只停止响应写入，
+                    // 不取消模型、记忆或工具链，重连请求会在 Gate 后读取持久化结果。
+                    await session.Gate.WaitAsync(app.Lifetime.ApplicationStopping);
                 }
                 catch (OperationCanceledException)
                 {
                     return;
                 }
 
+                ChatRequestRecord requestRecord = null;
+                Channel<string> channel = null;
+                SseEventWriter sse = null;
+                Task pump = null;
                 try
                 {
+                    requestRecord = SessionStore.FindRequest(session, requestId);
+                    if (requestRecord != null)
+                    {
+                        if (!string.Equals(requestRecord.fingerprint, fingerprint, StringComparison.Ordinal))
+                        {
+                            await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                "request_id_conflict", "相同 requestId 不能用于不同的聊天内容");
+                            return;
+                        }
+                        if (requestRecord.status == ChatRequestStatuses.Completed
+                            || requestRecord.status == ChatRequestStatuses.Failed)
+                        {
+                            await ReplayEventsAsync(http, requestRecord);
+                            return;
+                        }
+
+                        // 当前进程中的并发重复请求会先等待 Gate；能走到这里的 processing
+                        // 来自上次异常退出，状态无法证明是否已产生副作用，因此禁止自动重跑。
+                        await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                            "request_in_doubt", "该请求上次执行状态不确定，请查询业务状态后使用新的 requestId");
+                        return;
+                    }
+
+                    requestRecord = SessionStore.BeginRequest(session, requestId, fingerprint);
+                    if (!SessionStore.Save(session))
+                    {
+                        session.RecentRequests.Remove(requestRecord);
+                        await ApiErrorWriter.WriteAsync(http, StatusCodes.Status503ServiceUnavailable,
+                            "idempotency_store_unavailable", "无法持久化请求幂等状态，请稍后重试");
+                        return;
+                    }
+
                     PlayerLongTermMemory longMemory = null;
                     if (playerScoped)
                     {
                         longMemory = await playerMemories.LoadAndMigrateAsync(session,
-                            effectiveMemory.policy.maxFacts, http.RequestAborted);
+                            effectiveMemory.policy.maxFacts, app.Lifetime.ApplicationStopping);
                     }
 
                     http.Response.ContentType = "text/event-stream; charset=utf-8";
                     http.Response.Headers.CacheControl = "no-cache";
 
-                    var channel = Channel.CreateUnbounded<string>();
-                    var sse = new SseEventWriter(channel.Writer, body.SessionId);
-                    Task pump = Task.Run(async () =>
+                    channel = Channel.CreateUnbounded<string>();
+                    sse = new SseEventWriter(channel.Writer, body.SessionId);
+                    pump = Task.Run(async () =>
                     {
                         try
                         {
@@ -186,9 +270,11 @@ namespace AIBot.Server
                     }
                 }
 
-                // 模拟工具：give_item/change_favor/advance_stage 真实读写会话状态（随会话持久化）
+                // 正式聊天默认不注册模拟工具，避免把会话状态变化误当作真实游戏业务写入。
+                // 调试台显式请求 simulated 后才启用 give_item/change_favor/advance_stage。
                 var toolRegistry = new AIBot.Core.Tools.ToolRegistry();
-                new AIBot.Core.Tools.SimulatedToolHost(session.SimState).RegisterAll(toolRegistry);
+                if (useSimulatedTools)
+                    new AIBot.Core.Tools.SimulatedToolHost(session.SimState).RegisterAll(toolRegistry);
 
                 var backend = new HttpLlmBackend(cfg.model);
                 var loop = new AgentLoop(backend, new ServerLogSink(runtimeLogs, "Agent",
@@ -222,7 +308,7 @@ namespace AIBot.Server
                 AgentLoopResult result;
                 try
                 {
-                    result = await loop.RunAsync(input, sse, http.RequestAborted);
+                    result = await loop.RunAsync(input, sse, app.Lifetime.ApplicationStopping);
                 }
                 catch (OperationCanceledException)
                 {
@@ -242,7 +328,7 @@ namespace AIBot.Server
                         {
                             await playerMemories.SaveLegacySummaryAsync(gid, body.NpcId, body.PlayerId,
                                 body.SessionId, result.MemorySummary, result.MemoryFacts,
-                                effectiveMemory.policy.maxFacts, http.RequestAborted);
+                                effectiveMemory.policy.maxFacts, app.Lifetime.ApplicationStopping);
                         }
                         catch
                         {
@@ -292,7 +378,7 @@ namespace AIBot.Server
                     ["promptTokens"] = result.Usage.PromptTokens,
                     ["completionTokens"] = result.Usage.CompletionTokens
                 };
-                sse.Write(new JObject
+                var replyEvent = new JObject
                 {
                     ["type"] = "reply",
                     ["say"] = result.Reply.say,
@@ -301,8 +387,37 @@ namespace AIBot.Server
                     ["fallback"] = result.UsedFallback,
                     ["usage"] = usage,
                     ["elapsedMs"] = result.ElapsedMs
+                };
+                if (result.UsedFallback && sse.LastModelError != null)
+                {
+                    replyEvent["diagnostic"] = new JObject
+                    {
+                        ["code"] = sse.LastModelError.Code,
+                        ["status"] = sse.LastModelError.Status,
+                        ["message"] = sse.LastModelError.Message,
+                        ["retryable"] = sse.LastModelError.Retryable
+                    };
+                }
+                sse.Write(replyEvent);
+                sse.Write(new JObject
+                {
+                    ["type"] = "done",
+                    ["sessionId"] = body.SessionId,
+                    ["requestId"] = requestId
                 });
-                sse.Write(new JObject { ["type"] = "done", ["sessionId"] = body.SessionId });
+                SessionStore.CompleteRequest(requestRecord, sse.SnapshotEvents());
+                if (!SessionStore.Save(session))
+                {
+                    runtimeLogs.Write(LogLevel.Warning, "Chat", "idempotency_result_save_failed",
+                        "聊天已完成，但幂等重放结果保存失败", new RuntimeLogContext
+                        {
+                            RequestId = requestId,
+                            GameId = gid,
+                            NpcId = body.NpcId,
+                            PlayerId = body.PlayerId,
+                            SessionId = body.SessionId
+                        });
+                }
                 channel.Writer.TryComplete();
                 await pump;
 
@@ -313,6 +428,39 @@ namespace AIBot.Server
                 {
                     summaryQueue.Enqueue(gid, body.NpcId, body.PlayerId, body.SessionId);
                 }
+                }
+                catch (OperationCanceledException) when (app.Lifetime.ApplicationStopping.IsCancellationRequested)
+                {
+                    channel?.Writer.TryComplete();
+                    if (pump != null) await pump;
+                }
+                catch (Exception ex)
+                {
+                    if (requestRecord == null || sse == null || channel == null) throw;
+                    runtimeLogs.Write(LogLevel.Error, "Chat", "request_failed",
+                        "聊天请求执行失败: " + ex.Message, new RuntimeLogContext
+                        {
+                            RequestId = requestId,
+                            GameId = gid,
+                            NpcId = body.NpcId,
+                            PlayerId = body.PlayerId,
+                            SessionId = body.SessionId,
+                            ErrorCode = "internal_error"
+                        }, ex);
+                    sse.Write(new JObject
+                    {
+                        ["type"] = "error",
+                        ["code"] = "internal_error",
+                        ["status"] = 500,
+                        ["message"] = "Server 处理请求时发生内部错误",
+                        ["retryable"] = true,
+                        ["terminal"] = true,
+                        ["requestId"] = requestId
+                    });
+                    SessionStore.CompleteRequest(requestRecord, sse.SnapshotEvents(), failed: true);
+                    SessionStore.Save(session);
+                    channel.Writer.TryComplete();
+                    if (pump != null) await pump;
                 }
                 finally
                 {
@@ -330,10 +478,46 @@ namespace AIBot.Server
                 "Bearer " + adminToken, StringComparison.Ordinal);
         }
 
+        private static string BuildRequestFingerprint(ChatRequestBody body, string normalizedToolMode)
+        {
+            string canonical = JsonConvert.SerializeObject(new
+            {
+                body.NpcId,
+                body.PlayerId,
+                body.SessionId,
+                body.Message,
+                ToolMode = normalizedToolMode,
+                body.SimState,
+                body.Override,
+                body.MemoryOverride
+            }, Formatting.None);
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(canonical));
+                var text = new StringBuilder(hash.Length * 2);
+                foreach (byte value in hash) text.Append(value.ToString("x2"));
+                return text.ToString();
+            }
+        }
+
+        private static async Task ReplayEventsAsync(HttpContext http, ChatRequestRecord record)
+        {
+            http.Response.ContentType = "text/event-stream; charset=utf-8";
+            http.Response.Headers.CacheControl = "no-cache";
+            http.Response.Headers["X-AIBot-Replayed"] = "true";
+            foreach (string line in record.events ?? new List<string>())
+            {
+                await http.Response.WriteAsync(line, http.RequestAborted);
+            }
+            await http.Response.Body.FlushAsync(http.RequestAborted);
+        }
+
         /// <summary>把 Core 回调转成附录B的 SSE 事件行，经 Channel 泵异步写出。</summary>
         private sealed class SseEventWriter : ILlmStreamSink, IReasoningSink, IToolExecutionSink
         {
             private readonly ChannelWriter<string> _writer;
+            private readonly List<string> _events = new List<string>();
+            public ModelErrorInfo LastModelError { get; private set; }
 
             public SseEventWriter(ChannelWriter<string> writer, string sessionId)
             {
@@ -355,6 +539,7 @@ namespace AIBot.Server
                 Write(new JObject
                 {
                     ["type"] = "tool_call",
+                    ["callId"] = execution.Call.Id,
                     ["name"] = execution.Call.Function.Name,
                     ["args"] = ParseArgs(execution.Call.Function.Arguments),
                     ["success"] = execution.Result.Success,
@@ -364,12 +549,9 @@ namespace AIBot.Server
 
             public void OnError(Exception ex)
             {
-                ModelErrorInfo info = ModelErrorContract.Classify(ex);
-                Write(new JObject
-                {
-                    ["type"] = "error", ["code"] = info.Code, ["status"] = info.Status,
-                    ["message"] = info.Message, ["retryable"] = info.Retryable
-                });
+                // AgentLoop 会把模型故障降级为 fallback reply。这里保留诊断，随 reply 一起下发，
+                // 避免客户端先收到终止 error、随后又收到可用 fallback 的矛盾事件序列。
+                LastModelError = ModelErrorContract.Classify(ex);
             }
 
             public void OnToolCall(ToolCallDto call) { }            // 聚合回调不下发；执行事件走 OnToolExecuted
@@ -383,7 +565,14 @@ namespace AIBot.Server
 
             public void Write(JObject payload)
             {
-                _writer.TryWrite("data: " + payload.ToString(Formatting.None) + "\n\n");
+                string line = "data: " + payload.ToString(Formatting.None) + "\n\n";
+                lock (_events) _events.Add(line);
+                _writer.TryWrite(line);
+            }
+
+            public List<string> SnapshotEvents()
+            {
+                lock (_events) return new List<string>(_events);
             }
         }
     }

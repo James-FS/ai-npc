@@ -39,44 +39,76 @@ export const debugApi = {
 
 export async function streamChat(
   gameId: string,
-  body: { npcId: string; playerId: string; sessionId: string; message: string; simState: SimGameState; override?: { model?: string } },
+  body: { requestId?: string; npcId: string; playerId: string; sessionId: string; message: string; simState: SimGameState; toolMode?: 'none' | 'simulated'; override?: { model?: string } },
   onEvent: (event: DebugChatEvent) => void,
   signal?: AbortSignal,
 ) {
   const app = useAppStore()
   const url = `${app.serverBase.replace(/\/$/, '')}${gamePath(gameId, '/chat/stream')}`
-  let response: Response
-  try {
-    response = await fetch(url, {
-      method: 'POST', headers: authHeaders(), body: JSON.stringify(body), signal,
-    })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') throw error
-    throw new ApiError(0, '无法连接 Server，请确认服务已启动', null, 'network_error')
-  }
-  if (!response.ok) {
-    const text = await response.text()
-    let payload: unknown = text
-    try { payload = text ? JSON.parse(text) : null } catch { /* plain text */ }
-    throw apiErrorFromResponse(response, payload)
-  }
-  if (!response.body) throw new Error('Server 未返回流式响应')
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const result = await reader.read()
-    if (result.done) break
-    buffer += decoder.decode(result.value, { stream: true })
-    const lines = buffer.split(/\r?\n/)
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      try { onEvent(JSON.parse(line.slice(6)) as DebugChatEvent) } catch { /* 忽略非 JSON SSE 行 */ }
+  const requestId = body.requestId || crypto.randomUUID().replace(/-/g, '')
+  const requestBody = { ...body, requestId }
+  const delivered: string[] = []
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let response: Response
+    try {
+      const headers = authHeaders()
+      headers.set('X-Request-Id', requestId)
+      response = await fetch(url, {
+        method: 'POST', headers, body: JSON.stringify(requestBody), signal,
+      })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error
+      if (attempt === 0) continue
+      throw new ApiError(0, '无法连接 Server，请确认服务已启动', null, 'network_error')
+    }
+    if (!response.ok) {
+      const text = await response.text()
+      let payload: unknown = text
+      try { payload = text ? JSON.parse(text) : null } catch { /* plain text */ }
+      const error = apiErrorFromResponse(response, payload)
+      if (attempt === 0 && (response.status === 408 || response.status === 429 || response.status >= 500)) continue
+      throw error
+    }
+    if (!response.body) throw new Error('Server 未返回流式响应')
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let eventIndex = 0
+    let terminal = false
+    const consumeLine = (line: string) => {
+      if (!line.startsWith('data: ')) return
+      const payload = line.slice(6)
+      let event: DebugChatEvent | null = null
+      try { event = JSON.parse(payload) as DebugChatEvent } catch { /* 忽略非 JSON SSE 行 */ }
+      if (eventIndex < delivered.length) {
+        if (delivered[eventIndex] !== payload) throw new Error('同一 requestId 的重放内容不一致')
+      } else {
+        delivered.push(payload)
+        if (event) onEvent(event)
+      }
+      if (event) terminal = event.type === 'done' || event.type === 'error'
+      eventIndex += 1
+    }
+
+    try {
+      while (true) {
+        const result = await reader.read()
+        if (result.done) break
+        buffer += decoder.decode(result.value, { stream: true })
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() ?? ''
+        for (const line of lines) consumeLine(line)
+      }
+      buffer += decoder.decode()
+      if (buffer) consumeLine(buffer)
+      if (terminal) return
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') throw error
+      if (terminal) return
+      if (attempt > 0) throw error
     }
   }
-  buffer += decoder.decode()
-  if (buffer.startsWith('data: ')) {
-    try { onEvent(JSON.parse(buffer.slice(6)) as DebugChatEvent) } catch { /* 忽略不完整 SSE 行 */ }
-  }
+  throw new ApiError(0, 'Server 流中断且恢复失败', null, 'stream_incomplete')
 }
