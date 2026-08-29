@@ -1,6 +1,6 @@
 {
-  "shortTermTurns": 2,
-  "summaryThreshold": 2,
+  "shortTermTurns": 12,
+  "summaryThreshold": 20,
   "summaryTrigger": "message_count",
   "memoryScope": "player_npc",
   "maxFacts": 8,

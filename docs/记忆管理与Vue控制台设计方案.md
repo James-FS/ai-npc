@@ -74,7 +74,7 @@ Local 模式用于 Demo、单机和离线联调；Server 模式用于在线游�
 
 当前 Unity 包已实现 `UnityWebRequestBackend`（Local 模式）和 `UnityServerBackend`（Server 模式）。在 `AgentConfigAsset` 或 NPC JSON 中设置 `runtimeMode=server`、`serverBaseUrl`，并在 `NpcAgent` 上填写可选的 `playerId/sessionId` 即可通过 Server 中转；鉴权暂不强制，后续可在传输层增加。
 
-当前 Server 模式中的工具仅用于调试模拟，使用 `SimulatedToolHost` 修改会话内的 `SimGameState`，不能直接修改正式游戏的背包、任务、好感度或其他业务状态。正式游戏接入前，Server 应继续被视为对话、记忆和管理后台，不应把这些模拟结果当作生产业务写入。
+Server 正式请求默认 `toolMode=none`。只有 Vue 调试台或 Unity Profile 显式选择 `simulated` 时，才使用 `SimulatedToolHost` 修改会话内的 `SimGameState`；它不能直接修改正式游戏的背包、任务、好感度或其他业务状态。正式游戏接入前，不应把这些模拟结果当作生产业务写入。
 
 ## 5. 配置分层
 
@@ -449,7 +449,7 @@ JSON 仍是默认开发存储，并采用逐文件信号量、乐观版本检查
 
 开发环境可直接执行项目根目录的 `docker compose -f docker.yml up -d mysql` 启动 MySQL。该 Compose 文件只包含数据库服务，不会把 Unity、Vue 或 Server 打包进容器。默认使用宿主机 `3306`；若被其他 MySQL 占用，可在 `.env` 设置 `AIBOT_MYSQL_PORT`（本机示例为 `3307`），Server 连接宿主机映射端口，容器内部仍使用 `mysql:3306`。
 
-本机联调示例账号为 `aibot` / `123456`。宿主机 Server 的连接串需要包含 `SslMode=None;AllowPublicKeyRetrieval=True` 以兼容本地 Docker MySQL 的 `caching_sha2_password`；线上部署应使用 TLS 与独立强密码。
+本机联调请在被 Git 忽略的 `.env` 中自行设置数据库账号与强密码，不要把真实凭据写入文档或提交。宿主机 Server 的连接串需要包含 `SslMode=None;AllowPublicKeyRetrieval=True` 以兼容本地 Docker MySQL 的 `caching_sha2_password`；线上部署应使用 TLS 与独立强密码。
 
 Windows 本地开发可从项目根目录执行 `.\start-server-mysql.ps1`。该脚本读取 `.env` 中的数据库名、账号、密码和映射端口，确保 MySQL 容器健康后为当前 AIBot.Server 进程生成连接串；不需要永久写入 Windows 用户环境变量。
 

@@ -3,7 +3,7 @@
 > 一个可插拔的 NPC 智能Agent平台：纯 C# 核心（AIBot.Core）+ Unity 包 + 独立管理服务（AIBot.Server）+ Web 管理台。接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM），NPC 具备自由对话、剧情人设、两级记忆、工具调用与结构化输出的完整 agent 能力。
 >
 > 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v3.0（2026-08-27）
-> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（76/76）与真实模型端到端验证。**
+> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（98/98）与真实模型端到端验证。**
 
 | 版本 | 变更 |
 |---|---|
@@ -213,7 +213,7 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - **短期**：`ShortTermMemory` 窗口（默认12条）+ 淘汰队列；运行中策略改变 `shortTermTurns` 会立即 `Resize`，缩小窗口的消息进入待摘要队列
 - **长期**：`MemorySummarizer` 用 summaryModel（空则主模型，0.3温度、json_object、400 tokens）把淘汰消息滚动压缩为 ≤80 字摘要 + ≤8 条事实；结构化玩家记忆使用独立 JSON 文件和乐观版本
 - **摘要关闭**：`summaryThreshold=0` 时 Session 范围丢弃窗口外消息，玩家范围保留有界的最近短期窗口供手动摘要
-- **模拟工具** `SimulatedToolHost`：`give_item`（背包累积）/ `change_favor` / `advance_stage`，真实读写 `SimGameState` 并随会话持久化。当前 Server 模式仅使用这组调试模拟工具，不能直接修改正式游戏状态；Local 模式可由游戏端替换为真实 `IAgentTool`，Server 的正式业务工具接入另行设计。
+- **模拟工具** `SimulatedToolHost`：`give_item`（背包累积）/ `change_favor` / `advance_stage`，真实读写 `SimGameState` 并随会话持久化。Server 正式请求默认 `toolMode=none`，只有 Vue 调试台或 Unity Profile 显式选择 `simulated` 才注册这些工具；它们不能直接修改正式游戏状态。Local 模式可由游戏端替换为真实 `IAgentTool`，Server 的正式业务工具接入另行设计。
 
 ---
 
@@ -223,7 +223,7 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 | 端点 | 说明 |
 |---|---|
-| `POST /api/games/{gid}/chat/stream` | 对话（SSE，附录B 契约；支持 simState/override 模型覆盖） |
+| `POST /api/games/{gid}/chat/stream` | 对话（SSE；支持 requestId 幂等重放、simState、toolMode 与 override） |
 | `GET/POST/PUT/DELETE …/npcs(/{id})` | NPC CRUD（POST 从模板创建；PUT 空 apiKey 不覆盖已存 key） |
 | `GET/PUT …/world` | 世界观读写 |
 | `GET/PUT …/memory-policy` | Game 默认记忆策略读写 |
@@ -248,7 +248,8 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 ### 6.2 持久化与日志
 
-- **短期会话**：内存缓存 + 每会话串行锁 + `sessions/{npcId}/{playerId}/{sid}.json` 原子落盘（消息窗口/待摘要队列/模拟状态）；无 playerId 的旧客户端继续走兼容路径
+- **短期会话**：内存缓存 + 每会话串行锁 + `sessions/{npcId}/{playerId}/{sid}.json` 原子落盘（消息窗口/待摘要队列/模拟状态/最近 20 个请求状态与 SSE 重放事件）；无 playerId 的旧客户端继续走兼容路径
+- **聊天幂等**：每轮使用稳定 `requestId` 和请求指纹。客户端断线只停止 HTTP 写入，Server 继续完成模型、工具和记忆链路；同 ID 重试会等待 Session Gate 后重放已完成事件。相同 ID 不同指纹返回 `request_id_conflict`；重启后残留的 `processing` 返回 `request_in_doubt`，不自动重复可能已发生的副作用。
 - **长期记忆**：`memories/{npcId}/{playerId}.json` 保存滚动摘要、结构化事实与 `memoryVersion`；同一玩家切换 session 后继续注入，冲突时重新加载并合并
 - **后台摘要**：`reply/done` 刷新后入有界去重队列；单任务最多自动重试 3 次。长期记忆与必写审计均成功后才确认消费待摘要消息；启动扫描恢复未完成任务。耗尽重试后保留失败明细（游戏/NPC/玩家/Session、错误和时间），待摘要消息仍保留，可通过管理 API 或 Vue 手动重试。
 - **摘要状态**：会话级状态为 `idle`（无待处理）、`waiting`（有待摘要但尚未排队）、`pending`（已排队/处理中）或 `failed`（自动重试耗尽）。成功确认后状态回到 `idle`。
@@ -269,10 +270,10 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - `player_memories.summary` 只保存一段滚动摘要，`memory_facts` 保存可独立更新的结构化事实；`sessions.has_pending_memory` 与 `payload_json.evictedMessages` 共同表示尚未确认消费的摘要批次。
 - `Storage:MySql:AutoMigrate=true` 可在本地启动时自动建表；也可直接执行 `database/mysql/schema.sql`。
 - 内置迁移使用 `schema_migrations(version,name,applied_utc)` 记录已执行版本；当前包含基础表迁移 `001` 和摘要任务表迁移 `002`，人工 SQL 参考位于 `database/mysql/migrations/`。
-- 模型错误统一使用 `model_timeout`、`model_rate_limited`、`model_unauthorized`、`model_forbidden`、`model_not_found`、`model_network_error`、`model_invalid_response` 等错误码；流式 SSE `error` 事件与连接测试接口均返回 `code/status/retryable`。
+- 模型错误统一使用 `model_timeout`、`model_rate_limited`、`model_unauthorized`、`model_forbidden`、`model_not_found`、`model_network_error`、`model_invalid_response` 等错误码；已降级为兜底回复的故障通过 `reply.diagnostic` 返回 `code/status/retryable`，只有无法返回有效回复的终止故障才发送 SSE `error`。连接测试接口使用同一套错误码。
 - `dotnet run -- --migrate-json --exit-after-migrate` 将指定游戏（默认 `default`）的玩家长期记忆从 JSON 幂等迁移到 MySQL。
 - 项目根目录 `docker.yml` 只负责启动 MySQL；`database/mysql/schema.sql` 会在容器首次初始化时自动执行，数据保存在 `ai_npc_mysql_data` volume。默认映射宿主机 `3306`，如果端口冲突可通过 `.env` 的 `AIBOT_MYSQL_PORT` 改为其他端口（本机示例使用 `3307`），Server 仍可在宿主机运行并连接对应的 `127.0.0.1:<port>`。
-- 当前本机联调账号为 `aibot`，密码为 `123456`。宿主机连接 Docker MySQL 时使用 `SslMode=None;AllowPublicKeyRetrieval=True`，仅用于本地开发连接；生产环境应改用 TLS 和独立强密码。
+- 本机联调请在被 Git 忽略的 `.env` 中配置数据库账号与强密码，不要把真实凭据写入文档或提交。宿主机连接 Docker MySQL 时使用 `SslMode=None;AllowPublicKeyRetrieval=True`，仅用于本地开发连接；生产环境应改用 TLS 和独立强密码。
 - Windows 本地开发可运行根目录 `start-server-mysql.ps1`：脚本读取被 Git 忽略的 `.env`，幂等启动并等待 MySQL 健康，然后只为当前 Server 进程注入 MySQL 连接配置并执行 `dotnet run`。脚本不保存或输出数据库密码，`Ctrl+C` 只停止 Server，MySQL 容器和数据卷继续保留。
 - 不需要登录或强制 API Token；输入校验、SQL 参数化和 Server 端密钥隔离仍然保留。
 - **日志**：`logs/{gid}/yyyy-MM-dd.jsonl`（完整请求/回复/usage/工具/注入标记），按日轮转、保留 30 天；内存聚合统计
@@ -304,11 +305,11 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 ## 8. Unity 适配层（代码就绪，待编辑器联调）
 
-`NpcAgent`（MonoBehaviour）：配置来源 SO 或 `data/` JSON 直读（`DevConfigStore` 自动定位）；通过 `runtimeMode=local/server` 选择后端；事件 `onToken/onReasoning/onReply/onError`（UnityEvent）。Local 模式使用 `UnityWebRequestBackend` 和本地 AgentLoop；Server 模式使用 `UnityServerBackend` 直接调用 `/api/games/{gid}/chat/stream`，由 Server 负责 AgentLoop、长期记忆、摘要、调试模拟工具和日志，避免两端重复执行。当前 Server 工具不能直接修改正式游戏状态。Server 请求携带 Game/NPC/Player/Session/消息及可选的游戏状态快照，不携带模型 API Key，也不直接访问 MySQL。菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。配置分发三段管线：开发期直读 data/ → 构建期拷 StreamingAssets（`BuildConfigCopier`，M3）→ 热更远端拉取（M6）。
+`NpcAgent`（MonoBehaviour）：配置来源 SO 或 `data/` JSON 直读（`DevConfigStore` 自动定位）；通过 `runtimeMode=local/server` 选择后端；事件 `onToken/onReasoning/onToolExecuted/onReply/onError`（UnityEvent）。Local 模式使用 `UnityWebRequestBackend` 和本地 AgentLoop；Server 模式使用 `UnityServerBackend` 直接调用 `/api/games/{gid}/chat/stream`，由 Server 负责 AgentLoop、长期记忆、摘要和日志，避免两端重复执行。Server 模拟工具必须显式启用且不能直接修改正式游戏状态，Local/Server 的工具结果统一通过 `onToolExecuted` 通知。Server 请求携带 Game/NPC/Player/Session/消息、`toolMode` 及可选的游戏状态快照，不携带模型 API Key，也不直接访问 MySQL。菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。配置分发三段管线：开发期直读 data/ → 构建期拷 StreamingAssets（`BuildConfigCopier`，M3）→ 热更远端拉取（M6）。
 
 Unity 运行时边界：
 
-- 必需：`AIBot.Core`、`AIBot.Unity`、一个 `ILlmBackend` 实现、游戏自己的 `IGameContext`。Local 模式如需改变游戏状态，再注册游戏自己的真实工具；Server 当前只提供调试模拟工具，不能直接修改正式游戏状态。
+- 必需：`AIBot.Core`、`AIBot.Unity`、一个 `ILlmBackend` 实现、游戏自己的 `IGameContext`。Local 模式如需改变游戏状态，再注册游戏自己的真实工具；Server 默认不注册工具，显式启用的 `SimulatedToolHost` 仅供调试，不能直接修改正式游戏状态。
 - 不打包：`AIBot.Server`、`AIBot.Web`、MySQL/Dapper、管理 API、审计查询和运营页面。
 - 直连 LLM 只用于 Local 开发或明确接受客户端密钥风险的单机项目；在线发布默认禁止直连。
 
@@ -329,7 +330,7 @@ Unity 运行时边界：
 
 ## 10. 测试与验证现状
 
-- **xUnit 74/74**：覆盖 SSE/聚合/结构化解析/上下文/防注入/AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 清理与必写审计失败、保留期最旧批次选择、Session 删除失败保护、摘要队列幂等入队/玩家失效/非法标识及策略能力去重
+- **xUnit 98/98**：覆盖 SSE/聚合/Server 下行完整事件协议与终态状态机/requestId 校验、请求状态缓存与裁剪/工具模式边界/结构化解析/上下文/防注入/AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 清理与必写审计失败、保留期最旧批次选择、Session 删除失败保护、摘要队列幂等入队/玩家失效/非法标识及策略能力去重
 - **构建回归**：Server 独立输出目录编译 0 警告/0 错误；Vue 强制全量 `vue-tsc -b --force` 与生产 `npm run build` 均通过，可在生成 `components.d.ts` 后重复执行
 - **端到端已验证**：Ox Alpha 流式对话（角色扮演+结构化输出）、调试模拟工具决策、重启记忆恢复、注入攻击被记录且模型保持角色、连接测试诊断（6.3s 成功 / 错误配置给出原因）。其中 Server 工具验证仅针对会话模拟状态，不代表已接入正式游戏业务。
 - **已知环境限制**：ZCode 内嵌浏览器不派发点击事件（页面代码经 DOM/截图/后端全链路验证，真实浏览器正常）
@@ -412,18 +413,20 @@ WebGL（JS桥接Backend）/ RAG（lore层换检索）/ 多NPC编排 / MCP对齐 
 ```
 data: {"type":"token","delta":"你"}
 data: {"type":"reasoning","delta":"先想想…"}                      ← 推理模型思考过程
-data: {"type":"tool_call","name":"give_item","args":{…},"success":true,"result":"已给玩家 铁矿 x3"}
+data: {"type":"tool_call","callId":"call-1","name":"give_item","args":{…},"success":true,"result":"已给玩家 铁矿 x3"}
 data: {"type":"reply","say":"拿去吧。","emotion":"happy","action":"offer","fallback":false,
        "usage":{"promptTokens":694,"completionTokens":417},"elapsedMs":16753}
-data: {"type":"done","sessionId":"s-123"}
-data: {"type":"error","message":"…"}
-data: [DONE]
+data: {"type":"reply","say":"（沉默片刻）……","emotion":"neutral","action":"idle","fallback":true,
+       "diagnostic":{"code":"model_timeout","status":504,"message":"模型请求超时","retryable":true},
+       "usage":{"promptTokens":0,"completionTokens":0},"elapsedMs":60000}
+data: {"type":"done","sessionId":"s-123","requestId":"req-123"}
+data: {"type":"error","code":"internal_error","status":500,"message":"…","retryable":false,"terminal":true,"requestId":"req-123"}
 ```
 
 | type | 触发时机 | 必需字段 |
 |---|---|---|
-| token | 正文流式增量 | delta |
+| token | 已从结构化输出中提取的纯台词增量，客户端直接展示，不再解析 `say` | delta |
 | reasoning | 思考过程增量（推理模型） | delta |
-| tool_call | 工具执行完成 | name, args, success, result |
-| reply | 一轮最终结构化结果 | say, emotion, action, fallback, usage, elapsedMs |
-| done / error | 流结束 / 失败 | sessionId / message |
+| tool_call | 工具执行完成；`callId` 用于重放去重 | callId, name, args, success, result |
+| reply | 一轮最终结构化结果；兜底回复可附带模型诊断 | say, emotion, action, fallback, usage, elapsedMs, diagnostic? |
+| done / error | 流结束 / 无法返回任何有效回复的终止失败 | sessionId, requestId / code, status, message, retryable, terminal, requestId |
