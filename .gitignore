@@ -41,3 +41,6 @@ data/games/*/npcs/*.json
 # 运行时会话数据（端到端测试产物，不入库）
 data/games/*/sessions/
 
+# Server runtime state
+data/.last-storage-mode
+
