@@ -25,6 +25,15 @@ function number(value: unknown) { return typeof value === 'number' ? value : Num
 function tools(value: unknown) { return Array.isArray(value) ? value.map(text).join(', ') || '-' : text(value) || '-' }
 function preview(value: unknown, max = 60) { const s = text(value); return s.length > max ? `${s.slice(0, max)}…` : s }
 function elapsed(value: unknown) { return `${(number(value) / 1000).toFixed(1)}s` }
+// 存储为 UTC ISO；表格显示本地时间，原始值可在展开行查看
+function formatTime(value: unknown) {
+  const s = text(value)
+  if (!s) return ''
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return s.replace('T', ' ').slice(0, 19)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 
 async function load(pageDelta = 0) {
   offset.value = pageDelta === 0 ? 0 : Math.max(0, offset.value + pageDelta * limit)
@@ -64,7 +73,7 @@ onMounted(() => load())
     <el-table v-loading="loading" :data="items" stripe>
       <el-table-column type="expand"><template #default="scope"><pre class="code-block log-detail">{{ pretty(scope.row) }}</pre></template></el-table-column>
       <template v-if="mode === 'chat'">
-        <el-table-column label="时间" width="170"><template #default="scope">{{ text(scope.row.ts || scope.row.timestamp).replace('T', ' ').slice(0, 19) }}</template></el-table-column>
+        <el-table-column label="时间" width="170"><template #default="scope">{{ formatTime(scope.row.ts || scope.row.timestamp) }}</template></el-table-column>
         <el-table-column prop="npcId" label="NPC" width="150" />
         <el-table-column label="玩家说" min-width="190"><template #default="scope">{{ preview(scope.row.userMessage) }}</template></el-table-column>
         <el-table-column label="回复" min-width="210"><template #default="scope"><span>{{ preview(scope.row.say) }}</span><el-tag v-if="scope.row.fallback" size="small" type="warning" class="flag">兜底</el-tag><el-tag v-if="scope.row.injection" size="small" type="danger" class="flag">注入</el-tag></template></el-table-column>
@@ -73,7 +82,7 @@ onMounted(() => load())
         <el-table-column label="工具" min-width="120"><template #default="scope">{{ tools(scope.row.tools) }}</template></el-table-column>
       </template>
       <template v-else>
-        <el-table-column label="时间" width="180"><template #default="scope">{{ text(scope.row.tsUtc).replace('T', ' ').slice(0, 19) }}</template></el-table-column>
+        <el-table-column label="时间" width="180"><template #default="scope">{{ formatTime(scope.row.tsUtc) }}</template></el-table-column>
         <el-table-column prop="level" label="级别" width="90" />
         <el-table-column prop="category" label="类别" width="145" />
         <el-table-column prop="event" label="事件" width="180" />
@@ -96,3 +105,4 @@ onMounted(() => load())
 .runtime-filter { width: 120px; }
 .request-filter { width: 180px; }
 </style>
+

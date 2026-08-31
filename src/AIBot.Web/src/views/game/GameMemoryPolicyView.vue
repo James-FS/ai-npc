@@ -54,7 +54,7 @@ onMounted(load)
 
 <template>
   <PageHeader title="Game 记忆策略" description="为当前 Game 定义所有 NPC 的默认记忆行为；NPC 页面可以按字段继承或覆盖。">
-    <el-dropdown @command="applyPreset"><el-button>应用预设⌄</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item v-for="(_, name) in presets" :key="name" :command="name">{{ name }}</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
+    <el-dropdown @command="applyPreset"><el-button>应用预设<span class="dropdown-caret">▼</span></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item v-for="(_, name) in presets" :key="name" :command="name">{{ name }}</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
     <el-button type="primary" :loading="store.saving" :disabled="!policy" @click="save">保存策略</el-button>
   </PageHeader>
 
@@ -63,3 +63,8 @@ onMounted(load)
     <div><EffectivePolicyPanel :value="effective" /><div class="hint-box section-gap">保存后 Server 会重新解析并应用安全上限。右侧最终策略显示实际持久化后的值；API Key 永远不会回显。</div></div>
   </div>
 </template>
+
+<style scoped>
+.dropdown-caret { font-size: 10px; margin-left: 4px; vertical-align: 1px; }
+</style>
+

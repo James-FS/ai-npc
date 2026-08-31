@@ -3,7 +3,7 @@ import type {
   EffectiveMemoryPolicy, MemoryAuditEntry, MemoryFact, MemoryListPage,
   MemoryPolicy, MemoryPolicyLimits, MemorySettings, MigrationCandidate,
   PlayerLongTermMemory, SessionSummary,
-  MemorySummaryQueueState,
+  MemorySummaryQueueState, StorageInfo, JsonMigrationResult,
 } from '@/types/memory'
 
 const enc = encodeURIComponent
@@ -11,6 +11,10 @@ const gamePath = (gameId: string, path: string) => `/api/games/${enc(gameId)}${p
 
 export const memoryApi = {
   limits: () => request<MemoryPolicyLimits>('/api/admin/memory-limits'),
+  storage: () => request<StorageInfo>('/api/admin/storage'),
+  migrateJsonToMysql: () => request<JsonMigrationResult>('/api/admin/storage/migrate-json', { method: 'POST' }),
+  games: () => request<{ games: string[] }>('/api/games'),
+  createGame: (gameId: string) => request<{ gameId: string }>('/api/games', { method: 'POST', body: JSON.stringify({ gameId }) }),
   queue: () => request<MemorySummaryQueueState>('/api/admin/memory-summary-queue'),
   retrySummaryQueue: (filter?: { gameId?: string; npcId?: string; playerId?: string; sessionId?: string }) => request<{ retried: number; pending: number; failedCurrent: number }>('/api/admin/memory-summary-queue/retry', { method: 'POST', body: JSON.stringify(filter ?? {}) }),
   retention: () => request<{ retentionDays: number; scope: string; clearsRelatedSessions: boolean }>('/api/admin/memory-retention'),
@@ -46,3 +50,4 @@ export const memoryApi = {
   },
   cleanup: (gameId: string, inactiveDays: number, dryRun: boolean) => request<Record<string, unknown>>(gamePath(gameId, '/memories/cleanup'), { method: 'POST', body: JSON.stringify({ inactiveDays, dryRun, limit: 500 }) }),
 }
+

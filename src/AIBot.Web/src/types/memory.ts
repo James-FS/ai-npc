@@ -150,3 +150,18 @@ export interface MemoryAuditEntry {
   after: unknown
   metadata?: Record<string, unknown> | null
 }
+
+export interface StorageInfo {
+  provider: 'MySql' | 'Json'
+  mysql: { server: string; port: number; database: string; autoMigrate: boolean } | null
+  previousProvider: 'MySql' | 'Json' | null
+  startedAt: string
+}
+
+export interface JsonMigrationResult {
+  gameId: string
+  scanned: number
+  migrated: number
+  skipped: number
+}
+

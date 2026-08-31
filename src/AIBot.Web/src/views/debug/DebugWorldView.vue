@@ -34,7 +34,7 @@ onMounted(load)
   <PageHeader title="世界观调试" description="编辑当前 Game 共享的世界描述和规则，保存后所有 NPC 的 Prompt 预览都会使用最新内容。"><el-button :loading="saving" :disabled="!world" type="primary" @click="save">保存世界观</el-button><el-button @click="load">刷新</el-button></PageHeader>
   <div v-loading="loading" class="two-col" v-if="world">
     <div class="panel panel-body"><el-form label-position="top"><el-form-item label="World ID"><el-input v-model="world.worldId" /></el-form-item><el-form-item label="世界描述"><el-input v-model="world.description" type="textarea" :rows="14" placeholder="描述当前游戏世界、时代和基本设定" /></el-form-item></el-form></div>
-    <div class="panel panel-body"><div class="section-heading"><h3>额外规则</h3><el-button size="small" @click="addRule">＋ 添加规则</el-button></div><div v-for="(_, index) in world.extraRules" :key="index" class="rule-row"><el-input v-model="world.extraRules[index]" type="textarea" :rows="2" :placeholder="`规则 ${index + 1}`" /><el-button link type="danger" @click="removeRule(index)">删除</el-button></div><div v-if="!world.extraRules.length" class="empty-state">暂无额外规则</div></div>
+    <div class="panel panel-body"><div class="section-heading"><h3>额外规则</h3><el-button size="small" @click="addRule">＋ 添加规则</el-button></div><div v-for="(_, index) in world.extraRules" :key="index" class="rule-row"><el-input v-model="world.extraRules[index]" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" :placeholder="`规则 ${index + 1}`" /><el-button link type="danger" @click="removeRule(index)">删除</el-button></div><div v-if="!world.extraRules.length" class="empty-state">暂无额外规则</div></div>
   </div>
 </template>
 
@@ -44,3 +44,4 @@ onMounted(load)
 .rule-row { display: flex; gap: 8px; margin-bottom: 12px; align-items: flex-start; }
 .rule-row .el-input { flex: 1; }
 </style>
+

@@ -12,7 +12,12 @@ interface ChatMessage { role: 'user' | 'assistant'; content: string; reasoning?:
 const app = useAppStore()
 const message = ref('')
 const playerId = ref(localStorage.getItem('aibot.debug.playerId') || 'player-local')
-const sessionId = ref(localStorage.getItem('aibot.debug.sessionId') || `s-${Date.now()}`)
+const npcId = computed(() => app.currentNpcId)
+
+// 会话按 NPC 隔离：每个 NPC 记住自己的最近会话，切 NPC 不再串会话
+function sessionKey(id = npcId.value) { return `aibot.debug.sessionId.${id || 'none'}` }
+const sessionId = ref(localStorage.getItem(sessionKey()) || `s-${Date.now()}`)
+localStorage.removeItem('aibot.debug.sessionId')   // 旧版全局会话键已废弃
 const compareModel = ref('')
 const stage = ref(0)
 const favorability = ref(30)
@@ -23,12 +28,11 @@ const compareResult = ref<{ default?: string; override?: string } | null>(null)
 const showReasoning = ref(localStorage.getItem('aibot.debug.showReasoning') === 'true')
 const restoring = ref(false)
 
-const npcId = computed(() => app.currentNpcId)
 const simState = computed<SimGameState>(() => ({ stage: stage.value, favorability: favorability.value, extras: {}, items: {} }))
 
 function persist() {
   localStorage.setItem('aibot.debug.playerId', playerId.value)
-  localStorage.setItem('aibot.debug.sessionId', sessionId.value)
+  localStorage.setItem(sessionKey(), sessionId.value)
 }
 
 function persistReasoningPreference() {
@@ -44,10 +48,16 @@ function parseStoredReply(content: string) {
   } catch { return null }
 }
 
+// 会话里存的是注入防护包裹后的文本；恢复显示时还原成玩家原文
+function unwrapPlayerSaid(content: string) {
+  const match = /^\[玩家说\]([\s\S]*)\[\/玩家说\]$/.exec((content || '').trim())
+  return match ? match[1] : content
+}
+
 function restoreMessage(item: { role: string; content: string }): ChatMessage {
   const target: ChatMessage = {
     role: item.role === 'user' ? 'user' : 'assistant',
-    content: item.content || '',
+    content: item.role === 'user' ? unwrapPlayerSaid(item.content || '') : item.content || '',
   }
   if (target.role === 'assistant') {
     const reply = parseStoredReply(target.content)
@@ -152,7 +162,13 @@ async function exportSession() {
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '导出失败') }
 }
 
-watch(() => [app.gameId, npcId.value], () => { void restoreSession() })
+// 切 NPC：载入该 NPC 自己的最近会话（首次则新建），避免不同 NPC 串会话
+watch(() => npcId.value, () => {
+  sessionId.value = localStorage.getItem(sessionKey()) || `s-${Date.now()}`
+  persist()
+  void restoreSession()
+})
+watch(() => app.gameId, () => { void restoreSession() })
 onMounted(() => { persist(); void restoreSession() })
 </script>
 
@@ -204,3 +220,4 @@ onMounted(() => { persist(); void restoreSession() })
 .compare-result p { margin: 5px 0 0; white-space: pre-wrap; line-height: 1.5; }
 @media (max-width: 1200px) { .debug-grid { grid-template-columns: 1fr; } }
 </style>
+

@@ -22,7 +22,12 @@ function normalize(value: DebugAgentConfig): DebugAgentConfig {
 async function load() {
   if (!npcId.value) { config.value = null; return }
   loading.value = true
-  try { config.value = normalize(await debugApi.npc(app.gameId, npcId.value)) } catch (error) { ElMessage.error(error instanceof Error ? error.message : 'NPC 配置加载失败') }
+  const requested = { game: app.gameId, npc: npcId.value }
+  try { config.value = normalize(await debugApi.npc(app.gameId, npcId.value)) } catch (error) {
+    // 切换 Game 的瞬间会用旧 npcId 发一次请求；响应回来时上下文已变即视为过期，静默丢弃
+    const stale = app.gameId !== requested.game || app.currentNpcId !== requested.npc
+    if (!stale) ElMessage.error(error instanceof Error ? error.message : 'NPC 配置加载失败')
+  }
   finally { loading.value = false }
 }
 
@@ -35,10 +40,26 @@ async function save() {
 }
 
 async function createNpc() {
-  const id = window.prompt('请输入新 NPC ID（字母数字下划线短横线）', 'new_npc')?.trim()
-  if (!id) return
-  try { await debugApi.createNpc(app.gameId, id); await app.loadNpcs(); app.selectedNpcId = id; ElMessage.success('NPC 已创建') }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : 'NPC 创建失败') }
+  let id = ''
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '将按内置模板创建 NPC 配置，创建后可在当前页完善人设与模型设置。',
+      '新建 NPC',
+      {
+        inputPattern: /^[a-zA-Z0-9_.:-]{1,64}$/,
+        inputErrorMessage: 'NPC ID 仅允许字母数字与 _ . : -（1~64 位）',
+        confirmButtonText: '创建',
+        cancelButtonText: '取消',
+      },
+    )
+    id = value.trim()
+    await debugApi.createNpc(app.gameId, id)
+    await app.loadNpcs()
+    app.selectedNpcId = id
+    ElMessage.success(`NPC「${id}」已创建`)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : 'NPC 创建失败')
+  }
 }
 
 async function deleteNpc() {
@@ -103,11 +124,13 @@ onMounted(load)
 .section-title, .section-heading h3 { font-size: 15px; font-weight: 700; margin: 0 0 14px; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; }
 .lore-card { padding: 12px; background: #f7f9fc; border: 1px solid #e6ebf2; border-radius: 10px; margin-bottom: 10px; }
-.lore-head { display: grid; grid-template-columns: 1fr 95px auto auto auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.lore-head { display: grid; grid-template-columns: 1fr 120px auto auto auto; gap: 8px; align-items: center; margin-bottom: 8px; }
+.lore-head :deep(.el-input-number) { width: 100%; }
 .reply-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .reply-row .el-input { flex: 1; }
 .tag-section { display: flex; align-items: center; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
 .tag-section b { width: 40px; color: #65738a; font-size: 13px; }
 .result-block { margin-top: 14px; max-height: 220px; }
-@media (max-width: 1100px) { .editor-grid { grid-template-columns: 1fr; } .lore-head { grid-template-columns: 1fr 90px auto auto; } }
+@media (max-width: 1100px) { .editor-grid { grid-template-columns: 1fr; } .lore-head { grid-template-columns: 1fr 100px auto auto auto; } }
 </style>
+
