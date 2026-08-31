@@ -430,3 +430,4 @@ data: {"type":"error","code":"internal_error","status":500,"message":"…","retr
 | tool_call | 工具执行完成；`callId` 用于重放去重 | callId, name, args, success, result |
 | reply | 一轮最终结构化结果；兜底回复可附带模型诊断 | say, emotion, action, fallback, usage, elapsedMs, diagnostic? |
 | done / error | 流结束 / 无法返回任何有效回复的终止失败 | sessionId, requestId / code, status, message, retryable, terminal, requestId |
+

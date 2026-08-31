@@ -22,10 +22,10 @@ namespace AIBot.Server
             {
                 connection.Execute(@"
 INSERT INTO memory_summary_jobs
- (job_key,game_id,npc_id,player_id,session_id,force,actor,generation,status,attempts,last_error,available_utc,created_utc,updated_utc)
+ (job_key,game_id,npc_id,player_id,session_id,`force`,actor,generation,status,attempts,last_error,available_utc,created_utc,updated_utc)
 VALUES (@Key,@GameId,@NpcId,@PlayerId,@SessionId,@Force,@Actor,@Generation,'pending',0,NULL,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE
- status=IF(status='succeeded','pending',status), force=VALUES(force), actor=VALUES(actor),
+ status=IF(status='succeeded','pending',status), `force`=VALUES(`force`), actor=VALUES(actor),
  generation=VALUES(generation), available_utc=UTC_TIMESTAMP(6), updated_utc=UTC_TIMESTAMP(6)",
                     new
                     {
@@ -41,7 +41,7 @@ ON DUPLICATE KEY UPDATE
             {
                 return connection.Query<MemorySummaryJobRecord>(@"
 SELECT job_key AS JobKey, game_id AS GameId, npc_id AS NpcId, player_id AS PlayerId,
-       session_id AS SessionId, force AS Force, actor AS Actor, generation AS Generation,
+       session_id AS SessionId, `force` AS Force, actor AS Actor, generation AS Generation,
        status AS Status, attempts AS Attempts, last_error AS LastError
 FROM memory_summary_jobs
 WHERE status IN ('pending','processing')
@@ -55,7 +55,7 @@ ORDER BY created_utc").ToList();
             {
                 return connection.Query<MemorySummaryJobRecord>(@"
 SELECT job_key AS JobKey, game_id AS GameId, npc_id AS NpcId, player_id AS PlayerId,
-       session_id AS SessionId, force AS Force, actor AS Actor, generation AS Generation,
+       session_id AS SessionId, `force` AS Force, actor AS Actor, generation AS Generation,
        status AS Status, attempts AS Attempts, last_error AS LastError, updated_utc AS UpdatedUtc
 FROM memory_summary_jobs WHERE status='failed'
 ORDER BY updated_utc DESC").ToList();
@@ -117,3 +117,4 @@ WHERE game_id=@GameId AND npc_id=@NpcId AND player_id=@PlayerId",
         public DateTime UpdatedUtc { get; set; }
     }
 }
+

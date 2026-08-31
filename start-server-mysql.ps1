@@ -122,6 +122,10 @@ try {
 
     $env:AIBOT_STORAGE_PROVIDER = "MySql"
     $env:AIBOT_MYSQL_CONNECTION_STRING = "Server=127.0.0.1;Port=$port;Database=$database;User ID=$user;Password=$password;SslMode=None;AllowPublicKeyRetrieval=True;"
+    # 可选：AIBOT_MYSQL_AUTOMIGRATE=true 时启动自动按 schema_migrations 版本补齐缺失表
+    if ($settings.ContainsKey("AIBOT_MYSQL_AUTOMIGRATE")) {
+        $env:AIBOT_MYSQL_AUTOMIGRATE = [string]$settings["AIBOT_MYSQL_AUTOMIGRATE"]
+    }
 
     Write-Host "MySQL is healthy at 127.0.0.1:$port (database=$database, user=$user)."
     Write-Host "Starting AIBot.Server in MySql mode. Press Ctrl+C to stop the Server."
@@ -133,3 +137,4 @@ try {
 finally {
     Pop-Location
 }
+

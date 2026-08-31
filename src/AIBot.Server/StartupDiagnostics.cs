@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,11 +25,15 @@ namespace AIBot.Server
             "memory_summary_jobs"
         };
 
+        /// <summary>上次运行使用的存储模式（读自 data/.last-storage-mode 标记；null 表示无历史记录）。</summary>
+        public static string PreviousStorageMode { get; private set; }
+
         public static async Task RunAsync(StorageOptions storage, MySqlConnectionFactory mysql,
             IConfiguration configuration, CancellationToken ct)
         {
             if (storage == null) throw new ArgumentNullException(nameof(storage));
             Console.WriteLine("[startup] storage provider: " + storage.Provider);
+            RememberStorageMode(storage);
 
             string dataRoot = DataStore.FindDataRoot();
             if (storage.IsMySql)
@@ -71,6 +76,23 @@ namespace AIBot.Server
                 Console.WriteLine("[startup] default NPCs: " + string.Join(",", npcIds));
         }
 
+        /// <summary>记录本次存储模式到 data/ 标记文件，供控制台提示“上次运行模式”；失败不影响启动。</summary>
+        private static void RememberStorageMode(StorageOptions storage)
+        {
+            try
+            {
+                string dataRoot = DataStore.FindDataRoot();
+                if (string.IsNullOrEmpty(dataRoot)) return;
+                string markerPath = Path.Combine(dataRoot, ".last-storage-mode");
+                if (File.Exists(markerPath)) PreviousStorageMode = File.ReadAllText(markerPath).Trim();
+                File.WriteAllText(markerPath, storage.IsMySql ? "MySql" : "Json");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[startup][warning] 存储模式标记读写失败: " + ex.Message);
+            }
+        }
+
         private static async Task CheckMySqlAsync(MySqlConnectionFactory mysql, CancellationToken ct)
         {
             if (mysql == null) throw new InvalidOperationException("MySQL 模式未注册连接工厂");
@@ -108,3 +130,4 @@ namespace AIBot.Server
         }
     }
 }
+

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using AIBot.Core.Memory;
+using Newtonsoft.Json;
 
 namespace AIBot.Core.Config
 {
@@ -52,7 +53,10 @@ namespace AIBot.Core.Config
 
     public class OutputSettings
     {
+        // Replace：Json.NET 对带初始值的集合字段默认是"追加填充"，会导致每次反序列化多出一组默认枚举
+        [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
         public List<string> emotions = new List<string> { "neutral", "happy", "angry", "sad", "surprised" };
+        [JsonProperty(ObjectCreationHandling = ObjectCreationHandling.Replace)]
         public List<string> actions = new List<string> { "idle", "wave", "point", "offer" };
     }
 
@@ -64,3 +68,4 @@ namespace AIBot.Core.Config
         public List<string> extraRules = new List<string>();
     }
 }
+

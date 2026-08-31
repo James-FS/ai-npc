@@ -12,6 +12,7 @@
   <ItemGroup>
     <Compile Include="..\..\Packages\com.aibot.npcagent\Runtime\Core\**\*.cs" />
     <Compile Include="..\AIBot.Server\DataStore.cs" Link="Server\DataStore.cs" />
+    <Compile Include="..\AIBot.Server\StorageOptions.cs" Link="Server\StorageOptions.cs" />
     <Compile Include="..\AIBot.Server\MemoryRepository.cs" Link="Server\MemoryRepository.cs" />
     <Compile Include="..\AIBot.Server\MemoryAuditService.cs" Link="Server\MemoryAuditService.cs" />
     <Compile Include="..\AIBot.Server\PlayerMemoryService.cs" Link="Server\PlayerMemoryService.cs" />
@@ -33,3 +34,4 @@
   </ItemGroup>
 
 </Project>
+

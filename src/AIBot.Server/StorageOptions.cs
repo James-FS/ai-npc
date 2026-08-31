@@ -22,8 +22,12 @@ namespace AIBot.Server
             string connection = Environment.GetEnvironmentVariable("AIBOT_MYSQL_CONNECTION_STRING")
                 ?? configuration["Storage:MySql:ConnectionString"]
                 ?? configuration["Storage:ConnectionString"];
-            bool autoMigrate = configuration.GetValue<bool?>("Storage:MySql:AutoMigrate")
-                ?? configuration.GetValue<bool?>("Storage:AutoMigrate") ?? false;
+            // 显式设置 AIBOT_MYSQL_AUTOMIGRATE 时优先于 appsettings（后者默认 false，会短路 ?? 链）
+            string autoMigrateEnv = Environment.GetEnvironmentVariable("AIBOT_MYSQL_AUTOMIGRATE");
+            bool autoMigrate = autoMigrateEnv != null
+                ? string.Equals(autoMigrateEnv, "true", StringComparison.OrdinalIgnoreCase)
+                : (configuration.GetValue<bool?>("Storage:MySql:AutoMigrate")
+                    ?? configuration.GetValue<bool?>("Storage:AutoMigrate") ?? false);
             return new StorageOptions
             {
                 Provider = provider,
@@ -40,3 +44,4 @@ namespace AIBot.Server
         }
     }
 }
+

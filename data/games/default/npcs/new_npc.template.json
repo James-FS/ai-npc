@@ -1,5 +1,5 @@
 {
-  "_comment": "NPC 配置模板：复制本文件为 {npcId}.json 后填写。apiKey 可留空并改用环境变量 AIBot_LLM_KEY。常用端点——OpenCode Go(免梯子): https://opencode.ai/zen/go/v1 模型 ox-alpha-free；DeepSeek: https://api.deepseek.com 模型 deepseek-chat；智谱GLM: https://open.bigmodel.cn/api/paas/v4 模型 glm-4-flash(免费)",
+  "_comment": "NPC 配置模板：复制本文件为 {npcId}.json 后填写。apiKey 可留空并改用环境变量 AIBot_LLM_KEY。常用端点——OpenCode Go: https://opencode.ai/zen/go/v1 模型 deepseek-v4-flash: https://api.deepseek.com 模型 deepseek-chat；智谱GLM: https://open.bigmodel.cn/api/paas/v4 模型 glm-4-flash(免费)",
   "npcId": "new_npc",
   "displayName": "新NPC的名字",
   "persona": "性格与说话风格：一两句写清。例如：说话直来直去，喜欢用本行职业比喻，对陌生人警惕但讲礼数。",
@@ -22,7 +22,7 @@
   "model": {
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "apiKey": "",
-    "model": "ox-alpha-free",
+    "model": "deepseek-v4-flash",
     "temperature": 0.8,
     "maxTokens": 1500,
     "timeoutMs": 60000
@@ -51,3 +51,4 @@
   "runtimeMode": "local",
   "serverBaseUrl": "http://127.0.0.1:5000"
 }
+

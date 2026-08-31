@@ -73,6 +73,8 @@ namespace AIBot.Unity
 
             using (var req = new UnityWebRequest(url, "POST", handler, null))
             {
+                // 修复：此前 uploadHandler 为 null，序列化的 body 从未上传，导致网关收到空请求
+                req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(body));
                 req.SetRequestHeader("Content-Type", "application/json");
                 req.SetRequestHeader("Authorization", "Bearer " + _settings.apiKey);
                 req.timeout = Math.Max(1, _settings.timeoutMs / 1000);
@@ -159,3 +161,4 @@ namespace AIBot.Unity
         }
     }
 }
+

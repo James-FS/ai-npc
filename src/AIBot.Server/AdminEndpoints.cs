@@ -12,6 +12,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using MySqlConnector;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -25,6 +26,11 @@ namespace AIBot.Server
             public string NpcId { get; set; }
             public bool FromTemplate { get; set; } = true;
             public AgentConfigDto Npc { get; set; }   // FromTemplate=false 时直接用完整配置创建
+        }
+
+        public class CreateGameRequest
+        {
+            public string GameId { get; set; }
         }
 
         public class PreviewRequest
@@ -74,6 +80,8 @@ namespace AIBot.Server
 
         public static void MapAIBotAdmin(this WebApplication app)
         {
+            // JSON→MySQL 记忆迁移互斥锁：避免控制台按钮与启动参数并发执行
+            SemaphoreSlim migrateGate = new SemaphoreSlim(1, 1);
             PlayerMemoryService playerMemories = app.Services.GetRequiredService<PlayerMemoryService>();
             MemorySummaryQueue summaryQueue = app.Services.GetRequiredService<MemorySummaryQueue>();
             MemoryAuditService audit = app.Services.GetRequiredService<MemoryAuditService>();
@@ -81,6 +89,59 @@ namespace AIBot.Server
 
             app.MapGet("/api/admin/memory-limits", () =>
                 JsonNet(MemoryPolicyService.LoadLimits(app.Configuration)));
+            // 存储模式只读展示：不含密码等敏感信息
+            app.MapGet("/api/admin/storage", () =>
+            {
+                StorageOptions storage = StorageOptions.From(app.Configuration);
+                JObject mysql = null;
+                if (storage.IsMySql && !string.IsNullOrWhiteSpace(storage.MySqlConnectionString))
+                {
+                    MySqlConnectionStringBuilder cs = new MySqlConnectionStringBuilder(storage.MySqlConnectionString);
+                    mysql = new JObject
+                    {
+                        ["server"] = string.IsNullOrWhiteSpace(cs.Server) ? "localhost" : cs.Server,
+                        ["port"] = cs.Port,
+                        ["database"] = string.IsNullOrWhiteSpace(cs.Database) ? "<none>" : cs.Database,
+                        ["autoMigrate"] = storage.AutoMigrate
+                    };
+                }
+                return JsonNet(new JObject
+                {
+                    ["provider"] = storage.IsMySql ? "MySql" : "Json",
+                    ["mysql"] = mysql,
+                    ["previousProvider"] = StartupDiagnostics.PreviousStorageMode,
+                    ["startedAt"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                });
+            });
+            // JSON→MySQL 玩家记忆迁移：幂等，与启动参数 --migrate-json 等效；仅 MySQL 模式可用
+            app.MapPost("/api/admin/storage/migrate-json", async (HttpContext http) =>
+            {
+                StorageOptions storage = StorageOptions.From(app.Configuration);
+                if (!storage.IsMySql)
+                    return Results.Conflict("当前为 JSON 模式；请以 MySQL 模式启动 Server 后再执行迁移");
+                MySqlConnectionFactory factory = app.Services.GetService<MySqlConnectionFactory>();
+                if (factory == null)
+                    return Results.Conflict("MySQL 连接未初始化，无法执行迁移");
+                if (!await migrateGate.WaitAsync(0, http.RequestAborted))
+                    return Results.Conflict("已有一次迁移正在执行，请稍后再试");
+                try
+                {
+                    var source = new JsonMemoryRepository();
+                    var target = new MySqlMemoryRepository(factory);
+                    string gameId = app.Configuration["Storage:MigrationGameId"] ?? "default";
+                    MigrationResult result = await new JsonToMySqlMemoryMigrator(source, target)
+                        .RunAsync(gameId, http.RequestAborted);                    Console.WriteLine("JSON→MySQL memory migration (console): scanned=" + result.Scanned
+                        + ", migrated=" + result.Migrated + ", skipped=" + result.Skipped);
+                    return JsonNet(new JObject
+                    {
+                        ["gameId"] = gameId,
+                        ["scanned"] = result.Scanned,
+                        ["migrated"] = result.Migrated,
+                        ["skipped"] = result.Skipped
+                    });
+                }
+                finally { migrateGate.Release(); }
+            });
             app.MapGet("/api/admin/memory-summary-queue", () => JsonNet(new
             {
                 pending = summaryQueue.PendingCount,
@@ -121,6 +182,20 @@ namespace AIBot.Server
                 scope = "player_long_term_memory_and_related_sessions",
                 clearsRelatedSessions = true
             }));
+
+            // ---- Game 列表与创建 ----
+            app.MapGet("/api/games", () => JsonNet(new { games = DataStore.ListGameIds() }));            app.MapPost("/api/games", (CreateGameRequest body) =>
+            {
+                if (!DataStore.IsValidId(body?.GameId)) return Results.BadRequest("非法 gameId（字母数字与 _ . : -，1~128 位）");
+                if (DataStore.ListGameIds().Contains(body.GameId, StringComparer.OrdinalIgnoreCase))
+                    return Results.Conflict("gameId 已存在: " + body.GameId);
+                // 骨架：world.json + memory-policy.json；NPC 之后按需创建（目录自动生成）
+                if (!DataStore.SaveWorld(body.GameId, new WorldConfigDto { worldId = body.GameId }))
+                    return Results.Problem("创建 world.json 失败");
+                if (!DataStore.SaveMemoryPolicy(body.GameId, MemoryPolicy.Defaults()))
+                    return Results.Problem("创建 memory-policy.json 失败");
+                return Results.Json(new { gameId = body.GameId });
+            });
 
             // ---- 世界观 ----
             app.MapGet("/api/games/{gid}/world", (string gid) =>
@@ -973,3 +1048,4 @@ namespace AIBot.Server
         public void OnError(System.Exception ex) { }
     }
 }
+

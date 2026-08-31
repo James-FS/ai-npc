@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AIBot.Core.Llm;
+using AIBot.Core;
 using AIBot.Core.Output;
 using AIBot.Core.Protocol;
 using AIBot.Core.Tools;
@@ -502,3 +503,4 @@ namespace AIBot.Unity
         public string Message;
     }
 }
+

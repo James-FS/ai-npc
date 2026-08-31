@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using AIBot.Core;
 using AIBot.Core.Config;
 using AIBot.Core.Context;
+using AIBot.Core.Logging;
 using AIBot.Core.Llm;
 using AIBot.Core.Memory;
 using AIBot.Core.Output;
@@ -475,3 +476,4 @@ namespace AIBot.Unity
         }
     }
 }
+

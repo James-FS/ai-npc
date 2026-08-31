@@ -47,7 +47,7 @@ namespace AIBot.Unity.EditorTools
             input.placeholder = phRect;
             CreateChildText(inputGo.transform, "Text", "", Color.white, out var textRect);
             input.textComponent = textRect;
-            input.textViewport = textRect.parent.GetComponent<RectTransform>();
+            input.textViewport = textRect.transform.parent.GetComponent<RectTransform>();
 
             var buttonGo = new GameObject("SendButton", typeof(Button), typeof(Image));
             buttonGo.transform.SetParent(canvasGo.transform, false);
@@ -91,3 +91,4 @@ namespace AIBot.Unity.EditorTools
         }
     }
 }
+

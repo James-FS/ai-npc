@@ -913,3 +913,4 @@ cd ../AIBot.Web; npx vue-tsc -b --force; npm run build
 5. JSON 存储预计使用多久；如果很快需要多人或多实例运行，应直接选择 SQLite/PostgreSQL 实现仓储接口。
 
 推荐默认选择：`playerId` 兼容期可空、允许人工修改并审计、立即实现后台摘要、第一版使用固定字段加高级 JSON 扩展、存储继续使用 JSON 但先抽象仓储接口。
+

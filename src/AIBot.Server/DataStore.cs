@@ -146,6 +146,22 @@ namespace AIBot.Server
             return ids;
         }
 
+        /// <summary>列出 data/games/ 下全部 Game 目录名（管理台 Game 选择器用）。</summary>
+        public static List<string> ListGameIds()
+        {
+            var ids = new List<string>();
+            string root = FindDataRoot();
+            string dir = root == null ? null : Path.Combine(root, "games");
+            if (dir == null || !Directory.Exists(dir)) return ids;
+            foreach (string sub in Directory.GetDirectories(dir))
+            {
+                string name = Path.GetFileName(sub);
+                if (IsValidId(name)) ids.Add(name);
+            }
+            ids.Sort(StringComparer.OrdinalIgnoreCase);
+            return ids;
+        }
+
         /// <summary>保存 NPC 配置（覆盖写，缩进格式便于人工检查）。</summary>
         public static bool SaveNpc(string gameId, AgentConfigDto dto)
         {
@@ -213,3 +229,4 @@ namespace AIBot.Server
         }
     }
 }
+

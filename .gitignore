@@ -35,9 +35,9 @@ appsettings.*.local.json
 !.env.example
 
 # NPC 真实配置（含 API key，不入库；结构与示例见 *.template.json）
-data/games/default/npcs/blacksmith_wang.json
-# 以后新增的 NPC 配置若也直接填 key，取消下一行注释统一忽略（改用环境变量则无需忽略）：
-# data/games/*/npcs/*.json
+data/games/*/npcs/*.json
+!data/games/*/npcs/*.template.json
 
 # 运行时会话数据（端到端测试产物，不入库）
 data/games/*/sessions/
+
