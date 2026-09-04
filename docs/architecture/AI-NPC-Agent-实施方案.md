@@ -2,8 +2,8 @@
 
 > 一个可插拔的 NPC 智能Agent平台：纯 C# 核心（AIBot.Core）+ Unity 包 + 独立管理服务（AIBot.Server）+ Web 管理台。接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM），NPC 具备自由对话、剧情人设、两级记忆、工具调用与结构化输出的完整 agent 能力。
 >
-> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v3.0（2026-08-27）
-> **本文档为"现状版"：所有标注 ✅ 的内容均已实现并通过测试（98/98）与真实模型端到端验证。**
+> 目标平台：PC（Windows Standalone）＋ Web 管理端 ｜ 文档版本：v3.1（2026-09-03）
+> **本文档为"现状版"：所有标注 ✅ 的内容均已实现；Core/Server 自动化测试当前为 107/107，Unity/RPG 仍需在 Unity 编辑器中完成真实编译与联调。**
 
 | 版本 | 变更 |
 |---|---|
@@ -20,14 +20,15 @@
 | v2.2 | 记忆管理阶段D：Vue 3 正式记忆控制台、NPC 实时策略预览、记忆检查/迁移/审计页面与 `/app/` 静态部署 |
 | v2.3 | 四阶段 P1 加固：动态短期窗口、摘要禁用边界、Unity/Server 后台语义、删除与摘要互斥、类别约束、必写审计及 Vue 可重复构建 |
 | v2.4 | P1 运行加固：策略能力去重、摘要队列幂等/失效回归测试、启动期存储与数据库诊断 |
+| v2.4.1 | 四阶段 P2 加固：保留期按最旧批次清理、清理预演防过期、危险操作说明对齐、Session 删除失败保留状态及前端取消处理 |
 | v2.5 | 摘要任务 MySQL 持久化、`/api/ready` 就绪检查、模型错误码契约、数据库迁移版本表 |
-| v2.4 | 四阶段 P2 加固：保留期按最旧批次清理、清理预演防过期、危险操作说明对齐、Session 删除失败保留状态及前端取消处理 |
-| v2.5 | 调试台 Vue 统一：原生调试台能力迁移至 `AIBot.Web`，根路径统一跳转 `/app/#/debug/chat`，日志/统计/会话/Prompt/NPC/世界观/流式对话共用一套控制台 |
+| v2.5.1 | 调试台 Vue 统一：原生调试台能力迁移至 `AIBot.Web`，根路径统一跳转 `/app/#/debug/chat`，日志/统计/会话/Prompt/NPC/世界观/流式对话共用一套控制台 |
 | v2.6 | 客户端轻量化部署：Unity 运行时与 Server/Vue/MySQL 解耦，支持 Local/Server 双模式；数据库和管理控制台不进入 Unity 包，正式在线模式通过 Server 中转 |
 | v2.7 | Server 持久化升级：Dapper + MySQL 可选存储、长期记忆/Session/日志/审计表、自动建表与 JSON→MySQL 长期记忆迁移；鉴权和登录仍保持可选/关闭 |
 | v2.8 | 摘要链路收尾：失败任务明细与手动重试、会话级摘要状态、Vue 队列监控与生命周期说明 |
 | v2.9 | 统一 API 错误处理：错误码/状态/requestId 契约、全局异常与限流响应、Vue 网络和 ProblemDetails 兼容解析 |
 | v3.0 | 小规模日志优化：Server 运行日志按日 JSONL、请求生命周期记录、敏感信息脱敏、MySQL/JSON 保留期清理与 Vue 运行日志查询 |
+| v3.1 | 运行安全与性能收尾：客户端 Bearer Token、最小健康响应、统一 Chat 错误契约、模型参数边界、上游 SSE 完整性检查、有界流式队列、终态重放裁剪、JSON Session 闲置清理、配置缓存/原子写入与 UTC 日志统一 |
 
 ---
 
@@ -50,7 +51,7 @@ Unity 游戏本体只引用 `AIBot.Core` 与 `AIBot.Unity`，不引用 ASP.NET C
 | 模式 | 调用链 | 适用场景 | 当前状态 |
 |---|---|---|---|
 | **Local** | Unity → OpenAI 兼容 LLM | Demo、单机、离线联调、快速原型 | ✅ 当前 `UnityWebRequestBackend` 已支持 |
-| **Server** | Unity → `AIBot.Server` → LLM / 数据库 | 在线游戏、服务端统一处理长期记忆与审计 | ✅ `UnityServerBackend` 已实现；鉴权暂不强制 |
+| **Server** | Unity → `AIBot.Server` → LLM / 数据库 | 在线游戏、服务端统一处理长期记忆与审计 | ✅ `UnityServerBackend` 已实现；可配置 `AIBOT_CLIENT_TOKEN` 强制聊天鉴权 |
 
 两种模式对游戏上层保持相同的 `NpcAgent.ChatAsync()` 和事件契约。游戏代码不需要感知底层是直连模型还是 Server 中转；正式在线环境默认使用 Server 模式，Local 模式仅用于开发和无后台部署。
 
@@ -78,7 +79,7 @@ Unity 和 Vue 都不直接连接 MySQL；数据库账号、模型 API Key 和记
 - **护栏**：防注入包裹与检测（命中标记进日志与统计）、行为规则、兜底台词链
 - **可观测**：Prompt 七层预览（token 估算）、对话/运行日志（按日 JSONL）、用量统计、注入尝试计数和 requestId 关联
 - **记忆治理**：长期摘要和结构化事实可检查/纠正/固定/删除，支持显式迁移、保留期清理预演与变更审计
-- **持久化**：会话消息/待摘要队列/模拟状态每轮落盘，玩家长期摘要与结构化事实独立版本化保存；MySQL 模式下摘要任务写入 `memory_summary_jobs`，重启自动恢复未完成任务
+- **持久化**：会话消息/待摘要队列/模拟状态每轮落盘，玩家长期摘要与结构化事实独立版本化保存；MySQL 模式下摘要任务写入 `memory_summary_jobs`，重启自动恢复未完成任务；JSON 模式由维护任务清理闲置 Session，配置读取使用轻量缓存并原子写入
 
 ### 1.4 非目标（未做）
 
@@ -170,7 +171,7 @@ D:\Code\aibot\
     │   ├── wwwroot/index.html        # 根入口重定向到 Vue 调试工作台（不再独立维护原生调试台）
     │   └── wwwroot/app/              # Vue 正式控制台生产构建产物
     ├── AIBot.Web/                    # Vue 3 + TypeScript + Vite + Pinia + Element Plus
-    └── AIBot.Tests/                  # 76 项 xUnit（Mock 后端免网全链路）
+    └── AIBot.Tests/                  # 107 项 xUnit（Mock 后端免网全链路）
 ```
 
 ---
@@ -223,7 +224,7 @@ public class SimGameState { stage, favorability, extras, items }           // �
 
 | 端点 | 说明 |
 |---|---|
-| `POST /api/games/{gid}/chat/stream` | 对话（SSE；支持 requestId 幂等重放、simState、toolMode 与 override） |
+| `POST /api/games/{gid}/chat/stream` | 对话（SSE；支持 requestId 幂等重放、simState、toolMode 与 override；可由 `AIBOT_CLIENT_TOKEN` 保护；错误统一 `error/code/status/requestId/details`） |
 | `GET/POST/PUT/DELETE …/npcs(/{id})` | NPC CRUD（POST 从模板创建；PUT 空 apiKey 不覆盖已存 key） |
 | `GET/PUT …/world` | 世界观读写 |
 | `GET/PUT …/memory-policy` | Game 默认记忆策略读写 |
@@ -243,12 +244,12 @@ public class SimGameState { stage, favorability, extras, items }           // �
 | `GET …/memory-audit`、`POST …/memories/cleanup` | 审计查询与保留期清理预演/执行；清理从最旧批次开始并返回 `hasMoreCandidates` |
 | `GET …/logs?date=&npcId=&limit=&offset=` | 日志分页查询（最新在前） |
 | `GET /api/admin/runtime-logs?date=&level=&category=&requestId=` | Server 运行日志分页查询（默认脱敏，按 requestId 关联） |
-| `GET …/stats`、`GET /api/health` | 用量统计（含注入尝试数）/ 健康检查 |
+| `GET …/stats`、`GET /api/health` | 用量统计（含注入尝试数）/ 最小健康检查（仅 `ok` 与版本） |
 | `GET /api/ready` | 就绪检查：存储连接与表结构、LLM 配置、NPC 配置、摘要队列；未就绪返回 503 |
 
 ### 6.2 持久化与日志
 
-- **短期会话**：内存缓存 + 每会话串行锁 + `sessions/{npcId}/{playerId}/{sid}.json` 原子落盘（消息窗口/待摘要队列/模拟状态/最近 20 个请求状态与 SSE 重放事件）；无 playerId 的旧客户端继续走兼容路径
+- **短期会话**：内存缓存 + 每会话串行锁 + `sessions/{npcId}/{playerId}/{sid}.json` 原子落盘（消息窗口/待摘要队列/模拟状态/最近 20 个请求状态与终态 SSE 重放事件）；无 playerId 的旧客户端继续走兼容路径
 - **聊天幂等**：每轮使用稳定 `requestId` 和请求指纹。客户端断线只停止 HTTP 写入，Server 继续完成模型、工具和记忆链路；同 ID 重试会等待 Session Gate 后重放已完成事件。相同 ID 不同指纹返回 `request_id_conflict`；重启后残留的 `processing` 返回 `request_in_doubt`，不自动重复可能已发生的副作用。
 - **长期记忆**：`memories/{npcId}/{playerId}.json` 保存滚动摘要、结构化事实与 `memoryVersion`；同一玩家切换 session 后继续注入，冲突时重新加载并合并
 - **后台摘要**：`reply/done` 刷新后入有界去重队列；单任务最多自动重试 3 次。长期记忆与必写审计均成功后才确认消费待摘要消息；启动扫描恢复未完成任务。耗尽重试后保留失败明细（游戏/NPC/玩家/Session、错误和时间），待摘要消息仍保留，可通过管理 API 或 Vue 手动重试。
@@ -260,6 +261,15 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - **运行日志**：`logs/runtime/yyyy-MM-dd.jsonl` 保存 Server 请求生命周期、异常、限流、摘要队列和 Core Agent 事件；默认保留 14 天。MySQL 模式的 `chat_logs` 默认保留 30 天、`memory_audits` 默认保留 365 天，由后台维护服务每日清理。
 - **清理预演一致性**：Vue 只允许执行当前 `gameId + inactiveDays` 对应的最新预演；修改任一条件后必须重新预演
 - **删除一致性**：删除长期记忆会同步清空该玩家/NPC 的 Session 消息与待摘要队列；Session 持久化删除失败时保留缓存状态并返回错误
+
+补充的运行边界：
+
+- Chat SSE 使用容量 4096 的有界 Channel。`token`、`reasoning`、`tool_call` 是实时中间事件，拥塞时允许丢弃；`reply`、`done`、`error` 是终态事件，必须等待写入。
+- 每个 Session 最近 20 个请求只保留指纹、状态和终态重放事件；重放不包含逐 token/reasoning/tool 中间事件，单请求重放数据约束在 64 KB 内。
+- 上游 OpenAI 流必须收到 `[DONE]` 或带 `finish_reason` 的结束 chunk；缺少结束标记按模型传输失败处理，不把截断结果视为成功。
+- `override` 与 `memoryOverride` 仅允许管理端调试请求；Server 将模型参数限制为 model ≤128 字符、temperature 0～2、maxTokens 1～8192、timeout 1000～120000ms。
+- JSON 模式按 `Sessions:MemoryIdleHours` 清理闲置 Session 文件，但待摘要、processing 幂等请求和当前进程跟踪的 Session 会受保护；JSON 存储只支持单 Server 实例，多实例应使用共享数据库。
+- NPC/World/Memory Policy 配置按文件 mtime 缓存并返回深拷贝，写入采用临时文件 + 原子替换；聊天、运行和审计日志统一按 UTC 文件名、查询和时间字段处理。
 
 #### 6.2.1 JSON / MySQL 双存储
 
@@ -275,9 +285,9 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - 项目根目录 `docker.yml` 只负责启动 MySQL；`database/mysql/schema.sql` 会在容器首次初始化时自动执行，数据保存在 `ai_npc_mysql_data` volume。默认映射宿主机 `3306`，如果端口冲突可通过 `.env` 的 `AIBOT_MYSQL_PORT` 改为其他端口（本机示例使用 `3307`），Server 仍可在宿主机运行并连接对应的 `127.0.0.1:<port>`。
 - 本机联调请在被 Git 忽略的 `.env` 中配置数据库账号与强密码，不要把真实凭据写入文档或提交。宿主机连接 Docker MySQL 时使用 `SslMode=None;AllowPublicKeyRetrieval=True`，仅用于本地开发连接；生产环境应改用 TLS 和独立强密码。
 - Windows 本地开发可运行根目录 `start-server-mysql.ps1`：脚本读取被 Git 忽略的 `.env`，幂等启动并等待 MySQL 健康，然后只为当前 Server 进程注入 MySQL 连接配置并执行 `dotnet run`。脚本不保存或输出数据库密码，`Ctrl+C` 只停止 Server，MySQL 容器和数据卷继续保留。
-- 不需要登录或强制 API Token；输入校验、SQL 参数化和 Server 端密钥隔离仍然保留。
+- 不内置账号体系；管理 API 可通过 `AIBOT_ADMIN_TOKEN` 启用 Bearer 鉴权，聊天 API 可通过 `AIBOT_CLIENT_TOKEN` 启用客户端 Bearer 鉴权。本地可留空以保持轻量开发体验，正式部署建议开启并配合 HTTPS、网关认证和访问控制。
 - **日志**：`logs/{gid}/yyyy-MM-dd.jsonl`（完整请求/回复/usage/工具/注入标记），按日轮转、保留 30 天；内存聚合统计
-- **安全**：key 优先级 NPC配置 > `AIBOT_LLM_KEY` > appsettings；管理 API 可通过 `AIBOT_ADMIN_TOKEN` 启用 Bearer 鉴权；聊天默认每 IP 60 次/分钟；配置读取接口不回传 key；ID 正则校验防路径穿越
+- **安全**：key 优先级 NPC配置 > `AIBOT_LLM_KEY` > appsettings；管理 API 使用 `AIBOT_ADMIN_TOKEN` Bearer 鉴权，聊天 API 可使用 `AIBOT_CLIENT_TOKEN` Bearer 鉴权；聊天默认每 IP 60 次/分钟；模型参数由 Server 限制在安全边界；配置读取接口不回传 key；ID 正则校验防路径穿越
 
 ---
 
@@ -319,18 +329,18 @@ Unity 运行时边界：
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M1 Core 分层 + Unity 闭环 | ✅ 完成 | 73 项测试含 SSE/组装/循环/注入/记忆全链路 |
+| M1 Core 分层 + Unity 闭环 | ✅ 完成 | Core 契约、SSE/组装/循环/注入/记忆全链路已覆盖；当前总回归 107 项 |
 | M2 Agent 能力 | ✅ 基本完成 | 工具循环/结构化解析/摘要记忆/HttpLlmBackend/Mock 全部就位 |
 | M3 配置化 + Unity 编辑器工具 | 🔶 部分 | JSON 配置/SO 互转/防注入✅；AgentChatWindow、BuildConfigCopier ⬜ |
 | M4 Server + 测试页 | ✅ 超额完成 | 端点全家桶 + 调试能力已迁移到 Vue 统一管理台 |
 | M5 Vue 管理端 | ✅ 完成 | `/app/` 部署 13 个路由，根路径统一跳转，覆盖记忆治理与全部调试能力 |
-| M6 发布期治理 | 🔶 基础链路完成 | `UnityServerBackend` 和 JSON/MySQL 可选持久化已完成；设备令牌/更细粒度限流配额/远端热更/内容合规仍待上线前治理 |
+| M6 发布期治理 | 🔶 基础链路完成 | `UnityServerBackend`、客户端共享 token、JSON/MySQL 可选持久化已完成；设备级短期令牌/更细粒度限流配额/远端热更/内容合规仍待上线前治理 |
 
 ---
 
 ## 10. 测试与验证现状
 
-- **xUnit 98/98**：覆盖 SSE/聚合/Server 下行完整事件协议与终态状态机/requestId 校验、请求状态缓存与裁剪/工具模式边界/结构化解析/上下文/防注入/AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 清理与必写审计失败、保留期最旧批次选择、Session 删除失败保护、摘要队列幂等入队/玩家失效/非法标识及策略能力去重
+- **xUnit 107/107**：覆盖 SSE/聚合、上游结束标记、Server 下行终态状态机/requestId 校验、请求状态缓存与裁剪、工具模式边界、结构化解析/上下文/防注入、AgentLoop/摘要/模拟工具、四级策略解析、结构化事实合并、Unity/Server 后台模式差异、`summaryThreshold=0` 有界行为、运行期窗口缩放、JSON 乐观版本、幂等迁移、Session 闲置清理与保护、统一错误契约、保留期最旧批次选择、Session 删除失败保护、摘要队列幂等入队/玩家失效/非法标识及策略能力去重
 - **构建回归**：Server 独立输出目录编译 0 警告/0 错误；Vue 强制全量 `vue-tsc -b --force` 与生产 `npm run build` 均通过，可在生成 `components.d.ts` 后重复执行
 - **端到端已验证**：Ox Alpha 流式对话（角色扮演+结构化输出）、调试模拟工具决策、重启记忆恢复、注入攻击被记录且模型保持角色、连接测试诊断（6.3s 成功 / 错误配置给出原因）。其中 Server 工具验证仅针对会话模拟状态，不代表已接入正式游戏业务。
 - **已知环境限制**：ZCode 内嵌浏览器不派发点击事件（页面代码经 DOM/截图/后端全链路验证，真实浏览器正常）
@@ -347,6 +357,9 @@ Ox Alpha（免费）：完整一轮对话约 650-800 prompt tokens + 150-420 com
 | 账单刷量（发布期） | 当前有基础 IP 固定窗口限流；M6 再补设备令牌、日配额与熔断 |
 | 内容合规（国内发布） | **发布前必办**：接入供应商内容安全接口；日志留存已就绪 |
 | 免费模型不稳定 | 429 自动重试+兜底；连接测试快速定位；预设一键换供应商 |
+| 客户端令牌被提取 | `AIBOT_CLIENT_TOKEN` 适合轻量客户端接入，不视为最终安全边界；正式发布仍需 HTTPS、网关/设备级短期令牌和服务端授权 |
+| JSON 多实例并发写入 | 启动告警并明确仅支持单 Server 实例；需要横向扩展时切换 MySQL 等共享存储 |
+| SSE 慢客户端或上游截断 | 有界 Channel 丢弃中间事件但保留终态；缺少 `[DONE]`/`finish_reason` 视为传输失败并进入重试/兜底 |
 | 模型输出破坏 JSON | 三层容错+截断挽救+兜底台词（49 项测试覆盖） |
 | 注入攻击 | 包裹标记+行为规则+检测；管理台一键回归用例集 |
 | 三端契约漂移 | 附录A/B 为唯一契约；单测双端可跑 |
@@ -354,7 +367,7 @@ Ox Alpha（免费）：完整一轮对话约 650-800 prompt tokens + 150-420 com
 ## 13. 快速开始
 
 ```bash
-# 测试（免网免key，76项）
+# 测试（免网免key，107项）
 cd src/AIBot.Tests && dotnet test
 # Server 编译回归（避免占用正在运行的 apphost）
 cd ../AIBot.Server && dotnet build --no-restore -p:UseAppHost=false
@@ -409,6 +422,8 @@ WebGL（JS桥接Backend）/ RAG（lore层换检索）/ 多NPC编排 / MCP对齐 
 ## 附录B：SSE 下游事件契约（Server → 管理台 / Unity Remote，三端唯一标准）
 
 每事件一行 `data:` JSON（不用 `event:` 字段）。上游（LLM→Server）为 OpenAI 原生 chunk，由 `SseLineParser`+`OpenAiStreamAggregator` 解析聚合。
+
+下游重放仅包含 `reply`、`done`、`error` 三类终态事件；`token`、`reasoning`、`tool_call` 只在实时连接中发送，不进入 Session 的幂等持久化。上游流只有在收到 `[DONE]` 或带 `finish_reason` 的结束 chunk 后才算完整；否则 Server 按模型传输失败处理。
 
 ```
 data: {"type":"token","delta":"你"}

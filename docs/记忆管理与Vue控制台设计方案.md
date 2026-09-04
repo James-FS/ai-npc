@@ -1,7 +1,7 @@
 # 记忆管理与 Vue 控制台设计方案
 
-> 文档版本：v1.5（2026-08-26）
-> 状态：阶段 A、B、C、D 已实施  
+> 文档版本：v1.6（2026-09-03）
+> 状态：阶段 A、B、C、D 已实施；运行安全、流式稳定性与维护性加固已实施
 > 适用范围：AIBot.Core、Unity 运行时、AIBot.Server、`AIBot.Web` Vue 管理端
 
 ## 1. 结论
@@ -72,7 +72,7 @@ Vue 管理端：Vue → AIBot.Server → MySQL
 
 Local 模式用于 Demo、单机和离线联调；Server 模式用于在线游戏，负责隐藏模型 Key、统一校验游戏状态、保存玩家长期记忆、审计和限流。Vue、ASP.NET Core、MySQL、Dapper 和管理 API 都不进入 Unity 构建包。两种模式通过同一 `NpcAgent.ChatAsync()` 和事件契约切换，游戏业务层无需改写。
 
-当前 Unity 包已实现 `UnityWebRequestBackend`（Local 模式）和 `UnityServerBackend`（Server 模式）。在 `AgentConfigAsset` 或 NPC JSON 中设置 `runtimeMode=server`、`serverBaseUrl`，并在 `NpcAgent` 上填写可选的 `playerId/sessionId` 即可通过 Server 中转；鉴权暂不强制，后续可在传输层增加。
+当前 Unity 包已实现 `UnityWebRequestBackend`（Local 模式）和 `UnityServerBackend`（Server 模式）。在 `AgentConfigAsset` 或 NPC JSON 中设置 `runtimeMode=server`、`serverBaseUrl`，并在 `NpcAgent` 上填写可选的 `playerId/sessionId` 即可通过 Server 中转。Server 可通过 `AIBOT_CLIENT_TOKEN` 强制聊天客户端携带 Bearer Token，Unity `AIBotConnectionProfile.serverAuthToken` 应填写同一令牌；未配置时保持本机开发兼容模式，正式环境建议开启并配合 HTTPS/网关访问控制。
 
 Server 正式请求默认 `toolMode=none`。只有 Vue 调试台或 Unity Profile 显式选择 `simulated` 时，才使用 `SimulatedToolHost` 修改会话内的 `SimGameState`；它不能直接修改正式游戏的背包、任务、好感度或其他业务状态。正式游戏接入前，不应把这些模拟结果当作生产业务写入。
 
@@ -97,7 +97,7 @@ Server 配置通过 `appsettings.json` 与环境变量维护，不允许 Vue 修
 }
 ```
 
-当前实现使用以上配置键；保留期清理通过管理 API 显式触发，不是独立的定时后台任务。
+当前实现使用以上配置键。长期记忆保留期清理仍通过管理 API 预演后显式执行；运行日志、聊天日志、审计日志和 JSON Session 文件则由 `LogMaintenanceService` 按配置定期维护清理。
 
 Vue 可以只读展示这些边界，但以下内容不得通过 API 返回或修改：
 
@@ -431,6 +431,15 @@ Server 玩家长期记忆默认采用后台摘要；Unity 或没有后台宿主�
 - 单个后台任务自动重试 3 次；耗尽后记录游戏/NPC/玩家/Session、错误和时间，状态为 `failed`。失败批次仍保存在 `evictedMessages` 中，可通过管理 API 或 Vue 重新排队。
 - 会话摘要状态统一为 `idle`、`waiting`、`pending`、`failed`，用于管理台展示和人工判断。
 
+### 9.2.1 流式输出与请求幂等边界
+
+- Chat SSE 使用容量为 4096 的有界 Channel。`token`、`reasoning` 和 `tool_call` 属于实时中间事件，队列拥塞时允许丢弃；`reply`、`done`、`error` 属于终态事件，必须等待写入，避免慢客户端导致请求没有结束信号。
+- 每个 Session 仅保留最近 20 个请求的指纹、状态和终态事件；幂等重放只保存 `reply`/`done`/`error`，不保存逐 token、reasoning 或工具中间事件，单个请求重放数据上限约 64 KB。
+- 上游 OpenAI 兼容 SSE 必须收到 `[DONE]` 或带 `finish_reason` 的结束 chunk。缺少结束标记视为传输失败，进入既定重试、兜底或错误流程，不能把截断响应当作成功。
+- Chat 请求的 `override`/`memoryOverride` 仅允许管理端调试请求使用；模型覆盖参数由 Server 统一限制（`model` 最长 128，`temperature` 为 0～2，`maxTokens` 为 1～8192，`timeoutMs` 为 1000～120000）。
+- 参数校验、鉴权、限流和内部异常统一返回 `error`、`code`、`status`、`requestId` 及可选 `details`；堆栈、数据根目录、数据库连接串和模型密钥不会回传。
+- JSON 存储模式下，维护任务按 `Sessions:MemoryIdleHours` 清理长期不活跃的内存会话和 Session 文件；存在待摘要消息、processing 幂等请求或当前进程正在跟踪的 Session 会被保护。JSON 文件存储只支持单 Server 实例，多实例部署应切换共享数据库。
+
 ### 9.3 存储接口
 
 ```csharp
@@ -445,7 +454,11 @@ public interface IMemoryRepository
 
 JSON 仍是默认开发存储，并采用逐文件信号量、乐观版本检查、临时文件 + 原子替换。MySQL 模式使用 Dapper、InnoDB 事务和 `memoryVersion` 乐观锁；长期记忆、Session、聊天日志和审计分别落到数据库表，Server API 契约保持不变。Session 由 `SessionStore` 独立管理，不与长期记忆仓储耦合。
 
-当前 MySQL 表结构位于 `database/mysql/schema.sql`，Server 也支持 `Storage:MySql:AutoMigrate=true` 自动建表。迁移由 `schema_migrations` 版本表管理，当前版本 001 为基础表、002 为 `memory_summary_jobs` 摘要任务表；人工迁移 SQL 参考位于 `database/mysql/migrations/`。现有 JSON 长期记忆可通过 `dotnet run -- --migrate-json --exit-after-migrate` 幂等迁移；鉴权/登录不作为本阶段前置条件。
+NPC、World 和 Memory Policy 配置读取使用基于文件修改时间的轻量缓存，并向调用方返回深拷贝，避免每次请求重复解析 JSON 或出现跨请求对象被意外修改。配置写入统一采用临时文件 + 原子替换；聊天、运行日志和审计日志文件名及查询时间统一使用 UTC。
+
+`GET /api/health` 只返回最小健康信息（`ok`/版本），不暴露 data 根目录、存储目标或 NPC 列表；`GET /api/ready` 用于部署探针，数据库不可用时仅返回稳定的 `database_unavailable` 错误码，不回传原始异常。
+
+当前 MySQL 表结构位于 `database/mysql/schema.sql`，Server 也支持 `Storage:MySql:AutoMigrate=true` 自动建表。迁移由 `schema_migrations` 版本表管理，当前版本 001 为基础表、002 为 `memory_summary_jobs` 摘要任务表；人工迁移 SQL 参考位于 `database/mysql/migrations/`。现有 JSON 长期记忆可通过 `dotnet run -- --migrate-json --exit-after-migrate` 幂等迁移。管理 API 可用 `AIBOT_ADMIN_TOKEN` 保护，聊天 API 可用 `AIBOT_CLIENT_TOKEN` 保护；本地可留空，正式部署不应依赖未鉴权模式。
 
 开发环境可直接执行项目根目录的 `docker compose -f docker.yml up -d mysql` 启动 MySQL。该 Compose 文件只包含数据库服务，不会把 Unity、Vue 或 Server 打包进容器。默认使用宿主机 `3306`；若被其他 MySQL 占用，可在 `.env` 设置 `AIBOT_MYSQL_PORT`（本机示例为 `3307`），Server 连接宿主机映射端口，容器内部仍使用 `mysql:3306`。
 
@@ -508,7 +521,7 @@ POST /api/games/{gid}/sessions/{sid}/migrate-memory?npcId=&playerId=
 GET /api/games/{gid}/memory-audit?npcId=&playerId=&date=
 ```
 
-所有写接口记录操作前后差异。管理 Bearer 鉴权保持可选，当前本地默认关闭；API key 始终不回传。
+所有写接口记录操作前后差异。管理 Bearer 鉴权通过 `AIBOT_ADMIN_TOKEN` 配置，当前本地默认关闭；聊天客户端鉴权通过 `AIBOT_CLIENT_TOKEN` 配置。两者均可选但正式部署建议开启；API key 始终不回传。
 管理端可通过 `X-AIBot-Actor` 标记操作人；未提供时使用管理端 IP 作为兼容身份。
 
 人工修改、删除、迁移、策略变更和后台摘要使用 `RecordRequired`：短暂 I/O 故障最多重试三次，最终失败时管理 API 返回 HTTP 503；后台任务不确认消费待摘要批次。
@@ -548,6 +561,9 @@ POST /api/admin/memory-summary-queue/retry
 
 - 未提供 `playerId` 时继续使用旧的 session 范围记忆，不创建伪玩家长期文件，并在日志标记 `legacyMemoryScope=true`。
 - 正式环境可通过配置逐步将 `playerId` 设为必填。
+- 请求可携带 `X-Request-Id`，且必须与请求体 `requestId` 一致；同一 `requestId` 携带不同请求内容返回 `409 request_id_conflict`，进程重启后残留的处理中请求返回 `409 request_in_doubt`。
+- 配置 `AIBOT_CLIENT_TOKEN` 后，聊天 SSE 必须携带 `Authorization: Bearer <token>`；配置 `AIBOT_ADMIN_TOKEN` 后，管理 API 和调试用 override 需要管理 Bearer Token。
+- `reply` 可能携带 `diagnostic`（例如 `model_timeout`），表示已降级为可用兜底台词；只有无法产生有效回复的终止故障才发送 SSE `error`。
 
 ## 10. Vue 管理端设计
 
@@ -798,7 +814,7 @@ memory.audit
 
 - 实现策略、记忆检查、事实编辑、重新摘要和审计 API。
 - 增加导出、清空与数据保留接口。
-- 完成参数校验和敏感字段过滤；管理 API 鉴权保持可选，当前本地默认关闭。
+- 完成参数校验和敏感字段过滤；管理 API 通过 `AIBOT_ADMIN_TOKEN` 可选启用 Bearer 鉴权，聊天客户端通过 `AIBOT_CLIENT_TOKEN` 可选启用鉴权，本地默认可关闭。
 
 实现补充：
 
@@ -808,7 +824,7 @@ memory.audit
 - 手动摘要通过原后台队列执行，不阻塞管理请求，完成后记录前后快照。
 - 审计按 `data/logs/{gameId}/memory-audit/yyyy-MM-dd.jsonl` 保存，支持日期、NPC、玩家和动作过滤。
 - 人工写操作与后台摘要使用必写审计，短暂 I/O 故障重试三次；最终失败时管理 API 返回 HTTP 503，后台任务保留待摘要批次，不再静默返回成功。
-- 数据保留提供默认 90 天边界、清理预演和显式执行；实际删除逐条进行版本检查并写审计。
+- 数据保留提供默认 90 天边界、清理预演和显式执行；实际删除逐条进行版本检查并写审计。长期记忆清理仍由管理 API 触发，运行日志、聊天日志、审计日志和 JSON Session 文件由后台维护任务按保留期/闲置时间清理。
 - 阶段 C API 由统一 Vue 控制台的记忆治理与调试页面共同使用，保留 API 兼容性但不再维护第二套前端。
 
 验收：所有记忆变更可追踪、可恢复来源、不会泄露密钥。
@@ -878,6 +894,15 @@ memory.audit
 - 会话列表返回 `idle`、`waiting`、`pending`、`failed` 状态及最近失败原因。
 - Vue 记忆检查器增加队列概览、当前/累计失败统计、失败提示和全局/会话级重试入口。
 - 验收重点：摘要写入、审计写入、Session 确认落盘三者全部成功后才消费待摘要消息；服务重启和重试均保持幂等。
+
+### 运行安全与性能收尾（✅ 2026-09-03 已完成）
+
+- 聊天 SSE 改为有界 Channel：中间 token/reasoning/tool 事件在拥塞时可丢弃，reply/done/error 终态事件强制保留；幂等重放仅保存终态事件并限制约 64 KB。
+- 增加模型参数服务端边界、上游 `[DONE]`/`finish_reason` 完整性检查、统一 Chat JSON 错误契约，以及仅管理端可用的 override。
+- JSON Session 闲置清理与保护规则落地；明确 JSON 单 Server 实例边界，多实例应使用 MySQL 等共享存储。
+- 配置读取增加 mtime 缓存和深拷贝，配置文件采用原子替换；聊天/运行/审计日志统一按 UTC 写入和查询。
+- `/api/health` 最小化返回，`/api/ready` 隐藏数据库异常原文；RPG 接入改为可移植数据根定位，不再依赖固定 `D:/Code/aibot/data` 路径。
+- 当前验证：xUnit 107/107 通过，Server 构建 0 警告/0 错误；Unity/RPG 仍需在 Unity 编辑器中完成真实编译与联调。
 
 验证命令：
 

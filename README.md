@@ -2,9 +2,10 @@
 
 可插拔的游戏 NPC 智能Agent平台：纯 C# 核心 + Unity 包 + 独立 Server + Web 管理台，接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM）。
 
-- 方案文档：[AI-NPC-Agent-实施方案.md](./docs/architecture/AI-NPC-Agent-实施方案.md)（v3.0，含数据契约、四阶段记忆管理、摘要队列治理、统一 Vue 调试工作台和附录A/B）
+- 方案文档：[AI-NPC-Agent-实施方案.md](./docs/architecture/AI-NPC-Agent-实施方案.md)（v3.1，含数据契约、四阶段记忆管理、摘要队列治理、运行加固、统一 Vue 调试工作台和附录A/B）
 - 记忆管理与 Vue 控制台设计：[docs/记忆管理与Vue控制台设计方案.md](./docs/记忆管理与Vue控制台设计方案.md)
-- 当前进度：M1、M4、M5 已完成，M2 基本完成（详见主方案 §9）
+- Unity 插件快速接入：[Packages/com.aibot.npcagent/README.md](./Packages/com.aibot.npcagent/README.md)
+- 当前进度：M1、M4、M5 已完成，M2 基本完成，M6 基础链路已完成（详见主方案 §9）
 
 ## 目录
 
@@ -12,7 +13,7 @@
 Packages/com.aibot.npcagent   Unity 包（Runtime/Core = 三端共享的 AIBot.Core 源码）
 src/AIBot.Server              ASP.NET Core 独立宿主 + 静态托管（根入口跳转 wwwroot/app）
 src/AIBot.Web                 Vue 3 + TypeScript 统一管理/调试控制台（可选后台）
-src/AIBot.Tests               xUnit 测试（98 项，Core/协议/请求幂等/工具边界/记忆仓储/摘要队列/运行日志与审计免网全链路）
+src/AIBot.Tests               xUnit 测试（107 项，Core/协议/请求幂等/工具边界/记忆仓储/摘要队列/运行日志与审计免网全链路）
 data/games/{gameId}           NPC 配置/世界观/JSON 兼容存储（MySQL 模式下为迁移源/配置源）
 database/mysql/schema.sql     MySQL + Dapper 的表结构
 database/mysql/migrations     按版本维护的增量迁移 SQL（当前 001/002）
@@ -138,9 +139,9 @@ Server 模式的当前工具边界需要特别注意：
 多个 NPC、多人游戏、长期记忆、统一配置管理 → Server
 ```
 
-两种模式对游戏层保持相同的 `NpcAgent.ChatAsync()`、流式事件和结构化回复接口。切换模式主要是更换配置来源：Local 使用 `AgentConfigAsset`，Server 使用 `AIBotConnectionProfile`；旧的 `runtimeMode=local/server` 配置方式仍然兼容。
+两种模式对游戏层保持相同的 `NpcAgent.ChatAsync()`、流式事件和结构化回复接口。切换模式主要是更换配置来源：Local 使用 `AgentConfigAsset`，Server 使用 `AIBotConnectionProfile`；旧的 `runtimeMode=local/server` 配置方式仍然兼容。Unity 侧模型故障但仍交付兜底台词时会触发 `onFallback`，请求取消时触发 `onCancelled`；两者都不替代正常的 `onReply`/终止错误语义。
 
-Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包含 Vue、ASP.NET Core、MySQL 或 Dapper。开发/单机使用 `UnityWebRequestBackend` 直连模型；Server 使用 `UnityServerBackend` 连接 `AIBot.Server`。Unity 与 Vue 都不直接连接 MySQL；Server 默认使用 JSON，启用 MySQL 时由 Dapper 访问数据库，两种存储可通过配置切换。当前 Server 本地运行默认不强制鉴权，正式部署时应在网关或传输层补充认证和访问控制。
+Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包含 Vue、ASP.NET Core、MySQL 或 Dapper。开发/单机使用 `UnityWebRequestBackend` 直连模型；Server 使用 `UnityServerBackend` 连接 `AIBot.Server`。Unity 与 Vue 都不直接连接 MySQL；Server 默认使用 JSON，启用 MySQL 时由 Dapper 访问数据库，两种存储可通过配置切换。Server 配置 `AIBOT_CLIENT_TOKEN` 后会强制聊天客户端携带令牌；未配置时仅适合本机开发，正式部署还应配合 HTTPS、网关认证和访问控制。
 
 ## 快速开始（脱离 Unity 独立运行）
 
@@ -184,6 +185,7 @@ npm run build
 
 # 可选（PowerShell）：部署管理台时启用管理 API 鉴权（管理台顶部填写同一 token）
 $env:AIBOT_ADMIN_TOKEN="请换成长随机值"
+$env:AIBOT_CLIENT_TOKEN="请换成另一组长随机值"
 
 # 4) curl 调试对话（中文请存 UTF-8 文件后 --data-binary @chat.json）
 curl -N -X POST http://localhost:5000/api/games/default/chat/stream \
@@ -193,11 +195,16 @@ curl -N -X POST http://localhost:5000/api/games/default/chat/stream \
 ```
 
 返回 SSE 事件流（主方案附录B）：`token` → `reasoning`（推理模型思考过程）→ `tool_call` → `reply` → `done`。
+上游 OpenAI 兼容流必须正常收到 `[DONE]` 或带有 `finish_reason` 的结束 chunk；如果连接中途截断，Server/Unity 会将其视为模型传输失败并进入既定的重试或兜底流程。
 **没填 key 也能调通**：返回兜底台词（`"fallback":true`）。
 
-每轮对话应携带稳定且唯一的 `requestId`。客户端断线后使用完全相同的请求体和 `requestId` 重试，Server 会等待原请求完成或从 Session 重放已持久化的完整 SSE，并返回 `X-AIBot-Replayed: true`；相同 ID 携带不同内容返回 `409 request_id_conflict`。若 Server 在处理过程中异常退出，重启后该 ID 返回 `409 request_in_doubt`，避免不确定副作用被自动执行第二次。
+聊天参数、鉴权、限流和内部异常使用统一 JSON 错误契约（`error`、`code`、`status`、`requestId`，可选 `details`）；`GET /api/health` 只返回最小健康信息，`GET /api/ready` 供部署探针使用且不会回传数据库异常原文。
+
+每轮对话应携带稳定且唯一的 `requestId`。客户端断线后使用完全相同的请求体和 `requestId` 重试，Server 会等待原请求完成或从 Session 重放已持久化的终态 SSE（`reply`/`done`/`error`，不保存逐 token 事件），并返回 `X-AIBot-Replayed: true`；相同 ID 携带不同内容返回 `409 request_id_conflict`。若 Server 在处理过程中异常退出，重启后该 ID 返回 `409 request_in_doubt`，避免不确定副作用被自动执行第二次。
 
 摘要链路说明：短期窗口淘汰的消息会在达到 `summaryThreshold` 后进入后台队列。单个任务自动重试 3 次；失败时不会删除 Session 中的 `evictedMessages`，可在 `/app/#/memories` 的会话详情中点击“重试摘要”，或调用 `POST /api/admin/memory-summary-queue/retry`。队列状态接口会返回待处理数、当前失败数、累计失败数和失败明细。
+
+JSON 存储会由维护任务清理长期不活跃的 Session 文件；`Sessions:MemoryIdleHours` 同时控制内存会话和文件的闲置清理。JSON 模式适合单 Server 实例，多个进程不要同时写入同一 data 目录。聊天请求中的模型覆盖参数仅允许管理端调试请求使用，并会被 Server 限制在安全范围内。
 
 MySQL 模式会把摘要任务状态持久化到 `memory_summary_jobs`，Server 重启后自动恢复 pending/processing 任务；数据库迁移由 `schema_migrations` 管理。本地开发可设置 `AIBOT_MYSQL_AUTOMIGRATE=true`（`.env` 配置后由启动脚本透传）让 Server 启动时自动补齐缺失表。`GET /api/ready` 可用于启动探针，未连接数据库、缺少表、未配置模型或没有默认 NPC 时返回 503。模型故障若已由 AgentLoop 降级为兜底回复，会在 SSE `reply.diagnostic` 中提供稳定的 `code/status/retryable` 字段；只有无法返回任何有效回复的终止故障才使用 `error` 事件。连接测试接口继续返回同一套错误码契约。
 
@@ -236,7 +243,7 @@ API key 永不入库：`.gitignore` 已忽略全部 NPC 真实配置（`data/gam
 `/api/games/{gameId}/chat/stream`，长期记忆、摘要、工具和日志由 Server 处理。
 `NpcAgent` 上的 `playerId` 可选，填写后启用玩家范围长期记忆；`sessionId` 用于复用短期会话。
 
-如果使用 Server Connection Profile，则不需要在 Unity 中保存完整 NPC 配置或模型 API Key；Profile 会直接以 Server 模式初始化连接。Local 模式仍建议使用 `AgentConfigAsset`，这样不依赖后台即可运行。
+如果使用 Server Connection Profile，则不需要在 Unity 中保存完整 NPC 配置或模型 API Key；Profile 会直接以 Server 模式初始化连接。正式部署时还应在 Server 设置 `AIBOT_CLIENT_TOKEN`，并在 Profile 的 `serverAuthToken` 填入同一令牌；聊天 API 会拒绝未携带该令牌的请求。Local 模式仍建议使用 `AgentConfigAsset`，这样不依赖后台即可运行。
 
 Local 模式还可以在 `NpcAgent.worldConfigAsset` 指定 `World Config` 资源，并在 `AgentConfigAsset` 中填写开发期模型 Key；这样整个 Demo 不需要复制仓库的 `data/` 目录。真实项目请勿把含 Key 的 Asset 提交到公共仓库。
 
