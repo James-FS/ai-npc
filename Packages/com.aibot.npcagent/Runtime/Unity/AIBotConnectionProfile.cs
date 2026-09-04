@@ -21,6 +21,8 @@ namespace AIBot.Unity
 
         [Header("连接")]
         public int timeoutMs = 20000;
+        [Tooltip("Server 聊天客户端令牌；与服务端 AIBOT_CLIENT_TOKEN 一致。请通过安全配置注入，不要提交到公共仓库。")]
+        public string serverAuthToken;
 
         [Header("工具（仅调试）")]
         [Tooltip("显式启用 Server 的 SimulatedToolHost。它只修改会话模拟状态，不能修改正式游戏背包、任务或好感度。")]

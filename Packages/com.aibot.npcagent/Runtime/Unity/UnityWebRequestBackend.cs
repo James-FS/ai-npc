@@ -76,7 +76,8 @@ namespace AIBot.Unity
                 // 修复：此前 uploadHandler 为 null，序列化的 body 从未上传，导致网关收到空请求
                 req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(body));
                 req.SetRequestHeader("Content-Type", "application/json");
-                req.SetRequestHeader("Authorization", "Bearer " + _settings.apiKey);
+                if (!string.IsNullOrWhiteSpace(_settings.apiKey))
+                    req.SetRequestHeader("Authorization", "Bearer " + _settings.apiKey);
                 req.timeout = Math.Max(1, _settings.timeoutMs / 1000);
 
                 AsyncOperation op = req.SendWebRequest();
@@ -99,6 +100,9 @@ namespace AIBot.Unity
             }
 
             parser.Flush();
+            if (!aggregator.SawDone && !aggregator.SawFinishReason)
+                throw new LlmTransportException(502,
+                    "LLM stream ended before [DONE] or finish_reason");
             aggregator.Complete();
         }
 

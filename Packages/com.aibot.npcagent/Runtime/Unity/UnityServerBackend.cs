@@ -28,6 +28,7 @@ namespace AIBot.Unity
         private readonly string _playerId;
         private readonly string _sessionId;
         private readonly int _timeoutMs;
+        private readonly string _authToken;
         private readonly Func<string> _stateSnapshotProvider;
         private readonly bool _enableSimulatedTools;
 
@@ -35,7 +36,8 @@ namespace AIBot.Unity
 
         public UnityServerBackend(string baseUrl, string gameId, string npcId,
             string playerId, string sessionId, int timeoutMs,
-            Func<string> stateSnapshotProvider = null, bool enableSimulatedTools = false)
+            Func<string> stateSnapshotProvider = null, bool enableSimulatedTools = false,
+            string authToken = null)
         {
             if (string.IsNullOrWhiteSpace(baseUrl)) throw new ArgumentException("Server 地址不能为空", nameof(baseUrl));
             if (string.IsNullOrWhiteSpace(gameId)) throw new ArgumentException("gameId 不能为空", nameof(gameId));
@@ -46,6 +48,7 @@ namespace AIBot.Unity
             _playerId = playerId ?? string.Empty;
             _sessionId = string.IsNullOrWhiteSpace(sessionId) ? "s-unity" : sessionId;
             _timeoutMs = Math.Max(1000, timeoutMs);
+            _authToken = authToken ?? string.Empty;
             _stateSnapshotProvider = stateSnapshotProvider;
             _enableSimulatedTools = enableSimulatedTools;
         }
@@ -232,6 +235,8 @@ namespace AIBot.Unity
                 req.SetRequestHeader("Content-Type", "application/json");
                 req.SetRequestHeader("Accept", "text/event-stream");
                 req.SetRequestHeader("X-Request-Id", requestId);
+                if (!string.IsNullOrWhiteSpace(_authToken))
+                    req.SetRequestHeader("Authorization", "Bearer " + _authToken);
                 req.timeout = Math.Max(1, (_timeoutMs + 999) / 1000);
 
                 AsyncOperation operation = req.SendWebRequest();
@@ -270,6 +275,8 @@ namespace AIBot.Unity
         {
             using (var req = UnityWebRequest.Get(_baseUrl + path))
             {
+                if (!string.IsNullOrWhiteSpace(_authToken))
+                    req.SetRequestHeader("Authorization", "Bearer " + _authToken);
                 req.timeout = Math.Max(1, (_timeoutMs + 999) / 1000);
                 AsyncOperation operation = req.SendWebRequest();
                 using (ct.Register(() => req.Abort()))

@@ -134,7 +134,8 @@ namespace AIBot.Core.Llm
                 {
                     httpRequest.Content = new StringContent(
                         JsonConvert.SerializeObject(request), Encoding.UTF8, "application/json");
-                    httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.apiKey);
+                    if (!string.IsNullOrWhiteSpace(_settings.apiKey))
+                        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.apiKey);
 
                     using (HttpResponseMessage resp = await SharedClient.SendAsync(
                         httpRequest, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token))
@@ -160,6 +161,9 @@ namespace AIBot.Core.Llm
                             }
                         }
                         parser.Flush();
+                        if (!aggregator.SawDone && !aggregator.SawFinishReason)
+                            throw new LlmTransportException(502,
+                                "LLM stream ended before [DONE] or finish_reason");
                         aggregator.Complete();
                     }
                 }

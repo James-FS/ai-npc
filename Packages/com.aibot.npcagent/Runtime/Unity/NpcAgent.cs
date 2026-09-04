@@ -63,6 +63,10 @@ namespace AIBot.Unity
         public UnityEngine.Events.UnityEvent<AgentToolExecutionEvent> onToolExecuted;
         public UnityEngine.Events.UnityEvent<StructuredReply> onReply;
         public UnityEngine.Events.UnityEvent<string> onError;
+        /// <summary>模型失败但仍交付 fallback 回复时触发；不会替代 onReply。</summary>
+        public UnityEngine.Events.UnityEvent<string> onFallback;
+        /// <summary>当前请求被取消时触发，供 UI 复位状态。</summary>
+        public UnityEngine.Events.UnityEvent onCancelled;
         public UnityEngine.Events.UnityEvent onBusy;
         public UnityEngine.Events.UnityEvent<string> onServerStatus;
 
@@ -110,6 +114,8 @@ namespace AIBot.Unity
 
         private void Awake()
         {
+            if (onFallback == null) onFallback = new UnityEngine.Events.UnityEvent<string>();
+            if (onCancelled == null) onCancelled = new UnityEngine.Events.UnityEvent();
             LoadConfig();
             _memoryPolicy = _memoryPolicy ?? MemoryPolicy.Defaults();
             int turns = _memoryPolicy.shortTermTurns;
@@ -219,6 +225,12 @@ namespace AIBot.Unity
                         ElapsedMs = serverResult.ElapsedMs,
                         UsedFallback = serverResult.UsedFallback
                     };
+                    if (directResult.UsedFallback)
+                    {
+                        onFallback?.Invoke(serverResult.Diagnostic == null
+                            ? "Server 返回了兜底回复"
+                            : (serverResult.Diagnostic.Code ?? "Server 返回了兜底回复"));
+                    }
                     onReply?.Invoke(directResult.Reply);
                     return directResult;
                 }
@@ -234,10 +246,11 @@ namespace AIBot.Unity
                     HostContext = gameObject,
                     MemorySummary = _sessionSummary,
                     MemoryFacts = _sessionFacts,
-                    ResolvedMemoryPolicy = _memoryPolicy
+                    ResolvedMemoryPolicy = _memoryPolicy,
+                    NotifyReplyBeforeSummary = true
                 };
                 AgentLoopResult result = await _loop.RunAsync(input, new UnityStreamSink(this), _requestCts.Token);
-                if (result.Reply != null) onReply?.Invoke(result.Reply);
+                if (result.UsedFallback) onFallback?.Invoke(result.FallbackReason ?? "模型未返回有效回复");
                 // 摘要式长期记忆写回（下一次对话注入）
                 if (result.MemorySummary != null)
                 {
@@ -246,7 +259,11 @@ namespace AIBot.Unity
                 }
                 return result;
             }
-            catch (OperationCanceledException) { return null; /* 玩家离开/组件禁用：静默 */ }
+            catch (OperationCanceledException)
+            {
+                onCancelled?.Invoke();
+                return null;
+            }
             catch (Exception ex)
             {
                 UnityLogSink.Instance.Log(LogLevel.Error, "Chat failed: " + ex.Message, ex);
@@ -341,7 +358,8 @@ namespace AIBot.Unity
                     {
                         IGameContext context = GetGameContext();
                         return context == null ? null : context.SnapshotJson;
-                    }, enableSimulatedTools);
+                    }, enableSimulatedTools,
+                    useConnectionProfile ? connectionProfile.serverAuthToken : null);
                 _backend = null;
                 _loop = null;
             }
@@ -453,7 +471,7 @@ namespace AIBot.Unity
             else Debug.LogError("[AIBot] " + message);
         }
 
-        private sealed class UnityStreamSink : ILlmStreamSink, IReasoningSink, IToolExecutionSink
+        private sealed class UnityStreamSink : ILlmStreamSink, IReasoningSink, IToolExecutionSink, IReplyReadySink
         {
             private readonly NpcAgent _agent;
             public UnityStreamSink(NpcAgent agent) { _agent = agent; }
@@ -472,6 +490,7 @@ namespace AIBot.Unity
                 });
             }
             public void OnCompleted(string fullText, Usage usage) { }
+            public void OnReplyReady(StructuredReply reply) { _agent.onReply?.Invoke(reply); }
             public void OnError(Exception ex) { Debug.LogWarning("[AIBot] 流错误：" + ex.Message); }
         }
     }

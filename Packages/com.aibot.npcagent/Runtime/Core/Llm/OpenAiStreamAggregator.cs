@@ -16,6 +16,11 @@ namespace AIBot.Core.Llm
         private Usage _usage;
         private bool _completed;
 
+        public bool SawDone { get; private set; }
+        public bool SawFinishReason { get; private set; }
+        public bool SawValidChunk { get; private set; }
+        public bool IsCompleted { get { return _completed; } }
+
         public OpenAiStreamAggregator(ILlmStreamSink sink)
         {
             _sink = sink;
@@ -27,6 +32,7 @@ namespace AIBot.Core.Llm
             if (_completed) return;
             if (payload == "[DONE]")
             {
+                SawDone = true;
                 Complete();
                 return;
             }
@@ -34,6 +40,7 @@ namespace AIBot.Core.Llm
             JObject chunk;
             try { chunk = JObject.Parse(payload); }
             catch (System.Exception) { return; }        // 容忍上游偶发非 JSON 行
+            SawValidChunk = true;
 
             JToken usageNode = chunk["usage"];
             if (usageNode != null && usageNode.HasValues)
@@ -43,6 +50,8 @@ namespace AIBot.Core.Llm
 
             JArray choices = chunk["choices"] as JArray;
             if (choices == null || choices.Count == 0) return;
+            string finishReason = choices[0]["finish_reason"]?.ToString();
+            if (!string.IsNullOrEmpty(finishReason)) SawFinishReason = true;
             JObject delta = choices[0]["delta"] as JObject;
             if (delta == null) return;
 

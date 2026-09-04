@@ -15,6 +15,37 @@ namespace AIBot.Unity
     {
         public static string DataRootOverride;
 
+        /// <summary>
+        /// 显式设置 data/ 根目录。相对路径按当前进程目录解析，并要求目录下存在 games/，
+        /// 避免把错误路径延迟到首次对话才暴露。
+        /// </summary>
+        public static bool SetDataRoot(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                DataRootOverride = null;
+                return false;
+            }
+
+            string fullPath;
+            try { fullPath = Path.GetFullPath(path); }
+            catch (System.Exception ex)
+            {
+                Debug.LogError("[AIBot] data/ 根目录路径无效：" + ex.Message);
+                return false;
+            }
+
+            string gamesPath = Path.Combine(fullPath, "games");
+            if (!Directory.Exists(fullPath) || !Directory.Exists(gamesPath))
+            {
+                Debug.LogError("[AIBot] data/ 根目录不存在或缺少 games/：" + fullPath);
+                return false;
+            }
+
+            DataRootOverride = fullPath;
+            return true;
+        }
+
         private static string[] Candidates()
         {
             if (!string.IsNullOrEmpty(DataRootOverride)) return new[] { DataRootOverride };

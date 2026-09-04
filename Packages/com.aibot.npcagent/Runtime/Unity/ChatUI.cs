@@ -16,6 +16,8 @@ namespace AIBot.Unity
 
         private readonly StringBuilder _transcript = new StringBuilder();
         private readonly StringBuilder _streaming = new StringBuilder();
+        private float _nextRefreshAt;
+        private bool _refreshQueued;
 
         private string NpcName
         {
@@ -50,29 +52,42 @@ namespace AIBot.Unity
         private void OnToken(string delta)
         {
             _streaming.Append(delta);
-            Refresh();
+            Refresh(false);
         }
 
         private void OnReply(StructuredReply reply)
         {
             _streaming.Length = 0;
             _transcript.AppendLine(NpcName + "：" + reply.say + "  [" + reply.emotion + "/" + reply.action + "]");
-            Refresh();
+            Refresh(true);
         }
 
         private void OnError(string message)
         {
             _streaming.Length = 0;
             _transcript.AppendLine("<color=red>出错了：" + message + "</color>");
-            Refresh();
+            Refresh(true);
         }
 
-        private void Refresh()
+        private void Update()
+        {
+            if (_refreshQueued && Time.unscaledTime >= _nextRefreshAt)
+                Refresh(true);
+        }
+
+        private void Refresh(bool immediate = true)
         {
             if (bubble == null) return;
+            if (!immediate && Time.unscaledTime < _nextRefreshAt)
+            {
+                _refreshQueued = true;
+                return;
+            }
             bubble.text = _streaming.Length > 0
                 ? _transcript.ToString() + NpcName + "：" + _streaming
                 : _transcript.ToString();
+            _nextRefreshAt = Time.unscaledTime + 0.05f;
+            _refreshQueued = false;
         }
     }
 }

@@ -139,7 +139,32 @@ namespace AIBot.Tests
             Assert.Equal("（测试兜底台词）", result.Reply.say);
             Assert.NotNull(sink.Error);
             Assert.True(result.FlaggedInjection);
+            Assert.False(string.IsNullOrEmpty(result.FallbackReason));
             Assert.Equal(2, memory.Messages.Count);            // 网络失败也保留玩家输入与兜底回复
+        }
+
+        [Fact]
+        public async Task ToolRoundLimit_ForcesStructuredTextResponse()
+        {
+            var echo = new EchoTool();
+            var tools = new ToolRegistry();
+            tools.Register(echo);
+            string finalJson = "{\"say\":\"收敛\",\"emotion\":\"neutral\",\"action\":\"idle\"}";
+            var rounds = new List<string>();
+            for (int i = 0; i < 4; i++)
+                rounds.Add(Sse.Round(Sse.ToolStart("call_" + i, "echo"), Sse.ToolArgs("{\"text\":\"x\"}")));
+            rounds.Add(Sse.Round(Sse.Token(finalJson)));
+
+            var backend = new MockLlmBackend(rounds.ToArray());
+            AgentLoopResult result = await new AgentLoop(backend).RunAsync(
+                Input(Config(true), tools, new ShortTermMemory(20), "继续"),
+                new RecordingSink(), CancellationToken.None);
+
+            Assert.False(result.UsedFallback);
+            Assert.Equal("收敛", result.Reply.say);
+            Assert.Equal(5, backend.Requests.Count);
+            Assert.Null(backend.Requests[4].Tools);
+            Assert.NotNull(backend.Requests[4].ResponseFormat);
         }
 
         [Fact]

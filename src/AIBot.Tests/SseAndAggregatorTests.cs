@@ -118,6 +118,34 @@ namespace AIBot.Tests
 
             Assert.Equal("ok", sink.CompletedText);
         }
+
+        [Fact]
+        public void MissingCompletionMarker_IsDetectable()
+        {
+            var sink = new RecordingSink();
+            var aggregator = new OpenAiStreamAggregator(sink);
+            var parser = new SseLineParser(aggregator.HandleDataLine);
+            parser.Feed("data: " + Sse.Token("partial") + "\n\n");
+            parser.Flush();
+
+            Assert.False(aggregator.SawDone);
+            Assert.False(aggregator.SawFinishReason);
+            Assert.False(aggregator.IsCompleted);
+        }
+
+        [Fact]
+        public void FinishReason_IsAcceptedAsCompletionMarker()
+        {
+            var sink = new RecordingSink();
+            var aggregator = new OpenAiStreamAggregator(sink);
+            var parser = new SseLineParser(aggregator.HandleDataLine);
+            parser.Feed("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n");
+            parser.Flush();
+
+            Assert.True(aggregator.SawFinishReason);
+            aggregator.Complete();
+            Assert.NotNull(sink.CompletedText);
+        }
     }
 
     public class ServerChatEventParserTests

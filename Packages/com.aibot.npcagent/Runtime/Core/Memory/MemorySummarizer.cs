@@ -121,10 +121,15 @@ namespace AIBot.Core.Memory
 
         private sealed class CollectorSink : ILlmStreamSink
         {
-            public string Text;
-            public void OnToken(string delta) { Text = (Text ?? string.Empty) + delta; }
+            private readonly StringBuilder _text = new StringBuilder();
+            public string Text { get { return _text.ToString(); } }
+            public void OnToken(string delta) { if (!string.IsNullOrEmpty(delta)) _text.Append(delta); }
             public void OnToolCall(ToolCallDto call) { }
-            public void OnCompleted(string fullText, Usage usage) { Text = fullText; }
+            public void OnCompleted(string fullText, Usage usage)
+            {
+                _text.Clear();
+                if (!string.IsNullOrEmpty(fullText)) _text.Append(fullText);
+            }
             public void OnError(Exception ex) { }
         }
 

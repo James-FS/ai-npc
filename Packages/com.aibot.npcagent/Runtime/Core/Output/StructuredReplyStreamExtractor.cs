@@ -11,62 +11,77 @@ namespace AIBot.Core.Output
     public sealed class StructuredReplyStreamExtractor
     {
         private readonly StringBuilder _raw = new StringBuilder();
-        private string _emitted = string.Empty;
+        private readonly StringBuilder _decoded = new StringBuilder();
+        private int _sayValueStart = -1;
+        private int _scanIndex;
+        private bool _escape;
+        private int _unicodeDigits;
+        private int _unicodeValue;
+        private bool _closed;
+        private int _emitted;
 
         public string Push(string chunk)
         {
             if (!string.IsNullOrEmpty(chunk)) _raw.Append(chunk);
-            string current = ExtractPrefix(_raw.ToString());
-            if (current.Length <= _emitted.Length || !current.StartsWith(_emitted, StringComparison.Ordinal))
-                return string.Empty;
-            string delta = current.Substring(_emitted.Length);
-            _emitted = current;
+            if (_sayValueStart < 0)
+            {
+                Match match = Regex.Match(_raw.ToString(), "\\\"say\\\"\\s*:\\s*\\\"");
+                if (!match.Success) return string.Empty;
+                _sayValueStart = match.Index + match.Length;
+                _scanIndex = _sayValueStart;
+            }
+
+            while (_scanIndex < _raw.Length && !_closed)
+            {
+                char c = _raw[_scanIndex++];
+                if (_unicodeDigits > 0)
+                {
+                    int digit = Hex(c);
+                    if (digit < 0)
+                    {
+                        _unicodeDigits = 0;
+                        _escape = false;
+                        continue;
+                    }
+                    _unicodeValue = (_unicodeValue << 4) | digit;
+                    if (--_unicodeDigits == 0) _decoded.Append((char)_unicodeValue);
+                    continue;
+                }
+                if (_escape)
+                {
+                    _escape = false;
+                    switch (c)
+                    {
+                        case '"': _decoded.Append('"'); break;
+                        case '\\': _decoded.Append('\\'); break;
+                        case '/': _decoded.Append('/'); break;
+                        case 'b': _decoded.Append('\b'); break;
+                        case 'f': _decoded.Append('\f'); break;
+                        case 'n': _decoded.Append('\n'); break;
+                        case 'r': _decoded.Append('\r'); break;
+                        case 't': _decoded.Append('\t'); break;
+                        case 'u': _unicodeDigits = 4; _unicodeValue = 0; break;
+                        default: break;
+                    }
+                    continue;
+                }
+                if (c == '\\') { _escape = true; continue; }
+                if (c == '"') { _closed = true; break; }
+                _decoded.Append(c);
+            }
+
+            if (_decoded.Length <= _emitted) return string.Empty;
+            string delta = _decoded.ToString(_emitted, _decoded.Length - _emitted);
+            _emitted = _decoded.Length;
             return delta;
         }
 
-        private static string ExtractPrefix(string raw)
+        private static int Hex(char c)
         {
-            if (string.IsNullOrEmpty(raw)) return string.Empty;
-            Match match = Regex.Match(raw, "\\\"say\\\"\\s*:\\s*\\\"");
-            if (!match.Success) return string.Empty;
-
-            var decoded = new StringBuilder();
-            for (int i = match.Index + match.Length; i < raw.Length; i++)
-            {
-                char c = raw[i];
-                if (c == '"') break;
-                if (c != '\\')
-                {
-                    decoded.Append(c);
-                    continue;
-                }
-
-                if (++i >= raw.Length) break; // 不完整转义，等待下一片
-                char escaped = raw[i];
-                switch (escaped)
-                {
-                    case '"': decoded.Append('"'); break;
-                    case '\\': decoded.Append('\\'); break;
-                    case '/': decoded.Append('/'); break;
-                    case 'b': decoded.Append('\b'); break;
-                    case 'f': decoded.Append('\f'); break;
-                    case 'n': decoded.Append('\n'); break;
-                    case 'r': decoded.Append('\r'); break;
-                    case 't': decoded.Append('\t'); break;
-                    case 'u':
-                        if (i + 4 >= raw.Length) return decoded.ToString();
-                        string hex = raw.Substring(i + 1, 4);
-                        if (!int.TryParse(hex, System.Globalization.NumberStyles.HexNumber,
-                            System.Globalization.CultureInfo.InvariantCulture, out int code))
-                            return decoded.ToString();
-                        decoded.Append((char)code);
-                        i += 4;
-                        break;
-                    default:
-                        return decoded.ToString();
-                }
-            }
-            return decoded.ToString();
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
         }
     }
 }
