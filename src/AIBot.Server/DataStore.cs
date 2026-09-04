@@ -14,6 +14,40 @@ namespace AIBot.Server
         private static string _cachedRoot;
         private static readonly ILogSink Log = new ConsoleLogSink();
         private static readonly object IoLock = new object();
+        private static readonly object CacheLock = new object();
+        private static readonly Dictionary<string, CacheEntry<AgentConfigDto>> NpcCache =
+            new Dictionary<string, CacheEntry<AgentConfigDto>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, CacheEntry<WorldConfigDto>> WorldCache =
+            new Dictionary<string, CacheEntry<WorldConfigDto>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, CacheEntry<MemoryPolicy>> PolicyCache =
+            new Dictionary<string, CacheEntry<MemoryPolicy>>(StringComparer.OrdinalIgnoreCase);
+
+        private sealed class CacheEntry<T>
+        {
+            public DateTime LastWriteUtc;
+            public T Value;
+        }
+
+        private static T Clone<T>(T value)
+        {
+            if (value == null) return default(T);
+            return JsonConvert.DeserializeObject<T>(JsonConvert.SerializeObject(value));
+        }
+
+        private static void WriteAtomic(string path, string content)
+        {
+            string temp = path + ".tmp-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                File.WriteAllText(temp, content);
+                if (File.Exists(path)) File.Move(temp, path, true);
+                else File.Move(temp, path);
+            }
+            finally
+            {
+                if (File.Exists(temp)) File.Delete(temp);
+            }
+        }
 
         /// <summary>npcId/gameId 合法性（同时防路径穿越）：字母数字下划线短横线，1~64 位。</summary>
         public static bool IsValidId(string id)
@@ -69,7 +103,19 @@ namespace AIBot.Server
             if (root == null) { Log.Log(LogLevel.Error, "data/ 根目录未找到，设置 AIBOT_DATA_ROOT"); return null; }
             string path = Path.Combine(root, "games", gameId, "npcs", npcId + ".json");
             if (!File.Exists(path)) return null;
-            try { return JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(path)); }
+            DateTime lastWrite = File.GetLastWriteTimeUtc(path);
+            lock (CacheLock)
+            {
+                if (NpcCache.TryGetValue(path, out CacheEntry<AgentConfigDto> hit)
+                    && hit.LastWriteUtc == lastWrite)
+                    return Clone(hit.Value);
+            }
+            try
+            {
+                AgentConfigDto value = JsonConvert.DeserializeObject<AgentConfigDto>(File.ReadAllText(path));
+                lock (CacheLock) NpcCache[path] = new CacheEntry<AgentConfigDto> { LastWriteUtc = lastWrite, Value = value };
+                return Clone(value);
+            }
             catch (Exception ex)
             {
                 Log.Log(LogLevel.Error, "NPC 配置解析失败: " + path, ex);
@@ -83,10 +129,23 @@ namespace AIBot.Server
             string root = FindDataRoot();
             string path = root == null ? null : Path.Combine(root, "games", gameId, "world.json");
             if (path == null || !File.Exists(path)) return new WorldConfigDto { worldId = worldId };
+            DateTime lastWrite = File.GetLastWriteTimeUtc(path);
+            lock (CacheLock)
+            {
+                if (WorldCache.TryGetValue(path, out CacheEntry<WorldConfigDto> hit)
+                    && hit.LastWriteUtc == lastWrite)
+                {
+                    WorldConfigDto cached = Clone(hit.Value) ?? new WorldConfigDto();
+                    if (string.IsNullOrEmpty(cached.worldId)) cached.worldId = worldId;
+                    return cached;
+                }
+            }
             try
             {
-                return JsonConvert.DeserializeObject<WorldConfigDto>(File.ReadAllText(path))
+                WorldConfigDto value = JsonConvert.DeserializeObject<WorldConfigDto>(File.ReadAllText(path))
                     ?? new WorldConfigDto { worldId = worldId };
+                lock (CacheLock) WorldCache[path] = new CacheEntry<WorldConfigDto> { LastWriteUtc = lastWrite, Value = value };
+                return Clone(value);
             }
             catch (Exception ex)
             {
@@ -101,7 +160,19 @@ namespace AIBot.Server
             string root = FindDataRoot();
             string path = root == null ? null : Path.Combine(root, "games", gameId, "memory-policy.json");
             if (path == null || !File.Exists(path)) return null;
-            try { return JsonConvert.DeserializeObject<MemoryPolicy>(File.ReadAllText(path)); }
+            DateTime lastWrite = File.GetLastWriteTimeUtc(path);
+            lock (CacheLock)
+            {
+                if (PolicyCache.TryGetValue(path, out CacheEntry<MemoryPolicy> hit)
+                    && hit.LastWriteUtc == lastWrite)
+                    return Clone(hit.Value);
+            }
+            try
+            {
+                MemoryPolicy value = JsonConvert.DeserializeObject<MemoryPolicy>(File.ReadAllText(path));
+                lock (CacheLock) PolicyCache[path] = new CacheEntry<MemoryPolicy> { LastWriteUtc = lastWrite, Value = value };
+                return Clone(value);
+            }
             catch (Exception ex)
             {
                 Log.Log(LogLevel.Error, "Game 记忆策略解析失败: " + path, ex);
@@ -117,8 +188,10 @@ namespace AIBot.Server
             Directory.CreateDirectory(dir);
             lock (IoLock)
             {
-                File.WriteAllText(Path.Combine(dir, "memory-policy.json"),
+                string path = Path.Combine(dir, "memory-policy.json");
+                WriteAtomic(path,
                     JsonConvert.SerializeObject(policy, Formatting.Indented));
+                lock (CacheLock) PolicyCache.Remove(path);
             }
             return true;
         }
@@ -171,7 +244,8 @@ namespace AIBot.Server
             string path = Path.Combine(dir, dto.npcId + ".json");
             lock (IoLock)
             {
-                File.WriteAllText(path, JsonConvert.SerializeObject(dto, Formatting.Indented));
+                WriteAtomic(path, JsonConvert.SerializeObject(dto, Formatting.Indented));
+                lock (CacheLock) NpcCache.Remove(path);
             }
             return true;
         }
@@ -183,7 +257,11 @@ namespace AIBot.Server
             if (dir == null) return false;
             string path = Path.Combine(dir, npcId + ".json");
             if (!File.Exists(path)) return false;
-            lock (IoLock) { File.Delete(path); }
+            lock (IoLock)
+            {
+                File.Delete(path);
+                lock (CacheLock) NpcCache.Remove(path);
+            }
             return true;
         }
 
@@ -195,7 +273,9 @@ namespace AIBot.Server
             Directory.CreateDirectory(dir);
             lock (IoLock)
             {
-                File.WriteAllText(Path.Combine(dir, "world.json"), JsonConvert.SerializeObject(world, Formatting.Indented));
+                string path = Path.Combine(dir, "world.json");
+                WriteAtomic(path, JsonConvert.SerializeObject(world, Formatting.Indented));
+                lock (CacheLock) WorldCache.Remove(path);
             }
             return true;
         }

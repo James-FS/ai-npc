@@ -38,10 +38,11 @@ namespace AIBot.Server
                         storageReady = missing.Count == 0;
                     }
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
                     storageReady = false;
-                    storageError = ex.Message.Length > 300 ? ex.Message.Substring(0, 300) : ex.Message;
+                    // 就绪探针可能暴露在负载均衡器/公网，不回传连接串、主机名或数据库异常细节。
+                    storageError = "database_unavailable";
                 }
             }
 

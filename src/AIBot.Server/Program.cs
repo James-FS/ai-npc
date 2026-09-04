@@ -95,16 +95,45 @@ await StartupDiagnostics.RunAsync(storageOptions, mySqlFactory, builder.Configur
 // 可选管理鉴权：本地未配置时保持零门槛；部署时设置 AIBOT_ADMIN_TOKEN 即保护管理 API。
 string adminToken = Environment.GetEnvironmentVariable("AIBOT_ADMIN_TOKEN")
     ?? app.Configuration["Security:AdminToken"];
+string clientToken = Environment.GetEnvironmentVariable("AIBOT_CLIENT_TOKEN")
+    ?? app.Configuration["Security:ClientToken"];
+if (string.IsNullOrWhiteSpace(clientToken))
+{
+    app.Logger.LogWarning("AIBOT_CLIENT_TOKEN 未配置：聊天 API 未启用客户端鉴权，仅适合本机开发环境");
+}
+if (!storageOptions.IsMySql)
+{
+    app.Logger.LogWarning("当前使用 JSON 存储：请保持单 Server 实例运行，不要让多个进程同时写入同一 data 目录");
+}
 app.Use(async (context, next) =>
 {
     string path = context.Request.Path.Value ?? string.Empty;
+    string normalizedPath = path.TrimEnd('/');
+    // StartsWithSegments 同时覆盖精确的 /api/games 和其子路径，避免管理端的
+    // GET/POST /api/games 在配置 token 后意外绕过鉴权；聊天 SSE 仍保持客户端可用。
+    bool isGameApi = context.Request.Path.StartsWithSegments("/api/games");
+    bool isChatStream = normalizedPath.EndsWith("/chat/stream", StringComparison.OrdinalIgnoreCase);
+    bool isNpcList = HttpMethods.IsGet(context.Request.Method)
+        && normalizedPath.EndsWith("/npcs", StringComparison.OrdinalIgnoreCase);
     bool isManagedApi = path.StartsWith("/api/admin/", StringComparison.OrdinalIgnoreCase)
-        || (path.StartsWith("/api/games/", StringComparison.OrdinalIgnoreCase)
-            && !path.EndsWith("/chat/stream", StringComparison.OrdinalIgnoreCase));
+        || (isGameApi && !isChatStream);
+    if (isChatStream && !string.IsNullOrWhiteSpace(clientToken))
+    {
+        string auth = context.Request.Headers.Authorization.ToString();
+        if (!string.Equals(auth, "Bearer " + clientToken, StringComparison.Ordinal))
+        {
+            await ApiErrorWriter.WriteAsync(context, StatusCodes.Status401Unauthorized,
+                "client_auth_required", "聊天 API 需要有效的客户端 token");
+            return;
+        }
+    }
     if (isManagedApi && !string.IsNullOrEmpty(adminToken))
     {
         string auth = context.Request.Headers.Authorization.ToString();
-        if (!string.Equals(auth, "Bearer " + adminToken, StringComparison.Ordinal))
+        bool readOnlyClientAccess = isNpcList && !string.IsNullOrWhiteSpace(clientToken)
+            && string.Equals(auth, "Bearer " + clientToken, StringComparison.Ordinal);
+        if (!readOnlyClientAccess
+            && !string.Equals(auth, "Bearer " + adminToken, StringComparison.Ordinal))
         {
             await ApiErrorWriter.WriteAsync(context, StatusCodes.Status401Unauthorized,
                 "admin_auth_required", "管理 API 需要有效的 Bearer token");
@@ -121,10 +150,7 @@ app.UseRateLimiter();
 app.MapGet("/api/health", () => Microsoft.AspNetCore.Http.Results.Ok(new
 {
     ok = true,
-    version = "0.3.0-m4",
-    storage = storageOptions.Provider,
-    dataRoot = DataStore.FindDataRoot(),
-    npcs = DataStore.ListNpcIds("default")
+    version = "0.3.0-m4"
 }));
 
 app.MapGet("/api/ready", async (HttpContext http) =>

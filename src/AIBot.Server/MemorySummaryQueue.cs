@@ -323,16 +323,21 @@ namespace AIBot.Server
             bool playerGateHeld = false;
             try
             {
-                // 所有后台摘要先取得玩家锁，再取得 Session 锁；删除也使用相同顺序，避免死锁。
+                // 玩家锁用于串行化同一玩家的后台摘要；Session 锁只保护快照与提交，
+                // 不能覆盖下面的模型调用，否则正常聊天会被摘要请求长时间阻塞。
                 await playerGate.WaitAsync(ct);
                 playerGateHeld = true;
+
+                List<LlmMessage> snapshot;
                 await session.Gate.WaitAsync(ct);
                 try
                 {
-                if (!IsCurrent(job)) return;
-                if (!job.Force && (policy.summaryThreshold <= 0
-                    || session.Memory.EvictedCount < policy.summaryThreshold)) return;
-                List<LlmMessage> snapshot = session.Memory.SnapshotEvicted();
+                    if (!IsCurrent(job)) return;
+                    if (!job.Force && (policy.summaryThreshold <= 0
+                        || session.Memory.EvictedCount < policy.summaryThreshold)) return;
+                    snapshot = session.Memory.SnapshotEvicted();
+                }
+                finally { session.Gate.Release(); }
                 if (snapshot.Count == 0) return;
 
                 // 版本冲突时用最新长期记忆重新运行摘要，避免旧摘要覆盖新事实。
@@ -351,6 +356,20 @@ namespace AIBot.Server
                     try
                     {
                         if (!IsCurrent(job)) return;
+
+                        // 摘要期间聊天可以继续产生新的淘汰消息；只要原批次仍是队首，
+                        // 就可以安全提交并仅确认消费该前缀。若队首已变化，重新取快照。
+                        await session.Gate.WaitAsync(ct);
+                        try
+                        {
+                            List<LlmMessage> current = session.Memory.SnapshotEvicted();
+                            if (!HasPrefix(current, snapshot))
+                            {
+                                snapshot = current;
+                                if (snapshot.Count == 0) return;
+                                continue;
+                            }
+
                         PlayerLongTermMemory saved = await _memoryService.SaveStructuredAsync(
                             existing, summarized, policy.maxFacts, ct);
                         if (!IsCurrent(job)) return;
@@ -376,12 +395,12 @@ namespace AIBot.Server
                             throw new IOException("session acknowledgement save failed");
                         }
                         return;
+                        }
+                        finally { session.Gate.Release(); }
                     }
                     catch (MemoryVersionConflictException) when (versionAttempt < 3) { }
                 }
                 throw new MemoryVersionConflictException(-1, -1);
-                }
-                finally { session.Gate.Release(); }
             }
             finally
             {
@@ -458,6 +477,19 @@ namespace AIBot.Server
         private bool IsCurrent(MemorySummaryJob job)
         {
             return job.Generation == CurrentGeneration(job.GameId, job.NpcId, job.PlayerId);
+        }
+
+        private static bool HasPrefix(IReadOnlyList<LlmMessage> current, IReadOnlyList<LlmMessage> prefix)
+        {
+            if (current == null || prefix == null || current.Count < prefix.Count) return false;
+            for (int i = 0; i < prefix.Count; i++)
+            {
+                LlmMessage a = current[i];
+                LlmMessage b = prefix[i];
+                if (!string.Equals(a?.Role, b?.Role, StringComparison.Ordinal)
+                    || !string.Equals(a?.Content, b?.Content, StringComparison.Ordinal)) return false;
+            }
+            return true;
         }
 
         private SemaphoreSlim PlayerGate(string gameId, string npcId, string playerId)

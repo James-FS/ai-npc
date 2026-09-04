@@ -102,7 +102,7 @@ VALUES (@GameId,@Ts,@NpcId,@PlayerId,@SessionId,@Legacy,@UserMessage,@Say,@Emoti
                 return;
             }
             string dir = Path.Combine(FindLogDir(gameId));
-            string file = Path.Combine(dir, DateTime.Now.ToString("yyyy-MM-dd") + ".jsonl");
+            string file = Path.Combine(dir, DateTime.UtcNow.ToString("yyyy-MM-dd") + ".jsonl");
             lock (FileLock)
             {
                 Directory.CreateDirectory(dir);
@@ -121,10 +121,10 @@ VALUES (@GameId,@Ts,@NpcId,@PlayerId,@SessionId,@Legacy,@UserMessage,@Say,@Emoti
         /// <summary>按日分文件即天然轮转；写时顺手清理超过保留期的旧文件。</summary>
         private static void Cleanup(string dir)
         {
-            DateTime cutoff = DateTime.Now.AddDays(-RetentionDays);
+            DateTime cutoff = DateTime.UtcNow.AddDays(-RetentionDays);
             foreach (string file in Directory.GetFiles(dir, "*.jsonl"))
             {
-                if (File.GetLastWriteTime(file) < cutoff)
+                if (File.GetLastWriteTimeUtc(file) < cutoff)
                 {
                     try { File.Delete(file); } catch { /* 占用则下次再清 */ }
                 }
@@ -150,11 +150,15 @@ VALUES (@GameId,@Ts,@NpcId,@PlayerId,@SessionId,@Legacy,@UserMessage,@Say,@Emoti
         public static JObject Query(string gameId, string date, string npcId, int limit, int offset)
         {
             DateTime day;
-            if (string.IsNullOrEmpty(date) || !DateTime.TryParse(date, out day)) day = DateTime.Now;
+            if (string.IsNullOrEmpty(date) || !DateTime.TryParse(date,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out day)) day = DateTime.UtcNow;
+            day = day.ToUniversalTime();
             if (MySqlStorage != null)
             {
-                DateTime startUtc = day.Date.ToUniversalTime();
-                DateTime endUtc = day.Date.AddDays(1).ToUniversalTime();
+                DateTime startUtc = day.Date;
+                DateTime endUtc = day.Date.AddDays(1);
                 string filteredNpc = string.IsNullOrEmpty(npcId) ? null : npcId;
                 using (IDbConnection connection = MySqlStorage.OpenConnection())
                 {

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using AIBot.Core;
@@ -59,8 +61,8 @@ namespace AIBot.Server
             {
                 if (http.Request.ContentLength.HasValue && http.Request.ContentLength.Value > 64 * 1024)
                 {
-                    http.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
-                    await http.Response.WriteAsync("请求体过大");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status413PayloadTooLarge,
+                        "payload_too_large", "请求体过大");
                     return;
                 }
                 ChatRequestBody body;
@@ -68,36 +70,36 @@ namespace AIBot.Server
                 catch { body = null; }
                 if (body == null || string.IsNullOrEmpty(body.NpcId) || string.IsNullOrEmpty(body.Message))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("npcId 与 message 必填");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_request", "npcId 与 message 必填");
                     return;
                 }
                 if (!ServerToolModes.TryNormalize(body.ToolMode, out string toolMode))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("toolMode 仅支持 none 或 simulated");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_tool_mode", "toolMode 仅支持 none 或 simulated");
                     return;
                 }
                 bool useSimulatedTools = toolMode == ServerToolModes.Simulated;
                 if (useSimulatedTools && !CanUseAdminOverrides(http, config))
                 {
-                    http.Response.StatusCode = StatusCodes.Status403Forbidden;
-                    await http.Response.WriteAsync("simulated 工具仅允许授权的调试请求使用");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status403Forbidden,
+                        "admin_auth_required", "simulated 工具仅允许授权的调试请求使用");
                     return;
                 }
                 string headerRequestId = http.Request.Headers["X-Request-Id"].ToString();
                 if (!string.IsNullOrWhiteSpace(headerRequestId) && !ChatRequestIds.IsValid(headerRequestId))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("X-Request-Id 格式无效");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_request_id", "X-Request-Id 格式无效");
                     return;
                 }
                 if (!string.IsNullOrWhiteSpace(headerRequestId)
                     && !string.IsNullOrWhiteSpace(body.RequestId)
                     && !string.Equals(headerRequestId, body.RequestId, StringComparison.Ordinal))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("X-Request-Id 与请求体 requestId 必须一致");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "request_id_mismatch", "X-Request-Id 与请求体 requestId 必须一致");
                     return;
                 }
                 string requestId = !string.IsNullOrWhiteSpace(body.RequestId)
@@ -105,8 +107,8 @@ namespace AIBot.Server
                     : !string.IsNullOrWhiteSpace(headerRequestId) ? headerRequestId : http.TraceIdentifier;
                 if (!ChatRequestIds.IsValid(requestId))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("requestId 非法（仅允许字母数字及 _ . : -，最长80位）");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_request_id", "requestId 非法（仅允许字母数字及 _ . : -，最长80位）");
                     return;
                 }
                 body.RequestId = requestId;
@@ -114,40 +116,46 @@ namespace AIBot.Server
                 http.Response.Headers["X-Request-Id"] = requestId;
                 if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(body.NpcId))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("gameId 或 npcId 非法");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_id", "gameId 或 npcId 非法");
                     return;
                 }
                 if (!DataStore.IsValidSessionId(body.SessionId))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("sessionId 非法（仅允许字母数字及 _ . : -，最长128位）");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_session_id", "sessionId 非法（仅允许字母数字及 _ . : -，最长128位）");
                     return;
                 }
                 if (!string.IsNullOrEmpty(body.PlayerId) && !DataStore.IsValidPlayerId(body.PlayerId))
                 {
-                    http.Response.StatusCode = 400;
-                    await http.Response.WriteAsync("playerId 非法（仅允许字母数字及 _ . : -，最长128位）");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_player_id", "playerId 非法（仅允许字母数字及 _ . : -，最长128位）");
                     return;
                 }
                 if (body.Message.Length > 4000)
                 {
-                    http.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
-                    await http.Response.WriteAsync("message 最长 4000 字符");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status413PayloadTooLarge,
+                        "message_too_large", "message 最长 4000 字符");
                     return;
                 }
                 if (body.MemoryOverride != null && !CanUseAdminOverrides(http, config))
                 {
-                    http.Response.StatusCode = StatusCodes.Status403Forbidden;
-                    await http.Response.WriteAsync("memoryOverride 仅允许管理端调试请求使用");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status403Forbidden,
+                        "admin_auth_required", "memoryOverride 仅允许管理端调试请求使用");
+                    return;
+                }
+                if (body.Override != null && !CanUseAdminOverrides(http, config))
+                {
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status403Forbidden,
+                        "admin_auth_required", "model override 仅允许管理端调试请求使用");
                     return;
                 }
 
                 AgentConfigDto cfg = DataStore.LoadNpc(gid, body.NpcId);
                 if (cfg == null)
                 {
-                    http.Response.StatusCode = 404;
-                    await http.Response.WriteAsync("npc not found: " + body.NpcId + " (game=" + gid + ")");
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status404NotFound,
+                        "npc_not_found", "npc not found: " + body.NpcId + " (game=" + gid + ")");
                     return;
                 }
                 WorldConfigDto world = DataStore.LoadWorld(gid, cfg.worldId);
@@ -165,6 +173,7 @@ namespace AIBot.Server
                     if (!string.IsNullOrEmpty(body.Override.Model)) cfg.model.model = body.Override.Model;
                     if (body.Override.Temperature.HasValue) cfg.model.temperature = body.Override.Temperature.Value;
                 }
+                NormalizeModelSettings(cfg.model);
 
                 EffectiveMemoryPolicy effectiveMemory = MemoryPolicyService.Resolve(
                     gid, cfg, body.MemoryOverride, config);
@@ -242,8 +251,15 @@ namespace AIBot.Server
                     http.Response.ContentType = "text/event-stream; charset=utf-8";
                     http.Response.Headers.CacheControl = "no-cache";
 
-                    channel = Channel.CreateUnbounded<string>();
-                    sse = new SseEventWriter(channel.Writer, body.SessionId);
+                    channel = Channel.CreateBounded<string>(new BoundedChannelOptions(4096)
+                    {
+                        SingleReader = true,
+                        SingleWriter = false,
+                        // 中间 token 可在写满时丢弃，但终态 reply/done/error 由 SseEventWriter
+                        // 使用等待写入，不能因慢客户端丢失结束信号。
+                        FullMode = BoundedChannelFullMode.Wait
+                    });
+                    sse = new SseEventWriter(channel.Writer, http.RequestAborted);
                     pump = Task.Run(async () =>
                     {
                         try
@@ -255,6 +271,14 @@ namespace AIBot.Server
                             }
                         }
                         catch (OperationCanceledException) { }
+                        catch (IOException) { }
+                        catch (ObjectDisposedException) { }
+                        catch (Exception ex)
+                        {
+                            // 客户端断线/响应流关闭不应把已经成功完成的业务请求改写为 failed。
+                            runtimeLogs.Write(LogLevel.Warning, "Chat", "response_stream_failed",
+                                "SSE 响应写出失败，业务结果仍按原状态保留: " + ex.Message, null, ex);
+                        }
                     });
 
                 // 模拟状态合并进会话：测试台滑条覆盖 stage/favorability，extras 逐键覆盖
@@ -405,7 +429,7 @@ namespace AIBot.Server
                     ["sessionId"] = body.SessionId,
                     ["requestId"] = requestId
                 });
-                SessionStore.CompleteRequest(requestRecord, sse.SnapshotEvents());
+                SessionStore.CompleteRequest(requestRecord, sse.SnapshotReplayEvents());
                 if (!SessionStore.Save(session))
                 {
                     runtimeLogs.Write(LogLevel.Warning, "Chat", "idempotency_result_save_failed",
@@ -457,7 +481,7 @@ namespace AIBot.Server
                         ["terminal"] = true,
                         ["requestId"] = requestId
                     });
-                    SessionStore.CompleteRequest(requestRecord, sse.SnapshotEvents(), failed: true);
+                    SessionStore.CompleteRequest(requestRecord, sse.SnapshotReplayEvents(), failed: true);
                     SessionStore.Save(session);
                     channel.Writer.TryComplete();
                     if (pump != null) await pump;
@@ -476,6 +500,17 @@ namespace AIBot.Server
             if (string.IsNullOrEmpty(adminToken)) return true; // 本地开发未启用鉴权
             return string.Equals(http.Request.Headers.Authorization.ToString(),
                 "Bearer " + adminToken, StringComparison.Ordinal);
+        }
+
+        private static void NormalizeModelSettings(ModelSettings model)
+        {
+            if (model == null) return;
+            model.model = string.IsNullOrWhiteSpace(model.model) ? "deepseek-chat" : model.model.Trim();
+            if (model.model.Length > 128) model.model = model.model.Substring(0, 128);
+            if (float.IsNaN(model.temperature) || float.IsInfinity(model.temperature)) model.temperature = 0.8f;
+            model.temperature = Math.Max(0f, Math.Min(2f, model.temperature));
+            model.maxTokens = Math.Max(1, Math.Min(8192, model.maxTokens));
+            model.timeoutMs = Math.Max(1000, Math.Min(120000, model.timeoutMs));
         }
 
         private static string BuildRequestFingerprint(ChatRequestBody body, string normalizedToolMode)
@@ -517,11 +552,15 @@ namespace AIBot.Server
         {
             private readonly ChannelWriter<string> _writer;
             private readonly List<string> _events = new List<string>();
+            private int _replayBytes;
             public ModelErrorInfo LastModelError { get; private set; }
 
-            public SseEventWriter(ChannelWriter<string> writer, string sessionId)
+            private readonly CancellationToken _writeCancellation;
+
+            public SseEventWriter(ChannelWriter<string> writer, CancellationToken writeCancellation)
             {
                 _writer = writer;
+                _writeCancellation = writeCancellation;
             }
 
             public void OnToken(string delta)
@@ -566,11 +605,46 @@ namespace AIBot.Server
             public void Write(JObject payload)
             {
                 string line = "data: " + payload.ToString(Formatting.None) + "\n\n";
-                lock (_events) _events.Add(line);
-                _writer.TryWrite(line);
+                string type = payload["type"]?.ToString();
+                bool terminal = string.Equals(type, "reply", StringComparison.Ordinal)
+                    || string.Equals(type, "done", StringComparison.Ordinal)
+                    || string.Equals(type, "error", StringComparison.Ordinal);
+                if (terminal)
+                {
+                    int bytes = Encoding.UTF8.GetByteCount(line);
+                    lock (_events)
+                    {
+                        if (_replayBytes + bytes <= 64 * 1024)
+                        {
+                            _events.Add(line);
+                            _replayBytes += bytes;
+                        }
+                    }
+                }
+                if (terminal)
+                {
+                    try { _writer.WriteAsync(line, _writeCancellation).AsTask().GetAwaiter().GetResult(); }
+                    catch (OperationCanceledException) { }
+                    catch (ChannelClosedException) { }
+                    catch (InvalidOperationException) { }
+                }
+                else
+                {
+                    // 实时 token/reasoning 不阻塞模型线程；队列满时允许丢弃中间片段。
+                    _writer.TryWrite(line);
+                }
             }
 
             public List<string> SnapshotEvents()
+            {
+                lock (_events) return new List<string>(_events);
+            }
+
+            /// <summary>
+            /// 幂等重放只需终态事件；token/reasoning 会随回复长度线性膨胀，
+            /// 不应写入 Session 文件或 MySQL payload。
+            /// </summary>
+            public List<string> SnapshotReplayEvents()
             {
                 lock (_events) return new List<string>(_events);
             }

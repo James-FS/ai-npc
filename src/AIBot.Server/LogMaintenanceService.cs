@@ -18,6 +18,7 @@ namespace AIBot.Server
         private readonly RuntimeLogService _logs;
         private readonly int _chatDays;
         private readonly int _auditDays;
+        private readonly TimeSpan _sessionIdle;
         private readonly TimeSpan _interval;
 
         public LogMaintenanceService(StorageOptions storage, RuntimeLogService logs,
@@ -28,6 +29,8 @@ namespace AIBot.Server
             _logs = logs;
             _chatDays = Math.Max(1, configuration.GetValue<int?>("Logging:ChatRetentionDays") ?? 30);
             _auditDays = Math.Max(1, configuration.GetValue<int?>("Logging:AuditRetentionDays") ?? 365);
+            int idleHours = Math.Max(1, configuration.GetValue<int?>("Sessions:MemoryIdleHours") ?? 24);
+            _sessionIdle = TimeSpan.FromHours(idleHours);
             int hours = Math.Max(1, configuration.GetValue<int?>("Logging:MaintenanceIntervalHours") ?? 24);
             _interval = TimeSpan.FromHours(hours);
         }
@@ -47,6 +50,8 @@ namespace AIBot.Server
             try
             {
                 int runtimeDeleted = _logs.CleanupNow();
+                int sessionsPruned = SessionStore.PruneInactive(_sessionIdle);
+                int sessionFilesPruned = SessionStore.PruneInactiveFiles(_sessionIdle);
                 int chatDeleted = 0;
                 int auditDeleted = 0;
                 if (_storage.IsMySql && _mysql != null)
@@ -67,7 +72,8 @@ namespace AIBot.Server
                 }
                 _logs.Write(LogLevel.Info, "LogMaintenance", "cleanup_completed",
                     "日志保留清理完成: runtime=" + runtimeDeleted + ", chat=" + chatDeleted
-                    + ", audit=" + auditDeleted);
+                    + ", audit=" + auditDeleted + ", sessionsPruned=" + sessionsPruned
+                    + ", sessionFilesPruned=" + sessionFilesPruned);
             }
             catch (Exception ex)
             {

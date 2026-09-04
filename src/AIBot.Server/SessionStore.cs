@@ -371,6 +371,87 @@ namespace AIBot.Server
 
         public static int Count { get { return Map.Count; } }
 
+        /// <summary>
+        /// 淘汰长时间不活跃的内存会话。持久化文件/MySQL 不删除，下次访问仍会恢复。
+        /// 正在使用的会话无法立即获取 Gate 时跳过，避免打断聊天。
+        /// </summary>
+        public static int PruneInactive(TimeSpan idle)
+        {
+            if (idle <= TimeSpan.Zero) return 0;
+            DateTime cutoff = DateTime.UtcNow - idle;
+            int removed = 0;
+            foreach (KeyValuePair<string, SessionState> pair in Map)
+            {
+                SessionState session = pair.Value;
+                if (session == null || session.LastActiveUtc >= cutoff) continue;
+                if (!session.Gate.Wait(0)) continue;
+                try
+                {
+                    if (session.LastActiveUtc < cutoff && Map.TryRemove(pair.Key, out _)) removed++;
+                }
+                finally { session.Gate.Release(); }
+            }
+            return removed;
+        }
+
+        /// <summary>
+        /// 清理 JSON 模式下长期不活跃的 Session 文件。只删除未被当前进程跟踪、
+        /// 且 lastActive/file time 均早于截止时间的文件；MySQL 模式无需处理文件。
+        /// </summary>
+        public static int PruneInactiveFiles(TimeSpan idle)
+        {
+            if (idle <= TimeSpan.Zero || MySqlPersistence != null) return 0;
+            DateTime cutoff = DateTime.UtcNow - idle;
+            var tracked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (SessionState session in Map.Values)
+            {
+                if (session == null) continue;
+                string path = FilePath(session.GameId, session.NpcId, session.PlayerId, session.SessionId);
+                if (!string.IsNullOrEmpty(path)) tracked.Add(path);
+                if (!string.IsNullOrEmpty(session.LegacySourcePath)) tracked.Add(session.LegacySourcePath);
+            }
+
+            int removed = 0;
+            string root = DataStore.FindDataRoot();
+            string gamesRoot = root == null ? null : Path.Combine(root, "games");
+            if (gamesRoot == null || !Directory.Exists(gamesRoot)) return 0;
+            foreach (string gameDir in Directory.GetDirectories(gamesRoot))
+            {
+                string gid = Path.GetFileName(gameDir);
+                if (!DataStore.IsValidId(gid)) continue;
+                foreach (string path in EnumerateSessionFiles(gid))
+                {
+                    if (tracked.Contains(path)) continue;
+                    try
+                    {
+                        DateTime fileTime = File.GetLastWriteTimeUtc(path);
+                        if (fileTime >= cutoff) continue;
+                        SessionFileDto dto = JsonConvert.DeserializeObject<SessionFileDto>(File.ReadAllText(path));
+                        // 待摘要消息或 processing 幂等请求仍可能带有业务副作用，不能因闲置被清掉。
+                        if (dto != null && ((dto.evictedMessages != null && dto.evictedMessages.Count > 0)
+                            || (dto.recentRequests ?? new List<ChatRequestRecord>())
+                                .Any(x => x != null && x.status == ChatRequestStatuses.Processing)))
+                            continue;
+                        DateTime lastActive = dto == null || dto.lastActiveUtc == default(DateTime)
+                            ? fileTime : dto.lastActiveUtc.ToUniversalTime();
+                        if (lastActive >= cutoff) continue;
+                        lock (IoLock)
+                        {
+                            if (File.Exists(path) && File.GetLastWriteTimeUtc(path) < cutoff)
+                            {
+                                File.Delete(path);
+                                removed++;
+                            }
+                        }
+                    }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                    catch (JsonException) { }
+                }
+            }
+            return removed;
+        }
+
         private static IEnumerable<string> EnumerateSessionFiles(string gid)
         {
             string root = DataStore.FindDataRoot();
