@@ -27,6 +27,7 @@ namespace AIBot.Core
         public List<string> MemoryFacts;
         public MemoryPolicy ResolvedMemoryPolicy; // 宿主完成四级配置合并后传入；为空时使用 Core+NPC 兼容解析
         public bool DeferMemorySummarizationToHost; // Server 玩家后台队列为 true；Unity/Session 同步路径为 false
+        public bool NotifyReplyBeforeSummary; // Unity UI 可在摘要 LLM 调用前先收到最终台词
     }
 
     public sealed class ToolExecution
@@ -48,6 +49,8 @@ namespace AIBot.Core
         public Usage Usage = new Usage();
         public long ElapsedMs;
         public bool UsedFallback;
+        /// <summary>当 UsedFallback=true 时提供给宿主的可诊断原因；不包含敏感请求内容。</summary>
+        public string FallbackReason;
         public string RawText;                   // 模型最终原文（解析失败时的排查依据）
         public string MemorySummary;             // 本轮触发了记忆摘要时非空：宿主写回会话状态
         public List<string> MemoryFacts;
@@ -55,10 +58,18 @@ namespace AIBot.Core
         public bool FlaggedInjection;            // 玩家输入命中注入检测（供日志/统计）
     }
 
+    /// <summary>宿主可选实现：在记忆摘要前收到最终回复，避免 UI 等待第二次 LLM 调用。</summary>
+    public interface IReplyReadySink
+    {
+        void OnReplyReady(StructuredReply reply);
+    }
+
     public sealed class AgentLoopOptions
     {
         public int MaxToolRounds = 4;
         public int TokenBudget = Context.TokenBudget.DefaultBudget;
+        public int MaxUserMessageChars = 8000;
+        public int MaxToolResultChars = 12000;
     }
 
     /// <summary>
@@ -93,11 +104,17 @@ namespace AIBot.Core
             cfg.output = cfg.output ?? new OutputSettings();
             input.ResolvedMemoryPolicy = input.ResolvedMemoryPolicy
                 ?? MemoryPolicyResolver.Resolve(null, cfg.memory, null).policy;
-            SanitizeResult sanitized = InputSanitizer.Sanitize(input.UserMessage);
+            string boundedMessage = Limit(input.UserMessage, _options.MaxUserMessageChars);
+            SanitizeResult sanitized = InputSanitizer.Sanitize(boundedMessage);
 
             try
             {
                 AgentLoopResult result = await RunInternalAsync(input, sink, cfg, sanitized, ct, started);
+                if (input.NotifyReplyBeforeSummary)
+                {
+                    var ready = sink as IReplyReadySink;
+                    if (ready != null && result.Reply != null) ready.OnReplyReady(result.Reply);
+                }
                 await MaybeSummarizeAsync(input, result, ct);
                 return result;
             }
@@ -109,8 +126,16 @@ namespace AIBot.Core
             {
                 _log.Log(LogLevel.Error, "AgentLoop failed, using fallback. npc=" + cfg.npcId, ex);
                 AgentLoopResult fallback = BuildFallback(cfg, started);
+                // 只向游戏层暴露稳定诊断码，避免把上游响应正文或其他敏感信息带进 UI。
+                fallback.FallbackReason = ex is LlmFallbackException
+                    ? "model_request_failed" : "agent_failed";
                 fallback.FlaggedInjection = sanitized.Flagged;
                 Remember(input, LlmMessage.User(sanitized.Wrapped), SerializeReply(fallback.Reply));
+                if (input.NotifyReplyBeforeSummary)
+                {
+                    var ready = sink as IReplyReadySink;
+                    if (ready != null) ready.OnReplyReady(fallback.Reply);
+                }
                 return fallback;
             }
         }
@@ -157,7 +182,7 @@ namespace AIBot.Core
                     Tools = forceText ? null : (schemas.Count > 0 ? schemas : null),
                     Temperature = cfg.model.temperature,
                     MaxTokens = cfg.model.maxTokens,
-                    ResponseFormat = schemas.Count == 0 ? ResponseFormat.JsonObject() : null
+                    ResponseFormat = (forceText || schemas.Count == 0) ? ResponseFormat.JsonObject() : null
                 };
 
                 var collector = new RoundCollector(sink);
@@ -200,7 +225,8 @@ namespace AIBot.Core
                         {
                             Role = "tool",
                             ToolCallId = call.Id,
-                            Content = result.MessageForModel
+                            Content = Limit(result == null ? null : result.MessageForModel,
+                                _options.MaxToolResultChars)
                         });
                     }
                     rounds++;
@@ -211,7 +237,7 @@ namespace AIBot.Core
                 break;
             }
 
-                StructuredReply reply;
+            StructuredReply reply;
             if (!StructuredReplyParser.TryParse(finalText, cfg.output, out reply))
             {
                 _log.Log(LogLevel.Warning, "Structured reply parse failed, using fallback. npc=" + cfg.npcId + " raw=" + finalText);
@@ -219,6 +245,7 @@ namespace AIBot.Core
                 fallback.ToolExecutions = executions;
                 fallback.Usage = totalUsage;
                 fallback.RawText = finalText;
+                fallback.FallbackReason = "structured_reply_invalid";
                 fallback.FlaggedInjection = sanitized.Flagged;
                 Remember(input, userMessage, SerializeReply(fallback.Reply));
                 return fallback;
@@ -330,6 +357,13 @@ namespace AIBot.Core
         private static string SerializeReply(StructuredReply reply)
         {
             return Newtonsoft.Json.JsonConvert.SerializeObject(reply);
+        }
+
+        private static string Limit(string value, int maxChars)
+        {
+            value = value ?? string.Empty;
+            if (maxChars <= 0 || value.Length <= maxChars) return value;
+            return value.Substring(0, maxChars) + "…[已截断]";
         }
 
         /// <summary>单轮收集器：token 实时透传外层 sink；工具调用与全文在轮末可用；思考过程按需转发。</summary>
