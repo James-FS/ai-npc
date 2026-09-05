@@ -32,7 +32,7 @@ namespace AIBot.Unity
         private readonly Func<string> _stateSnapshotProvider;
         private readonly bool _enableSimulatedTools;
         private readonly bool _enableGameTools;
-        private readonly Func<List<ToolSchema>> _toolSchemaProvider;
+        private readonly Func<List<ClientToolDescriptor>> _toolSchemaProvider;
 
         public string LastRequestId { get; private set; }
 
@@ -40,7 +40,7 @@ namespace AIBot.Unity
             string playerId, string sessionId, int timeoutMs,
             Func<string> stateSnapshotProvider = null, bool enableSimulatedTools = false,
             string authToken = null,
-            bool enableGameTools = false, Func<List<ToolSchema>> toolSchemaProvider = null)
+            bool enableGameTools = false, Func<List<ClientToolDescriptor>> toolSchemaProvider = null)
         {
             if (string.IsNullOrWhiteSpace(baseUrl)) throw new ArgumentException("Server 地址不能为空", nameof(baseUrl));
             if (string.IsNullOrWhiteSpace(gameId)) throw new ArgumentException("gameId 不能为空", nameof(gameId));
@@ -243,8 +243,8 @@ namespace AIBot.Unity
             ApplyStateSnapshot(body, includeSimState: true);
             if (_enableGameTools && _toolSchemaProvider != null)
             {
-                List<ToolSchema> schemas = _toolSchemaProvider.Invoke();
-                if (schemas != null && schemas.Count > 0) body["tools"] = JArray.FromObject(schemas);
+                List<ClientToolDescriptor> descriptors = _toolSchemaProvider.Invoke();
+                if (descriptors != null && descriptors.Count > 0) body["tools"] = JArray.FromObject(descriptors);
             }
             return body;
         }

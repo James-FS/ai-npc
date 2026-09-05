@@ -234,6 +234,15 @@ namespace AIBot.Unity
                             EmitError("收到重复或无效的工具挂起轮: " + (serverResult.RoundToken ?? "<empty>"));
                             return null;
                         }
+                        if (_executedRoundTokens.Count > 128)
+                        {
+                            // 有界防泄漏：留下最近执行过的令牌即可覆盖重放窗口
+                            foreach (string token in _executedRoundTokens)
+                            {
+                                _executedRoundTokens.Remove(token);
+                                if (_executedRoundTokens.Count <= 64) break;
+                            }
+                        }
                         if (++gameRound > MaxGameToolRounds)
                         {
                             EmitError("工具回传轮数超过上限（" + MaxGameToolRounds + "），已终止本轮对话");
@@ -408,7 +417,7 @@ namespace AIBot.Unity
                     }, enableSimulatedTools,
                     useConnectionProfile ? connectionProfile.serverAuthToken : null,
                     enableGameTools,
-                    enableGameTools ? CollectLocalToolSchemas : (Func<List<ToolSchema>>)null);
+                    enableGameTools ? CollectLocalToolDescriptors : (Func<List<ClientToolDescriptor>>)null);
                 _backend = null;
                 _loop = null;
             }
@@ -427,11 +436,23 @@ namespace AIBot.Unity
                 StringComparison.OrdinalIgnoreCase);
         }
 
-        /// <summary>game 模式上传用：把本地已注册、且 NPC 配置启用的工具转成 schema 列表。</summary>
-        private List<ToolSchema> CollectLocalToolSchemas()
+        /// <summary>game 模式上传用：把本地已注册、且 NPC 配置启用的工具转成描述列表。</summary>
+        private List<ClientToolDescriptor> CollectLocalToolDescriptors()
         {
-            if (_tools == null || _config == null) return new List<ToolSchema>();
-            return _tools.BuildSchemas(_config.enabledToolIds);
+            var descriptors = new List<ClientToolDescriptor>();
+            if (_tools == null || _config == null || _config.enabledToolIds == null) return descriptors;
+            foreach (string id in _config.enabledToolIds)
+            {
+                if (string.IsNullOrEmpty(id)) continue;
+                if (!_tools.TryGet(id, out IAgentTool tool) || tool == null) continue;
+                descriptors.Add(new ClientToolDescriptor
+                {
+                    Id = tool.Id,
+                    Description = tool.Description,
+                    ParametersSchema = tool.ParametersSchema
+                });
+            }
+            return descriptors;
         }
 
         /// <summary>game 模式：在本地真实执行 Server 挂起的工具调用，并触发 onToolExecuted 通知。</summary>

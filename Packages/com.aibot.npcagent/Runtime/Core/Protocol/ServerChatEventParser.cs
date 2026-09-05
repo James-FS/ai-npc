@@ -36,6 +36,17 @@ namespace AIBot.Core.Protocol
         [JsonProperty("message")] public string Message;
     }
 
+    /// <summary>
+    /// game 模式首段：客户端上传的工具描述。schema 以字符串承载——请求体由
+    /// System.Text.Json 解析，无法反序列化 Newtonsoft 的 JObject。
+    /// </summary>
+    public sealed class ClientToolDescriptor
+    {
+        [JsonProperty("id")] public string Id;
+        [JsonProperty("description")] public string Description;
+        [JsonProperty("parametersSchema")] public string ParametersSchema;
+    }
+
     /// <summary>Unity、Web 与 Server 共用的幂等请求标识规则。</summary>
     public static class ChatRequestIds
     {

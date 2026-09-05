@@ -35,7 +35,7 @@ namespace AIBot.Server
         public OverrideSettings Override { get; set; }
         public MemoryPolicyOverrides MemoryOverride { get; set; } // 管理端调试临时覆盖，Server 最终仍应用安全上限
         public string ToolMode { get; set; } = ServerToolModes.None; // none（正式默认）/ simulated（仅调试）/ game（工具回传）
-        public List<ToolSchema> Tools { get; set; }        // game：客户端上传的工具 schema（首段必带）
+        public List<ClientToolDescriptor> Tools { get; set; } // game：客户端上传的工具描述（首段必带）
         public string RoundToken { get; set; }             // game 续跑：待续挂起轮令牌
         public List<ClientToolResult> ToolResults { get; set; } // game 续跑：工具执行结果
         public string GameContext { get; set; }            // game：原始游戏状态快照（仅作 prompt 上下文，不进指纹）
@@ -711,33 +711,45 @@ namespace AIBot.Server
         private const int MaxToolResultContentChars = 12000;
 
         /// <summary>
-        /// 校验 game 模式首段上传的工具 schema：数量/长度/合法 id，并与 NPC 配置的 enabledToolIds 求交。
-        /// 返回 null 表示存在非法项（调用方返回 400）；enabledToolIds 之外的条目按 Core 语义静默跳过。
+        /// 校验 game 模式首段上传的工具描述：数量/长度/合法 id，schema 必须是合法 JSON，
+        /// 并与 NPC 配置的 enabledToolIds 求交。返回 null 表示存在非法项（调用方返回 400）；
+        /// enabledToolIds 之外的条目按 Core 语义静默跳过。
         /// </summary>
-        private static List<ToolSchema> ValidateGameTools(List<ToolSchema> uploaded, List<string> enabledToolIds)
+        private static List<ToolSchema> ValidateGameTools(List<ClientToolDescriptor> uploaded, List<string> enabledToolIds)
         {
             if (uploaded == null || uploaded.Count == 0) return new List<ToolSchema>();
             if (uploaded.Count > MaxGameTools) return null;
             var seen = new HashSet<string>(StringComparer.Ordinal);
             var enabled = new HashSet<string>(enabledToolIds ?? new List<string>(), StringComparer.Ordinal);
             var result = new List<ToolSchema>();
-            foreach (ToolSchema schema in uploaded)
+            foreach (ClientToolDescriptor descriptor in uploaded)
             {
-                if (schema == null || schema.Function == null) return null;
-                string id = schema.Function.Name;
-                if (string.IsNullOrEmpty(id) || !DataStore.IsValidId(id) || !seen.Add(id)) return null;
-                if (!enabled.Contains(id)) continue; // NPC 配置未启用的工具不下发
-                string schemaJson = schema.Function.Parameters == null
-                    ? null : JsonConvert.SerializeObject(schema.Function.Parameters);
-                if (schemaJson != null && schemaJson.Length > MaxToolSchemaChars) return null;
-                if (!string.IsNullOrEmpty(schema.Function.Description)
-                    && schema.Function.Description.Length > 2000) return null;
-                if (schema.Function.Parameters == null)
+                if (descriptor == null || string.IsNullOrEmpty(descriptor.Id)
+                    || !DataStore.IsValidId(descriptor.Id) || !seen.Add(descriptor.Id)) return null;
+                if (!enabled.Contains(descriptor.Id)) continue; // NPC 配置未启用的工具不下发
+                if (!string.IsNullOrEmpty(descriptor.Description)
+                    && descriptor.Description.Length > 2000) return null;
+                JObject parameters;
+                try
                 {
-                    // 与 Core ParseSchema 的空 schema 语义对齐：无参数工具规范化为空 object schema
-                    schema.Function.Parameters = JObject.Parse("{\"type\":\"object\",\"properties\":{}}");
+                    parameters = string.IsNullOrEmpty(descriptor.ParametersSchema)
+                        ? JObject.Parse("{\"type\":\"object\",\"properties\":{}}")
+                        : JObject.Parse(descriptor.ParametersSchema);
                 }
-                result.Add(schema);
+                catch (JsonException)
+                {
+                    return null; // schema 非法 JSON
+                }
+                if (parameters.ToString(Formatting.None).Length > MaxToolSchemaChars) return null;
+                result.Add(new ToolSchema
+                {
+                    Function = new FunctionDef
+                    {
+                        Name = descriptor.Id,
+                        Description = descriptor.Description,
+                        Parameters = parameters
+                    }
+                });
             }
             return result;
         }

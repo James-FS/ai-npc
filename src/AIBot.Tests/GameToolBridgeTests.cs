@@ -263,5 +263,55 @@ namespace AIBot.Tests
             Assert.Single(restored.pendingToolRound.messages[2].ToolCalls);
             Assert.Single(restored.pendingToolRound.schemas);
         }
+
+        [Fact]
+        public void GameRequest_DeserializesUnderStjHttpOptions()
+        {
+            // 回归测试：/chat/stream 请求体由 System.Text.Json 解析（HttpJsonOptions: IncludeFields）。
+            // tools 载荷必须是 ClientToolDescriptor（schema 以字符串承载）——Newtonsoft JObject 会让
+            // 整个请求体解析失败变 400。ClientToolResult 与 SimState 的字段契约也在此一并锁定。
+            var options = new System.Text.Json.JsonSerializerOptions
+            {
+                IncludeFields = true,
+                PropertyNameCaseInsensitive = true
+            };
+            string json = new JObject
+            {
+                ["npcId"] = "herbalist_lin",
+                ["sessionId"] = "s1",
+                ["requestId"] = "req-1",
+                ["toolMode"] = "game",
+                ["message"] = "你好",
+                ["roundToken"] = "req-0#0",
+                ["gameContext"] = "{\"questState\":\"Available\"}",
+                ["simState"] = new JObject { ["stage"] = 1, ["favorability"] = 5 },
+                ["tools"] = new JArray(new JObject
+                {
+                    ["id"] = "accept_quest",
+                    ["description"] = "接受任务",
+                    ["parametersSchema"] = "{\"type\":\"object\",\"properties\":{\"questId\":{\"type\":\"string\"}}}"
+                }),
+                ["toolResults"] = new JArray(new JObject
+                {
+                    ["callId"] = "call_1", ["success"] = true, ["message"] = "已接受"
+                })
+            }.ToString(Newtonsoft.Json.Formatting.None);
+
+            AIBot.Server.ChatRequestBody body = System.Text.Json.JsonSerializer
+                .Deserialize<AIBot.Server.ChatRequestBody>(json, options);
+
+            Assert.NotNull(body);
+            Assert.Equal("game", body.ToolMode);
+            Assert.Equal("req-0#0", body.RoundToken);
+            Assert.Equal("{\"questState\":\"Available\"}", body.GameContext);
+            Assert.NotNull(body.SimState);
+            Assert.Equal(1, body.SimState.stage);
+            Assert.Single(body.Tools);
+            Assert.Equal("accept_quest", body.Tools[0].Id);
+            Assert.Contains("questId", body.Tools[0].ParametersSchema);
+            Assert.Single(body.ToolResults);
+            Assert.True(body.ToolResults[0].Success);
+            Assert.Equal("已接受", body.ToolResults[0].Message);
+        }
     }
 }

@@ -23,6 +23,10 @@
     <Compile Include="..\AIBot.Server\MemorySummaryQueue.cs" Link="Server\MemorySummaryQueue.cs" />
     <Compile Include="..\AIBot.Server\MySqlMemorySummaryJobPersistence.cs" Link="Server\MySqlMemorySummaryJobPersistence.cs" />
     <Compile Include="..\AIBot.Server\RuntimeLogService.cs" Link="Server\RuntimeLogService.cs" />
+    <Compile Include="..\AIBot.Server\ChatEndpoints.cs" Link="Server\ChatEndpoints.cs" />
+    <Compile Include="..\AIBot.Server\ApiErrorContract.cs" Link="Server\ApiErrorContract.cs" />
+    <Compile Include="..\AIBot.Server\ChatLogService.cs" Link="Server\ChatLogService.cs" />
+    <Compile Include="..\AIBot.Server\ModelErrorContract.cs" Link="Server\ModelErrorContract.cs" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
