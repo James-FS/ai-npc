@@ -265,54 +265,52 @@ namespace AIBot.Server
                         return;
                     }
 
-                    // game 模式挂起轮状态机：非续跑请求撞上未消费挂起轮要拒绝；
+                    // game 模式挂起轮状态机：任何模式的非续跑请求撞上未消费挂起轮都要拒绝
+                    //（挂起态与会话记忆是一致的快照，允许旁路对话会污染上下文）；
                     // 续跑请求校验令牌、链上轮数上限与工具结果完整性。通过后才允许 BeginRequest。
-                    PendingToolRound pendingRound = null;
+                    PendingToolRound pendingRound = SessionStore.TakeLivePendingToolRound(session);
                     int gameRoundIndex = 0;
                     string logUserMessage = body.Message;
                     List<LlmMessage> resumeToolMessages = null;
-                    if (useGameTools)
+                    if (!isToolResume)
                     {
-                        pendingRound = SessionStore.TakeLivePendingToolRound(session);
-                        if (!isToolResume)
+                        if (pendingRound != null)
                         {
-                            if (pendingRound != null)
-                            {
-                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
-                                    "tool_round_pending", "会话存在未完成的工具轮，请先携带 roundToken 续跑或等待其超时");
-                                return;
-                            }
+                            await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                "tool_round_pending", "会话存在未完成的工具轮，请先携带 roundToken 续跑或等待其超时");
+                            return;
                         }
-                        else
+                        pendingRound = null;
+                    }
+                    else
+                    {
+                        if (pendingRound == null)
                         {
-                            if (pendingRound == null)
-                            {
-                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
-                                    "tool_round_unknown", "工具挂起轮不存在、已消费或已过期，请用新的 requestId 重新对话");
-                                return;
-                            }
-                            if (!string.Equals(pendingRound.roundToken, body.RoundToken, StringComparison.Ordinal))
-                            {
-                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
-                                    "tool_round_mismatch", "roundToken 与当前挂起轮不一致");
-                                return;
-                            }
-                            if (pendingRound.roundIndex >= MaxGameToolRounds)
-                            {
-                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
-                                    "tool_round_limit", "工具回传轮数超过上限，请开启新的对话");
-                                return;
-                            }
-                            if (!TryBuildResumeToolMessages(pendingRound, body.ToolResults,
-                                out resumeToolMessages, out string toolResultsError))
-                            {
-                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
-                                    "invalid_tool_results", toolResultsError);
-                                return;
-                            }
-                            gameRoundIndex = pendingRound.roundIndex;
-                            logUserMessage = FindLastUserContent(pendingRound.messages);
+                            await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                "tool_round_unknown", "工具挂起轮不存在、已消费或已过期，请用新的 requestId 重新对话");
+                            return;
                         }
+                        if (!string.Equals(pendingRound.roundToken, body.RoundToken, StringComparison.Ordinal))
+                        {
+                            await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                "tool_round_mismatch", "roundToken 与当前挂起轮不一致");
+                            return;
+                        }
+                        if (pendingRound.roundIndex >= MaxGameToolRounds)
+                        {
+                            await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                "tool_round_limit", "工具回传轮数超过上限，请开启新的对话");
+                            return;
+                        }
+                        if (!TryBuildResumeToolMessages(pendingRound, body.ToolResults,
+                            out resumeToolMessages, out string toolResultsError))
+                        {
+                            await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                                "invalid_tool_results", toolResultsError);
+                            return;
+                        }
+                        gameRoundIndex = pendingRound.roundIndex;
+                        logUserMessage = FindLastUserContent(pendingRound.messages);
                     }
 
                     requestRecord = SessionStore.BeginRequest(session, requestId, fingerprint);
