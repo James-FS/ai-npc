@@ -247,9 +247,13 @@ API key 永不入库：`.gitignore` 已忽略全部 NPC 真实配置（`data/gam
 
 Local 模式还可以在 `NpcAgent.worldConfigAsset` 指定 `World Config` 资源，并在 `AgentConfigAsset` 中填写开发期模型 Key；这样整个 Demo 不需要复制仓库的 `data/` 目录。真实项目请勿把含 Key 的 Asset 提交到公共仓库。
 
-工具能力按运行模式隔离：Local 模式由 Unity 通过 `NpcAgent.Tools` 注册并执行；Server 模式由 `AIBot.Server` 注册和执行，Unity 本地注册的工具不会自动上传。插件会在检测到模式与工具配置不匹配时给出运行时警告。
+工具能力按运行模式隔离：Local 模式由 Unity 通过 `NpcAgent.Tools` 注册并执行；Server 模式默认由 `AIBot.Server` 注册和执行（simulated 调试），Unity 本地注册的工具不会自动上传。需要让 Server 编排、Unity 真实执行时，使用 Profile 的 `enableGameTools`（game 模式回传，见上文）。插件会在检测到模式与工具配置不匹配时给出运行时警告。
 
-Server 聊天默认 `toolMode=none`，不会注册模拟工具。Vue 调试台或 Unity Profile 显式选择 `toolMode=simulated` 后，才会启用 `SimulatedToolHost`（背包、好感度和剧情阶段只写入会话模拟状态）。Local/Server 的工具执行结果都会通过 Unity `onToolExecuted` 统一通知，但该事件只报告执行结果，不会把 Server 模拟结果写入正式游戏。生产交易、任务和背包仍应接入真实业务工具。
+Server 模式的工具边界按 `toolMode` 分为三种：
+
+- `none`（默认）：不注册任何工具，纯对话。
+- `simulated`（仅调试）：Vue 调试台或 Unity Profile 显式选择后启用 `SimulatedToolHost`（背包、好感度和剧情阶段只写入会话模拟状态，不触碰正式游戏）。
+- `game`（工具回传）：Server 遇到模型工具调用时不执行，挂起对话并下发 `tool_pending` 终态事件；Unity 在本地用 `NpcAgent.Tools` 真实执行（QuestSystem/背包等游戏代码负责"能不能做"），随后携带 `roundToken` 与结果发起续跑请求，Server 从挂起态恢复对话。使用条件：Connection Profile 勾选 `enableGameTools`（与 `enableSimulatedTools` 互斥）、NpcAgent 已注册本地工具、NPC 配置的 `enabledToolIds` 包含对应工具。工具执行结果都会通过 Unity `onToolExecuted` 统一通知；同一 `roundToken` 只会执行一次（断线重放不会导致工具双执行），游戏工具仍应保持幂等。
 
 Server 模式可调用 `await agent.CheckServerAsync()` 主动检查后台连接、就绪状态和当前 NPC 是否存在；结果会通过 `onServerStatus` 事件通知，不会给每次聊天额外增加检查请求。
 `UnityServerBackend` 会自动为每轮生成 `requestId` 并最多恢复重试两次，同时消除重放 token、reasoning 和工具事件。需要显式恢复时可读取 `agent.LastServerRequestId`，再调用 `RetryServerRequestAsync(message, requestId)`。

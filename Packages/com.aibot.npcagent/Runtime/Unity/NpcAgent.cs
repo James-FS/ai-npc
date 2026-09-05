@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using AIBot.Core;
@@ -82,6 +83,9 @@ namespace AIBot.Unity
         private CancellationTokenSource _requestCts;
         private bool _running;
         private bool _capabilityWarningIssued;
+        private bool _serverGameTools;          // game 模式：Server 会把工具调用挂起回传本地执行
+        private readonly System.Collections.Generic.HashSet<string> _executedRoundTokens =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal); // 防重放导致的工具双执行
         private string _loadedGameId;
         private string _loadedNpcId;
 
@@ -211,8 +215,47 @@ namespace AIBot.Unity
             {
                 if (IsServerMode())
                 {
+                    const int MaxGameToolRounds = 6;
+                    UnityStreamSink sink = new UnityStreamSink(this);
                     ServerChatResult serverResult = await _serverBackend.ChatAsync(
-                        message, new UnityStreamSink(this), _requestCts.Token, requestId);
+                        message, sink, _requestCts.Token, requestId);
+
+                    // game 模式自动续跑链：Server 挂起 → 本地工具真实执行 → 携带结果续跑，
+                    // 直到模型给出 reply 或达到轮数上限。工具执行语义与 Local 模式完全一致。
+                    int gameRound = 0;
+                    while (serverResult != null && serverResult.PendingToolCalls != null
+                        && serverResult.PendingToolCalls.Count > 0)
+                    {
+                        if (string.IsNullOrEmpty(serverResult.RoundToken)
+                            || !_executedRoundTokens.Add(serverResult.RoundToken))
+                        {
+                            // 同一挂起轮只执行一次：断线重放会原样回放 tool_pending，
+                            // 此时结果已在 Server 侧消费过，不能再次执行游戏工具。
+                            EmitError("收到重复或无效的工具挂起轮: " + (serverResult.RoundToken ?? "<empty>"));
+                            return null;
+                        }
+                        if (++gameRound > MaxGameToolRounds)
+                        {
+                            EmitError("工具回传轮数超过上限（" + MaxGameToolRounds + "），已终止本轮对话");
+                            return null;
+                        }
+
+                        var results = new List<ClientToolResult>();
+                        foreach (ToolCallDto call in serverResult.PendingToolCalls)
+                        {
+                            ToolResult executed = await ExecuteLocalToolAsync(call);
+                            results.Add(new ClientToolResult
+                            {
+                                CallId = call.Id,
+                                Success = executed != null && executed.Success,
+                                Message = executed == null ? null : executed.MessageForModel
+                            });
+                        }
+
+                        serverResult = await _serverBackend.ChatResumeAsync(
+                            serverResult.RoundToken, results, sink, _requestCts.Token);
+                    }
+
                     if (serverResult == null || serverResult.Reply == null)
                     {
                         EmitError("AIBot.Server 未返回有效回复");
@@ -352,6 +395,10 @@ namespace AIBot.Unity
                 bool enableSimulatedTools = useConnectionProfile
                     ? connectionProfile.enableSimulatedTools
                     : configAsset != null && configAsset.enableServerSimulatedTools;
+                // game 模式仅支持 Connection Profile：工具 schema 与执行都在 Unity 侧，
+                // 通过 Profile 显式声明后，Server 会把模型工具调用挂起回传给本地工具。
+                bool enableGameTools = useConnectionProfile && connectionProfile.enableGameTools;
+                _serverGameTools = enableGameTools;
                 _serverBackend = new UnityServerBackend(serverUrl, resolvedGameId, resolvedNpcId,
                     resolvedPlayerId, resolvedSessionId, resolvedTimeoutMs,
                     () =>
@@ -359,7 +406,9 @@ namespace AIBot.Unity
                         IGameContext context = GetGameContext();
                         return context == null ? null : context.SnapshotJson;
                     }, enableSimulatedTools,
-                    useConnectionProfile ? connectionProfile.serverAuthToken : null);
+                    useConnectionProfile ? connectionProfile.serverAuthToken : null,
+                    enableGameTools,
+                    enableGameTools ? CollectLocalToolSchemas : (Func<List<ToolSchema>>)null);
                 _backend = null;
                 _loop = null;
             }
@@ -376,6 +425,39 @@ namespace AIBot.Unity
         {
             return _config != null && string.Equals(_config.runtimeMode, "server",
                 StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>game 模式上传用：把本地已注册、且 NPC 配置启用的工具转成 schema 列表。</summary>
+        private List<ToolSchema> CollectLocalToolSchemas()
+        {
+            if (_tools == null || _config == null) return new List<ToolSchema>();
+            return _tools.BuildSchemas(_config.enabledToolIds);
+        }
+
+        /// <summary>game 模式：在本地真实执行 Server 挂起的工具调用，并触发 onToolExecuted 通知。</summary>
+        private async Task<ToolResult> ExecuteLocalToolAsync(ToolCallDto call)
+        {
+            ToolResult result;
+            try
+            {
+                if (_tools == null)
+                    result = ToolResult.Fail("game 模式未注册本地工具");
+                else
+                    result = await _tools.ExecuteAsync(call?.Function?.Name, call?.Function?.Arguments, gameObject);
+            }
+            catch (Exception ex)
+            {
+                UnityLogSink.Instance.Log(LogLevel.Error, "工具执行异常: " + ex.Message, ex);
+                result = ToolResult.Fail("tool error: " + ex.Message);
+            }
+            onToolExecuted?.Invoke(new AgentToolExecutionEvent
+            {
+                toolName = call?.Function?.Name,
+                argumentsJson = call?.Function?.Arguments ?? "{}",
+                success = result != null && result.Success,
+                result = result?.MessageForModel
+            });
+            return result;
         }
 
         /// <summary>
@@ -423,9 +505,17 @@ namespace AIBot.Unity
             bool serverMode = IsServerMode();
             if (serverMode)
             {
-                if (_tools != null && _tools.Count > 0)
+                if (_tools != null && _tools.Count > 0 && !_serverGameTools)
                 {
-                    Debug.LogWarning("[AIBot] 当前为 Server 模式，NpcAgent 上注册的 Unity 本地工具不会由 Server 执行；请将工具注册到 AIBot.Server，或切换为 Local 模式。");
+                    Debug.LogWarning("[AIBot] 当前为 Server 模式，NpcAgent 上注册的 Unity 本地工具不会由 Server 执行；" +
+                        "请在 Connection Profile 勾选 Enable Game Tools（game 模式回传本地执行），或将工具注册到 AIBot.Server。");
+                    _capabilityWarningIssued = true;
+                    return;
+                }
+                if (_serverGameTools && (_tools == null || _tools.Count == 0))
+                {
+                    Debug.LogWarning("[AIBot] 已启用 game 工具回传，但 NpcAgent 尚未注册任何本地工具；" +
+                        "模型请求工具时对话将以失败结束。");
                     _capabilityWarningIssued = true;
                 }
                 return;

@@ -84,7 +84,13 @@ Local 模式若从仓库 `data/` 目录加载配置，可在游戏启动阶段�
 
 ## 注册游戏工具
 
-Local 模式可直接在 Unity 注册工具，将 NPC 的工具调用连接到背包、任务或其他游戏系统。Server 模式的工具需要在 AIBot.Server 侧注册，Unity 本地注册的工具不会自动上传。
+Local 模式可直接在 Unity 注册工具，将 NPC 的工具调用连接到背包、任务或其他游戏系统。
+
+Server 模式有三种工具形态：
+
+- `none`（默认）：Server 侧不执行任何工具；
+- `simulated`（仅调试）：Server 的 SimulatedToolHost 只写会话模拟状态；
+- `game`（工具回传）：在 Connection Profile 勾选 **Enable Game Tools**，Server 遇到模型工具调用时挂起对话并下发 `tool_pending` 事件，Unity 用本地注册的工具真实执行后自动续跑。要求：NPC 配置的 `enabledToolIds` 包含对应工具、NpcAgent 已注册本地工具；同一挂起轮只会执行一次（断线重放安全），工具本身仍应保持幂等。
 
 ```csharp
 using System.Threading.Tasks;

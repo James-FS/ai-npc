@@ -24,13 +24,21 @@ namespace AIBot.Unity
         [Tooltip("Server 聊天客户端令牌；与服务端 AIBOT_CLIENT_TOKEN 一致。请通过安全配置注入，不要提交到公共仓库。")]
         public string serverAuthToken;
 
-        [Header("工具（仅调试）")]
-        [Tooltip("显式启用 Server 的 SimulatedToolHost。它只修改会话模拟状态，不能修改正式游戏背包、任务或好感度。")]
+        [Header("工具")]
+        [Tooltip("显式启用 Server 的 SimulatedToolHost（仅调试）。它只修改会话模拟状态，不能修改正式游戏背包、任务或好感度。")]
         public bool enableSimulatedTools;
+        [Tooltip("game 模式：模型请求工具时，Server 挂起对话并把工具调用回传给 NpcAgent.Tools 本地真实执行。" +
+            "要求已注册本地工具，且 NPC 配置的 enabledToolIds 包含对应工具。与 enableSimulatedTools 互斥。")]
+        public bool enableGameTools;
 
         private void OnValidate()
         {
             timeoutMs = Mathf.Max(1000, timeoutMs);
+            if (enableSimulatedTools && enableGameTools)
+            {
+                Debug.LogWarning("[AIBot] enableSimulatedTools 与 enableGameTools 互斥，已关闭 enableSimulatedTools");
+                enableSimulatedTools = false;
+            }
         }
     }
 }

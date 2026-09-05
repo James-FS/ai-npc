@@ -40,4 +40,30 @@ namespace AIBot.Core.Context
         public int CurrentStage { get { return _state.stage; } }
         public string SnapshotJson { get { return _state.ToSnapshotJson(); } }
     }
+
+    /// <summary>
+    /// game 模式的组合状态：SimState（stage 门控等已知字段）+ 客户端上报的原始游戏快照。
+    /// 原文完整进入"当前状况"层，不会被 SimState 的固定字段结构吞掉。
+    /// </summary>
+    public sealed class CompositeGameContext : IGameContext
+    {
+        private readonly SimGameState _state;
+        private readonly string _gameContextJson;
+        public CompositeGameContext(SimGameState state, string gameContextJson)
+        {
+            _state = state ?? new SimGameState();
+            _gameContextJson = string.IsNullOrWhiteSpace(gameContextJson) ? null : gameContextJson.Trim();
+        }
+        public int CurrentStage { get { return _state.stage; } }
+        public string SnapshotJson
+        {
+            get
+            {
+                string baseSnapshot = _state.ToSnapshotJson();
+                return _gameContextJson == null
+                    ? baseSnapshot
+                    : baseSnapshot + "\n【游戏上报状态】\n" + _gameContextJson;
+            }
+        }
+    }
 }

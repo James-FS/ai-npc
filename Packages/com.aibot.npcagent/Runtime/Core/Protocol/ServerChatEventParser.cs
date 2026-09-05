@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using AIBot.Core.Llm;
 using AIBot.Core.Output;
 using Newtonsoft.Json;
@@ -6,16 +7,18 @@ using Newtonsoft.Json.Linq;
 
 namespace AIBot.Core.Protocol
 {
-    /// <summary>Server 工具执行策略。默认 none，避免把调试模拟结果误当成正式游戏业务结果。</summary>
+    /// <summary>Server 工具执行策略。默认 none，避免把调试模拟结果误当成正式游戏业务结果。
+    /// game：Server 挂起对话并下发 tool_pending，由 Unity 本地工具真实执行后携带结果续跑。</summary>
     public static class ServerToolModes
     {
         public const string None = "none";
         public const string Simulated = "simulated";
+        public const string Game = "game";
 
         public static bool TryNormalize(string value, out string normalized)
         {
             string candidate = string.IsNullOrWhiteSpace(value) ? None : value.Trim().ToLowerInvariant();
-            if (candidate == None || candidate == Simulated)
+            if (candidate == None || candidate == Simulated || candidate == Game)
             {
                 normalized = candidate;
                 return true;
@@ -23,6 +26,14 @@ namespace AIBot.Core.Protocol
             normalized = null;
             return false;
         }
+    }
+
+    /// <summary>game 模式续跑：客户端本地工具的执行结果（Server 与 Unity 共享的请求契约）。</summary>
+    public sealed class ClientToolResult
+    {
+        [JsonProperty("callId")] public string CallId;
+        [JsonProperty("success")] public bool Success;
+        [JsonProperty("message")] public string Message;
     }
 
     /// <summary>Unity、Web 与 Server 共用的幂等请求标识规则。</summary>
@@ -52,7 +63,8 @@ namespace AIBot.Core.Protocol
         ToolCall,
         Reply,
         Error,
-        Done
+        Done,
+        ToolPending
     }
 
     public sealed class ServerModelDiagnostic
@@ -80,22 +92,26 @@ namespace AIBot.Core.Protocol
         public string ToolResult;
         public string SessionId;
         public string RequestId;
+        public string RoundToken;                      // tool_pending：本次挂起轮的唯一令牌
+        public List<ToolCallDto> ToolCalls;            // tool_pending：等待宿主执行的工具调用
     }
 
     /// <summary>
     /// 聚合一轮 Server SSE 的终态。即使先收到 error，只要随后收到有效 reply，reply 仍是权威结果。
+    /// game 模式下流可能以 tool_pending 终态结束：没有 reply，等待宿主执行工具后续跑。
     /// </summary>
     public sealed class ServerChatResponseState
     {
         public ServerChatEvent ReplyEvent { get; private set; }
         public ServerChatEvent ErrorEvent { get; private set; }
+        public ServerChatEvent PendingEvent { get; private set; }
         public bool Done { get; private set; }
         public string SessionId { get; private set; }
         public string RequestId { get; private set; }
 
         public ServerModelDiagnostic CompletionError
         {
-            get { return ReplyEvent == null ? ErrorEvent?.Diagnostic : null; }
+            get { return ReplyEvent == null && PendingEvent == null ? ErrorEvent?.Diagnostic : null; }
         }
 
         public void Apply(ServerChatEvent value)
@@ -103,6 +119,7 @@ namespace AIBot.Core.Protocol
             if (value == null) return;
             if (value.Kind == ServerChatEventKind.Reply) ReplyEvent = value;
             else if (value.Kind == ServerChatEventKind.Error) ErrorEvent = value;
+            else if (value.Kind == ServerChatEventKind.ToolPending) PendingEvent = value;
             else if (value.Kind == ServerChatEventKind.Done)
             {
                 Done = true;
@@ -174,6 +191,28 @@ namespace AIBot.Core.Protocol
                     value.Kind = ServerChatEventKind.Done;
                     value.SessionId = (string)payload["sessionId"];
                     value.RequestId = (string)payload["requestId"];
+                    break;
+                case "tool_pending":
+                    value.Kind = ServerChatEventKind.ToolPending;
+                    value.Terminal = true;
+                    value.RoundToken = (string)payload["roundToken"];
+                    value.ToolCalls = new List<ToolCallDto>();
+                    foreach (JToken call in payload["calls"] as JArray ?? new JArray())
+                    {
+                        JToken callArgs = call["args"];
+                        string argsJson = callArgs == null || callArgs.Type == JTokenType.Null
+                            ? "{}"
+                            : callArgs.Type == JTokenType.String ? (string)callArgs : callArgs.ToString(Formatting.None);
+                        value.ToolCalls.Add(new ToolCallDto
+                        {
+                            Id = (string)call["callId"],
+                            Function = new FunctionCall
+                            {
+                                Name = (string)call["name"],
+                                Arguments = string.IsNullOrEmpty(argsJson) ? "{}" : argsJson
+                            }
+                        });
+                    }
                     break;
                 default:
                     return false;

@@ -44,3 +44,4 @@ data/games/*/sessions/
 # Server runtime state
 data/.last-storage-mode
 
+.zcode/

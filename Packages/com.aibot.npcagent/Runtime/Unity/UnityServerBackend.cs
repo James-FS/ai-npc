@@ -31,13 +31,16 @@ namespace AIBot.Unity
         private readonly string _authToken;
         private readonly Func<string> _stateSnapshotProvider;
         private readonly bool _enableSimulatedTools;
+        private readonly bool _enableGameTools;
+        private readonly Func<List<ToolSchema>> _toolSchemaProvider;
 
         public string LastRequestId { get; private set; }
 
         public UnityServerBackend(string baseUrl, string gameId, string npcId,
             string playerId, string sessionId, int timeoutMs,
             Func<string> stateSnapshotProvider = null, bool enableSimulatedTools = false,
-            string authToken = null)
+            string authToken = null,
+            bool enableGameTools = false, Func<List<ToolSchema>> toolSchemaProvider = null)
         {
             if (string.IsNullOrWhiteSpace(baseUrl)) throw new ArgumentException("Server 地址不能为空", nameof(baseUrl));
             if (string.IsNullOrWhiteSpace(gameId)) throw new ArgumentException("gameId 不能为空", nameof(gameId));
@@ -51,6 +54,8 @@ namespace AIBot.Unity
             _authToken = authToken ?? string.Empty;
             _stateSnapshotProvider = stateSnapshotProvider;
             _enableSimulatedTools = enableSimulatedTools;
+            _enableGameTools = enableGameTools;
+            _toolSchemaProvider = toolSchemaProvider;
         }
 
         /// <summary>调用 Server 聊天接口并消费其 SSE 事件。</summary>
@@ -58,16 +63,42 @@ namespace AIBot.Unity
             string requestId = null)
         {
             if (string.IsNullOrWhiteSpace(message)) throw new ArgumentException("消息不能为空", nameof(message));
-            requestId = string.IsNullOrWhiteSpace(requestId) ? ChatRequestIds.NewId() : requestId;
-            if (!ChatRequestIds.IsValid(requestId)) throw new ArgumentException("requestId 格式无效", nameof(requestId));
+            requestId = NormalizeRequestId(requestId);
             LastRequestId = requestId;
             var gate = new GateSink(sink);
+            return await SendWithRetryAsync(BuildChatBody(message, requestId), requestId, gate, sink, ct);
+        }
+
+        /// <summary>
+        /// game 模式续跑：本地工具执行完毕后，携带挂起轮令牌与结果发起第二个请求。
+        /// 协议契约见主方案 §8.4：Server 从挂起态恢复 AgentLoop，本轮可能返回 reply 或再次 tool_pending。
+        /// </summary>
+        public async Task<ServerChatResult> ChatResumeAsync(string roundToken, List<ClientToolResult> toolResults,
+            ILlmStreamSink sink, CancellationToken ct, string requestId = null)
+        {
+            if (string.IsNullOrWhiteSpace(roundToken)) throw new ArgumentException("roundToken 不能为空", nameof(roundToken));
+            requestId = NormalizeRequestId(requestId);
+            LastRequestId = requestId;
+            var gate = new GateSink(sink);
+            return await SendWithRetryAsync(BuildResumeBody(roundToken, toolResults, requestId), requestId, gate, sink, ct);
+        }
+
+        private string NormalizeRequestId(string requestId)
+        {
+            requestId = string.IsNullOrWhiteSpace(requestId) ? ChatRequestIds.NewId() : requestId;
+            if (!ChatRequestIds.IsValid(requestId)) throw new ArgumentException("requestId 格式无效", nameof(requestId));
+            return requestId;
+        }
+
+        private async Task<ServerChatResult> SendWithRetryAsync(JObject body, string requestId,
+            GateSink gate, ILlmStreamSink sink, CancellationToken ct)
+        {
             for (int attempt = 0; ; attempt++)
             {
                 gate.BeginAttempt();
                 try
                 {
-                    return await OnceAsync(message, requestId, gate, ct);
+                    return await OnceAsync(body, requestId, gate, ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -197,34 +228,83 @@ namespace AIBot.Unity
             sink?.OnCompleted(JsonConvert.SerializeObject(result.Reply), result.Usage);
         }
 
-        private async Task<ServerChatResult> OnceAsync(string message, string requestId,
-            GateSink sink, CancellationToken ct)
+        private JObject BuildChatBody(string message, string requestId)
         {
-            string url = _baseUrl + "/api/games/" + Uri.EscapeDataString(_gameId) + "/chat/stream";
             var body = new JObject
             {
                 ["npcId"] = _npcId,
                 ["message"] = message,
                 ["sessionId"] = _sessionId,
                 ["requestId"] = requestId,
-                ["toolMode"] = _enableSimulatedTools ? ServerToolModes.Simulated : ServerToolModes.None
+                ["toolMode"] = _enableSimulatedTools ? ServerToolModes.Simulated
+                    : _enableGameTools ? ServerToolModes.Game : ServerToolModes.None
             };
             if (!string.IsNullOrEmpty(_playerId)) body["playerId"] = _playerId;
-            string stateSnapshot = _stateSnapshotProvider == null ? null : _stateSnapshotProvider();
-            if (!string.IsNullOrWhiteSpace(stateSnapshot))
+            ApplyStateSnapshot(body, includeSimState: true);
+            if (_enableGameTools && _toolSchemaProvider != null)
             {
-                try
-                {
-                    // Server 端只接收 SimGameState 的已知字段；额外字段会被忽略，
-                    // 因此可以安全地把游戏上下文快照作为可选扩展传过去。
-                    JToken state = JToken.Parse(stateSnapshot);
-                    if (state.Type == JTokenType.Object) body["simState"] = state;
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning("[AIBot] 游戏状态快照不是有效 JSON，忽略本次同步：" + ex.Message);
-                }
+                List<ToolSchema> schemas = _toolSchemaProvider.Invoke();
+                if (schemas != null && schemas.Count > 0) body["tools"] = JArray.FromObject(schemas);
             }
+            return body;
+        }
+
+        private JObject BuildResumeBody(string roundToken, List<ClientToolResult> toolResults, string requestId)
+        {
+            var body = new JObject
+            {
+                ["npcId"] = _npcId,
+                ["sessionId"] = _sessionId,
+                ["requestId"] = requestId,
+                ["toolMode"] = ServerToolModes.Game,
+                ["roundToken"] = roundToken
+            };
+            if (!string.IsNullOrEmpty(_playerId)) body["playerId"] = _playerId;
+            // 续跑不带 simState：其值已随首段合并进会话，且在请求指纹内——重试时游戏状态若已
+            // 变化会触发 409。gameContext 不进指纹，可安全携带最新状态供 prompt 使用。
+            ApplyStateSnapshot(body, includeSimState: false);
+            var results = new JArray();
+            foreach (ClientToolResult item in toolResults ?? new List<ClientToolResult>())
+            {
+                results.Add(new JObject
+                {
+                    ["callId"] = item?.CallId,
+                    ["success"] = item?.Success ?? false,
+                    ["message"] = item?.Message
+                });
+            }
+            body["toolResults"] = results;
+            return body;
+        }
+
+        private void ApplyStateSnapshot(JObject body, bool includeSimState)
+        {
+            string stateSnapshot = _stateSnapshotProvider == null ? null : _stateSnapshotProvider();
+            if (string.IsNullOrWhiteSpace(stateSnapshot)) return;
+            if (_enableGameTools)
+            {
+                // game 模式：快照原文经 gameContext 直达 prompt（CompositeGameContext），
+                // 不会被 SimState 的固定字段结构吞掉（如任务状态、关键道具等富状态）。
+                body["gameContext"] = stateSnapshot;
+            }
+            if (!includeSimState) return;
+            try
+            {
+                // Server 端只接收 SimGameState 的已知字段；额外字段会被忽略，
+                // 因此可以安全地把游戏上下文快照作为可选扩展传过去。
+                JToken state = JToken.Parse(stateSnapshot);
+                if (state.Type == JTokenType.Object) body["simState"] = state;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[AIBot] 游戏状态快照不是有效 JSON，忽略本次同步：" + ex.Message);
+            }
+        }
+
+        private async Task<ServerChatResult> OnceAsync(JObject body, string requestId,
+            GateSink sink, CancellationToken ct)
+        {
+            string url = _baseUrl + "/api/games/" + Uri.EscapeDataString(_gameId) + "/chat/stream";
 
             var parser = new SseLineParser(sink.HandleDataLine);
             var handler = new SseDownloadHandler(parser);
@@ -328,16 +408,33 @@ namespace AIBot.Unity
                 get
                 {
                     ServerChatEvent reply = _state.ReplyEvent;
-                    return reply == null ? null : new ServerChatResult
+                    if (reply != null)
                     {
-                        Reply = reply.Reply,
-                        Usage = reply.Usage,
-                        UsedFallback = reply.Fallback,
-                        ElapsedMs = reply.ElapsedMs,
-                        Diagnostic = reply.Diagnostic,
-                        RequestId = _state.RequestId,
-                        Replayed = Replayed
-                    };
+                        return new ServerChatResult
+                        {
+                            Reply = reply.Reply,
+                            Usage = reply.Usage,
+                            UsedFallback = reply.Fallback,
+                            ElapsedMs = reply.ElapsedMs,
+                            Diagnostic = reply.Diagnostic,
+                            RequestId = _state.RequestId,
+                            Replayed = Replayed
+                        };
+                    }
+                    // game 模式：tool_pending 是合法终态，本轮没有 reply，等待宿主执行工具后续跑。
+                    ServerChatEvent pending = _state.PendingEvent;
+                    if (pending != null)
+                    {
+                        return new ServerChatResult
+                        {
+                            PendingToolCalls = pending.ToolCalls,
+                            RoundToken = pending.RoundToken,
+                            Usage = pending.Usage,
+                            RequestId = _state.RequestId,
+                            Replayed = Replayed
+                        };
+                    }
+                    return null;
                 }
             }
 
@@ -490,6 +587,8 @@ namespace AIBot.Unity
         public ServerModelDiagnostic Diagnostic;
         public string RequestId;
         public bool Replayed;
+        public List<ToolCallDto> PendingToolCalls; // game 模式：非空表示本轮挂起等待本地工具执行
+        public string RoundToken;                  // game 模式：续跑请求必须携带的挂起轮令牌
     }
 
     public sealed class ServerHealthResult

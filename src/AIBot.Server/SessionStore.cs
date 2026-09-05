@@ -25,6 +25,7 @@ namespace AIBot.Server
         public AIBot.Core.Context.SimGameState SimState = new AIBot.Core.Context.SimGameState();
         public DateTime LastActiveUtc = DateTime.UtcNow;
         public List<ChatRequestRecord> RecentRequests = new List<ChatRequestRecord>();
+        public PendingToolRound PendingToolRound;   // game 模式：非空表示有未消费的工具挂起轮
         internal string LegacySourcePath;
         public readonly SemaphoreSlim Gate = new SemaphoreSlim(1, 1);
     }
@@ -38,6 +39,17 @@ namespace AIBot.Server
         public List<string> events = new List<string>();
         public DateTime createdUtc;
         public DateTime completedUtc;
+    }
+
+    /// <summary>game 模式的挂起工具轮：等待客户端执行工具并携带结果发起续跑请求。</summary>
+    public sealed class PendingToolRound
+    {
+        public string roundToken;                              // "<首个requestId>#<roundIndex>"
+        public int roundIndex;                                 // 链式轮数计数，防绕过工具轮上限
+        public List<ToolCallDto> calls = new List<ToolCallDto>();
+        public List<LlmMessage> messages = new List<LlmMessage>();  // 续跑所需完整消息列表（含旧 system）
+        public List<ToolSchema> schemas = new List<ToolSchema>();   // 续跑轮继续向模型提供工具
+        public DateTime createdUtc;
     }
 
     public static class ChatRequestStatuses
@@ -75,7 +87,7 @@ namespace AIBot.Server
 
         public sealed class SessionFileDto
         {
-            public int schemaVersion = 3;
+            public int schemaVersion = 4;
             public string npcId;
             public string playerId;
             public string sessionId;
@@ -85,6 +97,7 @@ namespace AIBot.Server
             public List<LlmMessage> messages = new List<LlmMessage>();
             public List<LlmMessage> evictedMessages = new List<LlmMessage>();
             public List<ChatRequestRecord> recentRequests = new List<ChatRequestRecord>();
+            public PendingToolRound pendingToolRound;   // v4：game 模式挂起工具轮
             public DateTime lastActiveUtc;
         }
 
@@ -184,6 +197,7 @@ namespace AIBot.Server
                     messages = session.Memory.Messages.Select(CopyMessage).ToList(),
                     evictedMessages = session.Memory.SnapshotEvicted().Select(CopyMessage).ToList(),
                     recentRequests = CopyRequests(session.RecentRequests),
+                    pendingToolRound = session.PendingToolRound,
                     lastActiveUtc = session.LastActiveUtc
                 };
                 if (MySqlPersistence != null)
@@ -271,6 +285,7 @@ namespace AIBot.Server
                         Facts = dto.facts ?? new List<string>(),
                         SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
                         RecentRequests = CopyRequests(dto.recentRequests),
+                        PendingToolRound = dto.pendingToolRound,
                         LastActiveUtc = dto.lastActiveUtc == default(DateTime) ? File.GetLastWriteTimeUtc(path) : dto.lastActiveUtc
                     };
                 }
@@ -427,8 +442,10 @@ namespace AIBot.Server
                         DateTime fileTime = File.GetLastWriteTimeUtc(path);
                         if (fileTime >= cutoff) continue;
                         SessionFileDto dto = JsonConvert.DeserializeObject<SessionFileDto>(File.ReadAllText(path));
-                        // 待摘要消息或 processing 幂等请求仍可能带有业务副作用，不能因闲置被清掉。
+                        // 待摘要消息、processing 幂等请求或未消费的工具挂起轮仍可能带有业务副作用，
+                        // 不能因闲置被清掉。
                         if (dto != null && ((dto.evictedMessages != null && dto.evictedMessages.Count > 0)
+                            || dto.pendingToolRound != null
                             || (dto.recentRequests ?? new List<ChatRequestRecord>())
                                 .Any(x => x != null && x.status == ChatRequestStatuses.Processing)))
                             continue;
@@ -483,6 +500,7 @@ namespace AIBot.Server
                 Facts = dto.facts ?? new List<string>(),
                 SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
                 RecentRequests = CopyRequests(dto.recentRequests),
+                PendingToolRound = dto.pendingToolRound,
                 LastActiveUtc = dto.lastActiveUtc == default(DateTime)
                     ? (fileTime ?? DateTime.UtcNow) : dto.lastActiveUtc,
                 LegacySourcePath = legacySourcePath
@@ -509,6 +527,22 @@ namespace AIBot.Server
             if (session == null || string.IsNullOrEmpty(requestId)) return null;
             return (session.RecentRequests ?? new List<ChatRequestRecord>())
                 .FirstOrDefault(item => string.Equals(item.requestId, requestId, StringComparison.Ordinal));
+        }
+
+        /// <summary>game 模式挂起轮的存活窗口；超时视为客户端放弃，允许新一轮对话。</summary>
+        public static readonly TimeSpan PendingToolRoundTimeout = TimeSpan.FromMinutes(10);
+
+        /// <summary>取会话当前挂起轮；已超时的视为失效并就地清除。调用方必须已持有会话 Gate。</summary>
+        public static PendingToolRound TakeLivePendingToolRound(SessionState session)
+        {
+            PendingToolRound pending = session?.PendingToolRound;
+            if (pending == null) return null;
+            if (DateTime.UtcNow - pending.createdUtc > PendingToolRoundTimeout)
+            {
+                session.PendingToolRound = null;
+                return null;
+            }
+            return pending;
         }
 
         public static ChatRequestRecord BeginRequest(SessionState session, string requestId, string fingerprint)

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -33,7 +34,11 @@ namespace AIBot.Server
         public SimGameState SimState { get; set; }
         public OverrideSettings Override { get; set; }
         public MemoryPolicyOverrides MemoryOverride { get; set; } // 管理端调试临时覆盖，Server 最终仍应用安全上限
-        public string ToolMode { get; set; } = ServerToolModes.None; // none（正式默认）/ simulated（仅调试）
+        public string ToolMode { get; set; } = ServerToolModes.None; // none（正式默认）/ simulated（仅调试）/ game（工具回传）
+        public List<ToolSchema> Tools { get; set; }        // game：客户端上传的工具 schema（首段必带）
+        public string RoundToken { get; set; }             // game 续跑：待续挂起轮令牌
+        public List<ClientToolResult> ToolResults { get; set; } // game 续跑：工具执行结果
+        public string GameContext { get; set; }            // game：原始游戏状态快照（仅作 prompt 上下文，不进指纹）
     }
 
     public class OverrideSettings
@@ -68,7 +73,7 @@ namespace AIBot.Server
                 ChatRequestBody body;
                 try { body = await http.Request.ReadFromJsonAsync<ChatRequestBody>(http.RequestAborted); }
                 catch { body = null; }
-                if (body == null || string.IsNullOrEmpty(body.NpcId) || string.IsNullOrEmpty(body.Message))
+                if (body == null || string.IsNullOrEmpty(body.NpcId))
                 {
                     await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
                         "invalid_request", "npcId 与 message 必填");
@@ -77,14 +82,23 @@ namespace AIBot.Server
                 if (!ServerToolModes.TryNormalize(body.ToolMode, out string toolMode))
                 {
                     await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
-                        "invalid_tool_mode", "toolMode 仅支持 none 或 simulated");
+                        "invalid_tool_mode", "toolMode 仅支持 none、simulated 或 game");
                     return;
                 }
                 bool useSimulatedTools = toolMode == ServerToolModes.Simulated;
+                bool useGameTools = toolMode == ServerToolModes.Game;
+                bool isToolResume = useGameTools && !string.IsNullOrWhiteSpace(body.RoundToken);
+                if (isToolResume) body.Message = null; // 续跑轮不携带新消息，避免污染指纹与语义
                 if (useSimulatedTools && !CanUseAdminOverrides(http, config))
                 {
                     await ApiErrorWriter.WriteAsync(http, StatusCodes.Status403Forbidden,
                         "admin_auth_required", "simulated 工具仅允许授权的调试请求使用");
+                    return;
+                }
+                if (!isToolResume && string.IsNullOrEmpty(body.Message))
+                {
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                        "invalid_request", "npcId 与 message 必填");
                     return;
                 }
                 string headerRequestId = http.Request.Headers["X-Request-Id"].ToString();
@@ -132,10 +146,16 @@ namespace AIBot.Server
                         "invalid_player_id", "playerId 非法（仅允许字母数字及 _ . : -，最长128位）");
                     return;
                 }
-                if (body.Message.Length > 4000)
+                if (!isToolResume && body.Message.Length > 4000)
                 {
                     await ApiErrorWriter.WriteAsync(http, StatusCodes.Status413PayloadTooLarge,
                         "message_too_large", "message 最长 4000 字符");
+                    return;
+                }
+                if (useGameTools && body.GameContext != null && body.GameContext.Length > 8192)
+                {
+                    await ApiErrorWriter.WriteAsync(http, StatusCodes.Status413PayloadTooLarge,
+                        "game_context_too_large", "gameContext 最长 8192 字符");
                     return;
                 }
                 if (body.MemoryOverride != null && !CanUseAdminOverrides(http, config))
@@ -174,6 +194,19 @@ namespace AIBot.Server
                     if (body.Override.Temperature.HasValue) cfg.model.temperature = body.Override.Temperature.Value;
                 }
                 NormalizeModelSettings(cfg.model);
+
+                // game 模式首段：校验客户端上传的工具 schema，并与 NPC 配置的 enabledToolIds 求交。
+                List<ToolSchema> gameSchemas = null;
+                if (useGameTools && !isToolResume)
+                {
+                    gameSchemas = ValidateGameTools(body.Tools, cfg.enabledToolIds);
+                    if (gameSchemas == null)
+                    {
+                        await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                            "invalid_tool_schema", "tools 非法：最多 16 个，id 需合法且唯一，单条 schema 最长 4KB");
+                        return;
+                    }
+                }
 
                 EffectiveMemoryPolicy effectiveMemory = MemoryPolicyService.Resolve(
                     gid, cfg, body.MemoryOverride, config);
@@ -230,6 +263,56 @@ namespace AIBot.Server
                         await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
                             "request_in_doubt", "该请求上次执行状态不确定，请查询业务状态后使用新的 requestId");
                         return;
+                    }
+
+                    // game 模式挂起轮状态机：非续跑请求撞上未消费挂起轮要拒绝；
+                    // 续跑请求校验令牌、链上轮数上限与工具结果完整性。通过后才允许 BeginRequest。
+                    PendingToolRound pendingRound = null;
+                    int gameRoundIndex = 0;
+                    string logUserMessage = body.Message;
+                    List<LlmMessage> resumeToolMessages = null;
+                    if (useGameTools)
+                    {
+                        pendingRound = SessionStore.TakeLivePendingToolRound(session);
+                        if (!isToolResume)
+                        {
+                            if (pendingRound != null)
+                            {
+                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                    "tool_round_pending", "会话存在未完成的工具轮，请先携带 roundToken 续跑或等待其超时");
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            if (pendingRound == null)
+                            {
+                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                    "tool_round_unknown", "工具挂起轮不存在、已消费或已过期，请用新的 requestId 重新对话");
+                                return;
+                            }
+                            if (!string.Equals(pendingRound.roundToken, body.RoundToken, StringComparison.Ordinal))
+                            {
+                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                    "tool_round_mismatch", "roundToken 与当前挂起轮不一致");
+                                return;
+                            }
+                            if (pendingRound.roundIndex >= MaxGameToolRounds)
+                            {
+                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status409Conflict,
+                                    "tool_round_limit", "工具回传轮数超过上限，请开启新的对话");
+                                return;
+                            }
+                            if (!TryBuildResumeToolMessages(pendingRound, body.ToolResults,
+                                out resumeToolMessages, out string toolResultsError))
+                            {
+                                await ApiErrorWriter.WriteAsync(http, StatusCodes.Status400BadRequest,
+                                    "invalid_tool_results", toolResultsError);
+                                return;
+                            }
+                            gameRoundIndex = pendingRound.roundIndex;
+                            logUserMessage = FindLastUserContent(pendingRound.messages);
+                        }
                     }
 
                     requestRecord = SessionStore.BeginRequest(session, requestId, fingerprint);
@@ -315,7 +398,9 @@ namespace AIBot.Server
                 {
                     Config = cfg,
                     World = world,
-                    Game = new SimGameContext(session.SimState),
+                    Game = useGameTools
+                        ? new CompositeGameContext(session.SimState, body.GameContext)
+                        : new SimGameContext(session.SimState),
                     UserMessage = body.Message,
                     Memory = session.Memory,
                     MemorySummary = playerScoped ? longMemory?.summary : session.Summary,
@@ -326,7 +411,16 @@ namespace AIBot.Server
                     DeferMemorySummarizationToHost = playerScoped
                         && effectiveMemory.policy.backgroundSummarization,
                     Tools = toolRegistry,
-                    HostContext = session.SimState
+                    HostContext = session.SimState,
+                    DeferToolsToHost = useGameTools,
+                    DeferredTools = useGameTools
+                        ? (isToolResume
+                            ? (pendingRound.schemas ?? new List<ToolSchema>())
+                            : (gameSchemas ?? new List<ToolSchema>()))
+                        : null,
+                    ResumeMessages = isToolResume
+                        ? BuildResumeMessages(pendingRound.messages, resumeToolMessages)
+                        : null
                 };
 
                 AgentLoopResult result;
@@ -342,6 +436,75 @@ namespace AIBot.Server
                 }
 
                 session.LastActiveUtc = DateTime.UtcNow;
+
+                if (result.PendingToolCalls != null)
+                {
+                    // game 模式挂起轮：先写挂起态（与幂等记录同一次 Save 落盘，崩溃窗口内状态一致），
+                    // 再下发 tool_pending 终态事件；工具执行结果由客户端携带 roundToken 发起续跑请求。
+                    string roundToken = requestId + "#" + gameRoundIndex;
+                    session.PendingToolRound = new PendingToolRound
+                    {
+                        roundToken = roundToken,
+                        roundIndex = gameRoundIndex + 1,
+                        calls = CloneJson(result.PendingToolCalls) ?? new List<ToolCallDto>(),
+                        messages = CloneJson(result.PendingMessages) ?? new List<LlmMessage>(),
+                        schemas = CloneJson(isToolResume ? pendingRound.schemas : gameSchemas)
+                            ?? new List<ToolSchema>(),
+                        createdUtc = DateTime.UtcNow
+                    };
+                    var pendingCalls = new JArray();
+                    foreach (ToolCallDto call in result.PendingToolCalls)
+                    {
+                        string args = call.Function?.Arguments;
+                        JToken argsToken;
+                        try { argsToken = string.IsNullOrEmpty(args) ? new JObject() : JToken.Parse(args); }
+                        catch { argsToken = args ?? "{}"; }
+                        pendingCalls.Add(new JObject
+                        {
+                            ["callId"] = call.Id,
+                            ["name"] = call.Function?.Name,
+                            ["args"] = argsToken
+                        });
+                    }
+                    sse.Write(new JObject
+                    {
+                        ["type"] = "tool_pending",
+                        ["requestId"] = requestId,
+                        ["roundToken"] = roundToken,
+                        ["calls"] = pendingCalls
+                    });
+                    SessionStore.CompleteRequest(requestRecord, sse.SnapshotReplayEvents());
+                    if (!SessionStore.Save(session))
+                    {
+                        runtimeLogs.Write(LogLevel.Warning, "Chat", "tool_round_save_failed",
+                            "工具挂起轮已下发，但持久化失败；客户端续跑可能得到 tool_round_unknown",
+                            new RuntimeLogContext
+                            {
+                                RequestId = requestId,
+                                GameId = gid,
+                                NpcId = body.NpcId,
+                                PlayerId = body.PlayerId,
+                                SessionId = body.SessionId
+                            });
+                    }
+                    else
+                    {
+                        runtimeLogs.Write(LogLevel.Info, "Chat", "tool_round_pending",
+                            "工具调用已下发客户端执行: " + string.Join(",",
+                                result.PendingToolCalls.Select(c => c.Function?.Name ?? c.Id)),
+                            new RuntimeLogContext
+                            {
+                                RequestId = requestId,
+                                GameId = gid,
+                                NpcId = body.NpcId,
+                                PlayerId = body.PlayerId,
+                                SessionId = body.SessionId
+                            });
+                    }
+                    channel.Writer.TryComplete();
+                    await pump;
+                    return;
+                }
 
                 // 同步摘要兼容路径：玩家范围写长期文件，session 范围仍写会话文件。
                 if (result.MemorySummary != null)
@@ -385,7 +548,7 @@ namespace AIBot.Server
                     playerId = body.PlayerId,
                     sessionId = body.SessionId,
                     legacyMemoryScope = legacyMemoryScope,
-                    userMessage = body.Message,
+                    userMessage = logUserMessage,
                     say = result.Reply.say,
                     emotion = result.Reply.emotion,
                     action = result.Reply.action,
@@ -429,6 +592,7 @@ namespace AIBot.Server
                     ["sessionId"] = body.SessionId,
                     ["requestId"] = requestId
                 });
+                if (isToolResume) session.PendingToolRound = null; // 续跑完成：消费挂起轮
                 SessionStore.CompleteRequest(requestRecord, sse.SnapshotReplayEvents());
                 if (!SessionStore.Save(session))
                 {
@@ -524,7 +688,12 @@ namespace AIBot.Server
                 ToolMode = normalizedToolMode,
                 body.SimState,
                 body.Override,
-                body.MemoryOverride
+                body.MemoryOverride,
+                body.Tools,
+                body.RoundToken,
+                body.ToolResults
+                // GameContext 故意不进指纹：它是纯 prompt 上下文（无副作用），续跑重试时游戏
+                // 状态可能已变化，纳入会把同 requestId 的重试误判为 request_id_conflict。
             }, Formatting.None);
             using (SHA256 sha = SHA256.Create())
             {
@@ -533,6 +702,111 @@ namespace AIBot.Server
                 foreach (byte value in hash) text.Append(value.ToString("x2"));
                 return text.ToString();
             }
+        }
+
+        /// <summary>game 模式挂起-续跑链的最大轮数（跨请求计数，独立于单次 AgentLoop 的 MaxToolRounds）。</summary>
+        private const int MaxGameToolRounds = 8;
+        private const int MaxGameTools = 16;
+        private const int MaxToolSchemaChars = 4 * 1024;
+        private const int MaxToolResultContentChars = 12000;
+
+        /// <summary>
+        /// 校验 game 模式首段上传的工具 schema：数量/长度/合法 id，并与 NPC 配置的 enabledToolIds 求交。
+        /// 返回 null 表示存在非法项（调用方返回 400）；enabledToolIds 之外的条目按 Core 语义静默跳过。
+        /// </summary>
+        private static List<ToolSchema> ValidateGameTools(List<ToolSchema> uploaded, List<string> enabledToolIds)
+        {
+            if (uploaded == null || uploaded.Count == 0) return new List<ToolSchema>();
+            if (uploaded.Count > MaxGameTools) return null;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var enabled = new HashSet<string>(enabledToolIds ?? new List<string>(), StringComparer.Ordinal);
+            var result = new List<ToolSchema>();
+            foreach (ToolSchema schema in uploaded)
+            {
+                if (schema == null || schema.Function == null) return null;
+                string id = schema.Function.Name;
+                if (string.IsNullOrEmpty(id) || !DataStore.IsValidId(id) || !seen.Add(id)) return null;
+                if (!enabled.Contains(id)) continue; // NPC 配置未启用的工具不下发
+                string schemaJson = schema.Function.Parameters == null
+                    ? null : JsonConvert.SerializeObject(schema.Function.Parameters);
+                if (schemaJson != null && schemaJson.Length > MaxToolSchemaChars) return null;
+                if (!string.IsNullOrEmpty(schema.Function.Description)
+                    && schema.Function.Description.Length > 2000) return null;
+                if (schema.Function.Parameters == null)
+                {
+                    // 与 Core ParseSchema 的空 schema 语义对齐：无参数工具规范化为空 object schema
+                    schema.Function.Parameters = JObject.Parse("{\"type\":\"object\",\"properties\":{}}");
+                }
+                result.Add(schema);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 把客户端工具执行结果按挂起 calls 的顺序配对成 tool 消息。
+        /// 每个 callId 必须恰好出现一次；结果文本截断到与 Core 相同的工具结果上限。
+        /// </summary>
+        private static bool TryBuildResumeToolMessages(PendingToolRound pending, List<ClientToolResult> results,
+            out List<LlmMessage> toolMessages, out string error)
+        {
+            toolMessages = null;
+            var byCallId = new Dictionary<string, ClientToolResult>(StringComparer.Ordinal);
+            foreach (ClientToolResult item in results ?? new List<ClientToolResult>())
+            {
+                if (item == null || string.IsNullOrEmpty(item.CallId))
+                {
+                    error = "toolResults 存在缺少 callId 的条目";
+                    return false;
+                }
+                if (!byCallId.TryAdd(item.CallId, item))
+                {
+                    error = "toolResults 存在重复 callId: " + item.CallId;
+                    return false;
+                }
+            }
+            toolMessages = new List<LlmMessage>();
+            foreach (ToolCallDto call in pending.calls ?? new List<ToolCallDto>())
+            {
+                if (string.IsNullOrEmpty(call?.Id) || !byCallId.TryGetValue(call.Id, out ClientToolResult matched))
+                {
+                    error = "缺少工具执行结果: " + (call?.Id ?? "<unknown>");
+                    return false;
+                }
+                string content = matched.Message;
+                if (string.IsNullOrWhiteSpace(content))
+                    content = matched.Success ? "done" : "tool execution failed";
+                if (content.Length > MaxToolResultContentChars)
+                    content = content.Substring(0, MaxToolResultContentChars) + "…[已截断]";
+                toolMessages.Add(new LlmMessage { Role = "tool", ToolCallId = call.Id, Content = content });
+            }
+            error = null;
+            return true;
+        }
+
+        /// <summary>续跑消息列表 = 挂起态消息（含 assistant(tool_calls)）+ 按序配对的 tool 结果消息。</summary>
+        private static List<LlmMessage> BuildResumeMessages(List<LlmMessage> pendingMessages,
+            List<LlmMessage> toolMessages)
+        {
+            var merged = new List<LlmMessage>(pendingMessages ?? new List<LlmMessage>());
+            merged.AddRange(toolMessages ?? new List<LlmMessage>());
+            return merged;
+        }
+
+        private static string FindLastUserContent(List<LlmMessage> messages)
+        {
+            for (int i = (messages?.Count ?? 0) - 1; i >= 0; i--)
+            {
+                if (messages[i] != null && string.Equals(messages[i].Role, "user", StringComparison.Ordinal))
+                    return messages[i].Content;
+            }
+            return null;
+        }
+
+        /// <summary>深拷贝挂起态，彻底脱离 AgentLoop 的局部对象图后再挂到会话上。</summary>
+        private static T CloneJson<T>(T value)
+        {
+            if (value == null) return default;
+            return JsonConvert.DeserializeObject<T>(JsonConvert.SerializeObject(value));
         }
 
         private static async Task ReplayEventsAsync(HttpContext http, ChatRequestRecord record)
@@ -608,7 +882,8 @@ namespace AIBot.Server
                 string type = payload["type"]?.ToString();
                 bool terminal = string.Equals(type, "reply", StringComparison.Ordinal)
                     || string.Equals(type, "done", StringComparison.Ordinal)
-                    || string.Equals(type, "error", StringComparison.Ordinal);
+                    || string.Equals(type, "error", StringComparison.Ordinal)
+                    || string.Equals(type, "tool_pending", StringComparison.Ordinal);
                 if (terminal)
                 {
                     int bytes = Encoding.UTF8.GetByteCount(line);

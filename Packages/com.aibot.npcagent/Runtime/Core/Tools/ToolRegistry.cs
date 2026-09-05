@@ -30,6 +30,9 @@ namespace AIBot.Core.Tools
         /// <summary>当前宿主已注册的工具数量，供运行时能力提示使用。</summary>
         public int Count { get { return _tools.Count; } }
 
+        /// <summary>已注册的工具 id 快照（game 模式向 Server 上传 schema 用）。</summary>
+        public List<string> Ids { get { return new List<string>(_tools.Keys); } }
+
         public void Register(IAgentTool tool)
         {
             if (tool == null || string.IsNullOrEmpty(tool.Id)) throw new ArgumentException("tool id required");

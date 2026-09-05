@@ -28,6 +28,9 @@ namespace AIBot.Core
         public MemoryPolicy ResolvedMemoryPolicy; // 宿主完成四级配置合并后传入；为空时使用 Core+NPC 兼容解析
         public bool DeferMemorySummarizationToHost; // Server 玩家后台队列为 true；Unity/Session 同步路径为 false
         public bool NotifyReplyBeforeSummary; // Unity UI 可在摘要 LLM 调用前先收到最终台词
+        public bool DeferToolsToHost;            // game 模式：工具调用不执行，挂起后交回宿主（如 Unity 本地工具）
+        public List<ToolSchema> DeferredTools;   // DeferToolsToHost 时作为工具 schema 来源（由客户端上传，Server 已过滤）
+        public List<LlmMessage> ResumeMessages;  // 非空时从该消息列表续跑（挂起-恢复协议第二段）；旧 system 会在入口被重建
     }
 
     public sealed class ToolExecution
@@ -56,6 +59,8 @@ namespace AIBot.Core
         public List<string> MemoryFacts;
         public List<LlmMessage> MemorySummarizedMessages; // 宿主保存失败时用于恢复待摘要批次
         public bool FlaggedInjection;            // 玩家输入命中注入检测（供日志/统计）
+        public List<ToolCallDto> PendingToolCalls; // DeferToolsToHost 下非空：等待宿主执行的工具调用，本轮无 Reply
+        public List<LlmMessage> PendingMessages;   // 与 PendingToolCalls 配套：宿主持久化后用于续跑的完整消息列表
     }
 
     /// <summary>宿主可选实现：在记忆摘要前收到最终回复，避免 UI 等待第二次 LLM 调用。</summary>
@@ -110,6 +115,7 @@ namespace AIBot.Core
             try
             {
                 AgentLoopResult result = await RunInternalAsync(input, sink, cfg, sanitized, ct, started);
+                if (result.PendingToolCalls != null) return result; // 挂起轮：无记忆变化，无需摘要
                 if (input.NotifyReplyBeforeSummary)
                 {
                     var ready = sink as IReplyReadySink;
@@ -130,7 +136,7 @@ namespace AIBot.Core
                 fallback.FallbackReason = ex is LlmFallbackException
                     ? "model_request_failed" : "agent_failed";
                 fallback.FlaggedInjection = sanitized.Flagged;
-                Remember(input, LlmMessage.User(sanitized.Wrapped), SerializeReply(fallback.Reply));
+                Remember(input, ResolveEntryUserMessage(input, sanitized), SerializeReply(fallback.Reply));
                 if (input.NotifyReplyBeforeSummary)
                 {
                     var ready = sink as IReplyReadySink;
@@ -145,18 +151,35 @@ namespace AIBot.Core
         {
             if (sanitized.Flagged) _log.Log(LogLevel.Warning, "Input flagged as possible injection. npc=" + cfg.npcId);
 
-            string systemPrompt = new ContextBuilder().BuildSystemPrompt(
-                cfg, input.World, input.Game, input.MemorySummary, input.MemoryFacts);
+            bool resuming = input.ResumeMessages != null && input.ResumeMessages.Count > 0;
+            List<LlmMessage> messages;
+            LlmMessage userMessage;
+            if (resuming)
+            {
+                // 挂起-恢复第二段：历史、user 与 assistant(tool_calls) 都在挂起态里；
+                // 入口重建 system，让续跑第一轮拿到工具执行后的最新游戏快照。
+                messages = new List<LlmMessage>(input.ResumeMessages);
+                userMessage = ResolveEntryUserMessage(input, sanitized);
+                if (messages.Count > 0 && string.Equals(messages[0].Role, "system", StringComparison.Ordinal))
+                {
+                    messages[0] = LlmMessage.System(new ContextBuilder().BuildSystemPrompt(
+                        cfg, input.World, input.Game, input.MemorySummary, input.MemoryFacts));
+                }
+            }
+            else
+            {
+                string systemPrompt = new ContextBuilder().BuildSystemPrompt(
+                    cfg, input.World, input.Game, input.MemorySummary, input.MemoryFacts);
 
-            var messages = new List<LlmMessage> { LlmMessage.System(systemPrompt) };
-            if (input.Memory != null) messages.AddRange(TrimmedHistory(
-                input.Memory.Messages, systemPrompt, cfg.npcId));
-            LlmMessage userMessage = LlmMessage.User(sanitized.Wrapped);
-            messages.Add(userMessage);
+                messages = new List<LlmMessage> { LlmMessage.System(systemPrompt) };
+                if (input.Memory != null) messages.AddRange(TrimmedHistory(
+                    input.Memory.Messages, systemPrompt, cfg.npcId));
+                userMessage = LlmMessage.User(sanitized.Wrapped);
+                messages.Add(userMessage);
+            }
 
-            List<ToolSchema> schemas = input.Tools != null
-                ? input.Tools.BuildSchemas(cfg.enabledToolIds)
-                : new List<ToolSchema>();
+            List<ToolSchema> schemas = input.DeferredTools
+                ?? (input.Tools != null ? input.Tools.BuildSchemas(cfg.enabledToolIds) : new List<ToolSchema>());
 
             var executions = new List<ToolExecution>();
             var totalUsage = new Usage();
@@ -212,6 +235,18 @@ namespace AIBot.Core
                         Content = collector.Text ?? string.Empty,
                         ToolCalls = collector.ToolCalls
                     });
+                    if (input.DeferToolsToHost)
+                    {
+                        // game 模式：工具由宿主（Unity）执行。挂起当前消息列表，
+                        // 宿主持久化后携带工具结果走 ResumeMessages 续跑；此时不写记忆、不触发摘要。
+                        return new AgentLoopResult
+                        {
+                            PendingToolCalls = collector.ToolCalls,
+                            PendingMessages = messages,
+                            Usage = totalUsage,
+                            ElapsedMs = _clock.TimestampMilliseconds - started
+                        };
+                    }
                     foreach (ToolCallDto call in collector.ToolCalls)
                     {
                         ct.ThrowIfCancellationRequested();
@@ -336,6 +371,21 @@ namespace AIBot.Core
             if (input.Memory == null) return;
             input.Memory.Add(userMessage);
             input.Memory.Add(LlmMessage.Assistant(finalText));
+        }
+
+        /// <summary>入账用的本轮 user 消息：resume 时取挂起态里的原始 user，避免把空消息写进记忆。</summary>
+        private static LlmMessage ResolveEntryUserMessage(AgentRunInput input, SanitizeResult sanitized)
+        {
+            if (input.ResumeMessages != null)
+            {
+                for (int i = input.ResumeMessages.Count - 1; i >= 0; i--)
+                {
+                    LlmMessage candidate = input.ResumeMessages[i];
+                    if (candidate != null && string.Equals(candidate.Role, "user", StringComparison.Ordinal))
+                        return candidate;
+                }
+            }
+            return LlmMessage.User(sanitized.Wrapped);
         }
 
         private AgentLoopResult BuildFallback(AgentConfigDto cfg, long started)

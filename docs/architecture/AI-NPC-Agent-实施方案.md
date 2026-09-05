@@ -214,7 +214,16 @@ public class SimGameState { stage, favorability, extras, items }           // �
 - **短期**：`ShortTermMemory` 窗口（默认12条）+ 淘汰队列；运行中策略改变 `shortTermTurns` 会立即 `Resize`，缩小窗口的消息进入待摘要队列
 - **长期**：`MemorySummarizer` 用 summaryModel（空则主模型，0.3温度、json_object、400 tokens）把淘汰消息滚动压缩为 ≤80 字摘要 + ≤8 条事实；结构化玩家记忆使用独立 JSON 文件和乐观版本
 - **摘要关闭**：`summaryThreshold=0` 时 Session 范围丢弃窗口外消息，玩家范围保留有界的最近短期窗口供手动摘要
-- **模拟工具** `SimulatedToolHost`：`give_item`（背包累积）/ `change_favor` / `advance_stage`，真实读写 `SimGameState` 并随会话持久化。Server 正式请求默认 `toolMode=none`，只有 Vue 调试台或 Unity Profile 显式选择 `simulated` 才注册这些工具；它们不能直接修改正式游戏状态。Local 模式可由游戏端替换为真实 `IAgentTool`，Server 的正式业务工具接入另行设计。
+- **模拟工具** `SimulatedToolHost`：`give_item`（背包累积）/ `change_favor` / `advance_stage`，真实读写 `SimGameState` 并随会话持久化。Server 正式请求默认 `toolMode=none`，只有 Vue 调试台或 Unity Profile 显式选择 `simulated` 才注册这些工具；它们不能直接修改正式游戏状态。
+- **game 模式（两段式工具回传，已实现）**：Unity Profile 勾选 `enableGameTools` 后，`toolMode=game` 的请求携带本地工具 schema（经 `enabledToolIds` 求交）。AgentLoop 在 `DeferToolsToHost` 下遇到模型工具调用时不执行，返回 `PendingToolCalls + PendingMessages`；Server 将挂起轮（消息列表、calls、schemas、roundIndex）随会话持久化，下发 `tool_pending` 终态事件（`roundToken = "<requestId>#<roundIndex>"`），记录状态记为 completed 参与幂等重放。Unity 用 `NpcAgent.Tools` 真实执行（同一 roundToken 只执行一次，防重放双执行），再以新 requestId 携带 `toolResults` 请求续跑；Server 校验令牌/轮数上限（≤8）/结果配对后，从挂起消息列表恢复对话（system 重建以获取最新游戏快照），模型可再次发起工具轮形成链式挂起。挂起轮 10 分钟超时；未消费挂起期间该会话拒绝新消息（409 `tool_round_pending`）。game 模式的 `gameContext`（原始游戏快照）不进请求指纹，作为 prompt 上下文与 SimState 已知字段合并注入。
+
+```text
+① Unity POST {toolMode:"game", tools:[...], message, requestId:r1}
+② Server: AgentLoop 挂起 → 持久化 PendingToolRound → SSE {type:"tool_pending", roundToken:"r1#0", calls:[...]}
+③ Unity: QuestToolHost/本地工具真实执行（onToolExecuted 通知 UI）
+④ Unity POST {requestId:r2, toolMode:"game", roundToken:"r1#0", toolResults:[...]}
+⑤ Server: 校验 → 续跑 AgentLoop → 正常 reply/done（模型可再发起 ②，roundIndex 递增，≤8）
+```
 
 ---
 
@@ -423,7 +432,7 @@ WebGL（JS桥接Backend）/ RAG（lore层换检索）/ 多NPC编排 / MCP对齐 
 
 每事件一行 `data:` JSON（不用 `event:` 字段）。上游（LLM→Server）为 OpenAI 原生 chunk，由 `SseLineParser`+`OpenAiStreamAggregator` 解析聚合。
 
-下游重放仅包含 `reply`、`done`、`error` 三类终态事件；`token`、`reasoning`、`tool_call` 只在实时连接中发送，不进入 Session 的幂等持久化。上游流只有在收到 `[DONE]` 或带 `finish_reason` 的结束 chunk 后才算完整；否则 Server 按模型传输失败处理。
+下游重放包含 `reply`、`done`、`error`、`tool_pending` 四类终态事件；`token`、`reasoning`、`tool_call` 只在实时连接中发送，不进入 Session 的幂等持久化。上游流只有在收到 `[DONE]` 或带 `finish_reason` 的结束 chunk 后才算完整；否则 Server 按模型传输失败处理。
 
 ```
 data: {"type":"token","delta":"你"}
@@ -436,6 +445,7 @@ data: {"type":"reply","say":"（沉默片刻）……","emotion":"neutral","acti
        "usage":{"promptTokens":0,"completionTokens":0},"elapsedMs":60000}
 data: {"type":"done","sessionId":"s-123","requestId":"req-123"}
 data: {"type":"error","code":"internal_error","status":500,"message":"…","retryable":false,"terminal":true,"requestId":"req-123"}
+data: {"type":"tool_pending","requestId":"req-123","roundToken":"req-123#0","calls":[{"callId":"call-9","name":"accept_quest","args":{"questId":"main_001"}}]}
 ```
 
 | type | 触发时机 | 必需字段 |
@@ -445,4 +455,5 @@ data: {"type":"error","code":"internal_error","status":500,"message":"…","retr
 | tool_call | 工具执行完成；`callId` 用于重放去重 | callId, name, args, success, result |
 | reply | 一轮最终结构化结果；兜底回复可附带模型诊断 | say, emotion, action, fallback, usage, elapsedMs, diagnostic? |
 | done / error | 流结束 / 无法返回任何有效回复的终止失败 | sessionId, requestId / code, status, message, retryable, terminal, requestId |
+| tool_pending | game 模式：工具调用挂起，等待客户端本地执行后续跑（不再有 reply/done） | requestId, roundToken, calls[{callId,name,args}] |
 
