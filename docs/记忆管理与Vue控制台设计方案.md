@@ -99,12 +99,11 @@ Server 配置通过 `appsettings.json` 与环境变量维护，不允许 Vue 修
 
 当前实现使用以上配置键。长期记忆保留期清理仍通过管理 API 预演后显式执行；运行日志、聊天日志、审计日志和 JSON Session 文件则由 `LogMaintenanceService` 按配置定期维护清理。
 
-Vue 可以只读展示这些边界，但以下内容不得通过 API 返回或修改：
+Vue 可以只读展示这些边界。敏感字段按以下边界处理：
 
-- API key。
-- 数据根目录和数据库连接字符串。
-- 加密密钥。
-- 管理鉴权 token。
+- API key 不回传明文：任何 API 只返回 `hasConsoleKey`/`hasApiKey` 与末 4 位；全局 LLM Key 是唯一允许通过管理 API 修改的密钥（见 9.4「模型 Key」），写入 `data/system-settings.json` 且不入 Git；单 NPC 的 key 只能写不能读回，留空视为保留原值。
+- 数据根目录和数据库连接字符串：管理 API 只返回存储模式与迁移状态，不返回连接串与路径。
+- 加密密钥、管理鉴权 token：始终不回传、不可修改。
 
 ### 5.2 Game 默认策略
 
@@ -515,6 +514,21 @@ GET  /api/games/{gid}/memory-migrations?npcId=
 POST /api/games/{gid}/sessions/{sid}/migrate-memory?npcId=&playerId=
 ```
 
+#### 模型 Key
+
+```text
+GET /api/admin/settings/llm
+PUT /api/admin/settings/llm
+```
+
+控制台集中管理全局 LLM API Key，对所有未单独配置 Key 的 NPC 生效。存储于 `data/system-settings.json`（已入 `.gitignore`，不入 Git）。
+
+- PUT 设值（8~4096 字符、不允许控制字符），或传 `{ "clear": true }` 清除；key 为空白且未显式 clear 返回 400。
+- GET 只返回 `hasConsoleKey`、`maskedTail`（末 4 位，≤8 位显示 `***`）、`envConfigured`、`priority`，永不回显明文。
+- PUT 成功响应附带 `ok: true` 与完整状态字段，前端直接刷新状态卡片（含 `AIBOT_LLM_KEY` 环境变量是否已配置）。
+- 生效优先级：NPC 单独配置 > 控制台全局 Key > 环境变量 `AIBOT_LLM_KEY` > appsettings `Llm:ApiKey`。服务端运行时（对话、摘要、就绪探针、连接测试、启动诊断）统一经 `ApiKeyResolver` 解析。
+- 需要管理 Bearer 鉴权；正式部署务必设置 `AIBOT_ADMIN_TOKEN`。
+
 #### 审计
 
 ```text
@@ -638,6 +652,16 @@ src/AIBot.Web/
 路由：`/memory-audit`
 
 展示配置和记忆人工修改记录，支持查看修改前后差异。
+
+#### 模型 Key 管理
+
+路由：`/settings/llm`（侧栏「系统设置 · 14 模型 Key 管理」）
+
+- 状态卡片：控制台全局 Key（已配置时显示末 4 位）、环境变量 `AIBOT_LLM_KEY` 是否已配置（部署侧注入，控制台不可修改）。
+- 设置/清除全局 API Key；保存与清除成功后即时刷新状态卡片，无需手动刷新。
+- 展示生效优先级提示与 `AIBOT_ADMIN_TOKEN` 安全提醒。
+
+NPC 配置编辑页（`/debug/npc`）的模型区提供单 NPC 的 API Key 密码框：GET 回显 `hasApiKey`（已配置/未配置标注）但从不回显明文；留空保存视为保留原值；留空测试连接时使用服务端已存 key 或全局 Key。
 
 ### 10.3 自定义字段
 
@@ -903,6 +927,14 @@ memory.audit
 - 配置读取增加 mtime 缓存和深拷贝，配置文件采用原子替换；聊天/运行/审计日志统一按 UTC 写入和查询。
 - `/api/health` 最小化返回，`/api/ready` 隐藏数据库异常原文；RPG 接入改为可移植数据根定位，不再依赖固定 `D:/Code/aibot/data` 路径。
 - 当前验证：xUnit 107/107 通过，Server 构建 0 警告/0 错误；Unity/RPG 仍需在 Unity 编辑器中完成真实编译与联调。
+
+### 控制台集中 Key 管理（✅ 2026-09-06 已完成）
+
+- 新增 `data/system-settings.json`（已入 `.gitignore`）与 `SystemSettingsStore` 原子读写；`GET/PUT /api/admin/settings/llm` 管理全局 LLM API Key，密钥永不回显明文（只返回 `hasConsoleKey`/末 4 位/`envConfigured`），PUT 校验 8~4096 字符、支持 `{ "clear": true }` 清除。
+- 解析链统一收拢到 `ApiKeyResolver`（NPC 配置 > 控制台全局 Key > 环境变量 `AIBOT_LLM_KEY` > appsettings），对话、后台摘要、连接测试、就绪探针与启动诊断全部走同一条链，消除原先分散在 4 处的重复解析。
+- NPC 配置读写增加只读 `hasApiKey` 回显位：GET/管理响应用它标注"已配置/未配置"但清空明文；客户端回传时服务端在落盘前置空该字段，避免脏回写；编辑页留空保存视为保留原 key。
+- Vue「14 模型 Key 管理」页（`/settings/llm`）提供状态卡片（控制台 Key 末 4 位 / 环境变量是否配置）、设置/清除与优先级及 `AIBOT_ADMIN_TOKEN` 安全提示。
+- 回归结果：xUnit 129/129 通过，Server 构建 0 警告/0 错误；含就绪探针计入控制台 Key、GET/PUT 响应不泄露明文与 `hasApiKey` 脱敏的专项用例。
 
 验证命令：
 
