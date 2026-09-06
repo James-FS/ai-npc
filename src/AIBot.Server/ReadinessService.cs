@@ -15,6 +15,17 @@ namespace AIBot.Server
             "chat_logs", "sessions", "memory_summary_jobs"
         };
 
+        /// <summary>测试缝：覆盖「任一 NPC 自带 key」判定，避免就绪探针用例依赖真实 data 目录。为 null 时走真实扫描。</summary>
+        internal static Func<bool> HasAnyNpcKeyOverride = null;
+
+        private static bool HasAnyNpcKey(List<string> npcIds)
+        {
+            if (HasAnyNpcKeyOverride != null) return HasAnyNpcKeyOverride();
+            return npcIds
+                .Select(id => DataStore.LoadNpc("default", id)?.model?.apiKey)
+                .Any(value => !string.IsNullOrWhiteSpace(value));
+        }
+
         public static async Task<(bool Ready, object Body)> CheckAsync(StorageOptions storage,
             MySqlConnectionFactory mysql, MemorySummaryQueue queue, Microsoft.Extensions.Configuration.IConfiguration config,
             CancellationToken ct)
@@ -46,11 +57,11 @@ namespace AIBot.Server
                 }
             }
 
-            string key = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY") ?? config["Llm:ApiKey"];
-            bool hasLlmKey = !string.IsNullOrWhiteSpace(key) || DataStore.ListNpcIds("default")
-                .Select(id => DataStore.LoadNpc("default", id)?.model?.apiKey)
-                .Any(value => !string.IsNullOrWhiteSpace(value));
-            int npcCount = DataStore.ListNpcIds("default").Count;
+            // 与控制台「模型 Key 管理」同一条解析链：NPC > 控制台全局 > 环境变量 > appsettings；
+            // 单个 NPC 自带 key 仍按原有语义兜底（不同 NPC 可各自配 key）。
+            List<string> npcIds = DataStore.ListNpcIds("default");
+            bool hasLlmKey = !string.IsNullOrWhiteSpace(ApiKeyResolver.Resolve(null, config)) || HasAnyNpcKey(npcIds);
+            int npcCount = npcIds.Count;
             bool queueReady = queue != null;
             bool ready = storageReady && hasLlmKey && npcCount > 0 && queueReady;
             return (ready, new

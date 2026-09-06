@@ -28,6 +28,7 @@
     <Compile Include="..\AIBot.Server\ChatLogService.cs" Link="Server\ChatLogService.cs" />
     <Compile Include="..\AIBot.Server\ModelErrorContract.cs" Link="Server\ModelErrorContract.cs" />
     <Compile Include="..\AIBot.Server\SystemSettingsStore.cs" Link="Server\SystemSettingsStore.cs" />
+    <Compile Include="..\AIBot.Server\ReadinessService.cs" Link="Server\ReadinessService.cs" />
     <Compile Include="..\AIBot.Server\ApiKeyResolver.cs" Link="Server\ApiKeyResolver.cs" />
     <Compile Include="..\AIBot.Server\AdminEndpoints.cs" Link="Server\AdminEndpoints.cs" />
     <Compile Include="..\AIBot.Server\StartupDiagnostics.cs" Link="Server\StartupDiagnostics.cs" />

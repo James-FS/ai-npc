@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using AIBot.Core.Config;
 using AIBot.Server;
 using Microsoft.Extensions.Configuration;
@@ -160,6 +161,65 @@ namespace AIBot.Tests
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             Assert.NotNull(method);
             return (AgentConfigDto)method.Invoke(null, new object[] { source });
+        }
+
+        // ---- Readiness 探针与解析链一致（控制台全局 key 计入就绪判定）----
+
+        private static async Task<(bool Ready, object Body)> CheckReadiness(string tempRoot, Func<bool> anyNpcKey = null)
+        {
+            ReadinessService.HasAnyNpcKeyOverride = anyNpcKey;
+            try
+            {
+                var config = ConfigWith(null);
+                var repository = new JsonMemoryRepository(() => tempRoot);
+                var queue = new MemorySummaryQueue(new PlayerMemoryService(repository), config,
+                    new MemoryAuditService(() => tempRoot));
+                return await ReadinessService.CheckAsync(new StorageOptions { Provider = "Json" },
+                    mysql: null, queue: queue, config: config, ct: System.Threading.CancellationToken.None);
+            }
+            finally
+            {
+                ReadinessService.HasAnyNpcKeyOverride = null;
+            }
+        }
+
+        [Fact]
+        public async Task Readiness_ConsoleManagedKeyAlone_CountsAsReady()
+        {
+            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
+            SystemSettingsStore.SaveLlmApiKey("sk-console-only-0123456789");
+
+            (bool ready, object body) = await CheckReadiness(_tempDir, anyNpcKey: () => false);
+
+            Assert.True(ready);
+            object checks = body.GetType().GetProperty("checks").GetValue(body);
+            object llm = checks.GetType().GetProperty("llm").GetValue(checks);
+            Assert.True((bool)llm.GetType().GetProperty("ok").GetValue(llm));
+        }
+
+        [Fact]
+        public async Task Readiness_OnlyPerNpcKey_StillCountsAsReady()
+        {
+            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
+            SystemSettingsStore.SaveLlmApiKey(null);
+
+            (bool ready, _) = await CheckReadiness(_tempDir, anyNpcKey: () => true);
+
+            Assert.True(ready);
+        }
+
+        [Fact]
+        public async Task Readiness_NoKeyAnywhere_ReportsNotReady()
+        {
+            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
+            SystemSettingsStore.SaveLlmApiKey(null);
+
+            (bool ready, object body) = await CheckReadiness(_tempDir, anyNpcKey: () => false);
+
+            Assert.False(ready);
+            object checks = body.GetType().GetProperty("checks").GetValue(body);
+            object llm = checks.GetType().GetProperty("llm").GetValue(checks);
+            Assert.False((bool)llm.GetType().GetProperty("ok").GetValue(llm));
         }
     }
 }

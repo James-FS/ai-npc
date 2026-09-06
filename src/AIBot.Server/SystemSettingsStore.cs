@@ -16,7 +16,7 @@ namespace AIBot.Server
         private static readonly object IoLock = new object();
 
         /// <summary>测试注入点：非 null 时直接使用该路径，不再查找 data/ 根目录。</summary>
-        internal static string OverridePath;
+        internal static string OverridePath = null;
 
         private sealed class SystemSettingsDto
         {
