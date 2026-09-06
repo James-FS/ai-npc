@@ -349,13 +349,18 @@ namespace AIBot.Unity
             if (useConnectionProfile)
             {
                 // Server 模式不需要加载完整 NPC 配置；仅构造一个本地运行时占位 DTO。
+                // enabledToolIds 来自 Connection Profile 声明：game 模式上传本地工具 schema 时，
+                // 只上传这里列出的工具（服务端仍会与 NPC 配置求交校验）。
                 _config = new AgentConfigDto
                 {
                     npcId = resolvedNpcId,
                     worldId = resolvedGameId,
                     runtimeMode = "server",
                     serverBaseUrl = connectionProfile.serverBaseUrl,
-                    model = new ModelSettings { timeoutMs = connectionProfile.timeoutMs }
+                    model = new ModelSettings { timeoutMs = connectionProfile.timeoutMs },
+                    enabledToolIds = connectionProfile.enabledToolIds != null
+                        ? new List<string>(connectionProfile.enabledToolIds)
+                        : new List<string>()
                 };
             }
             else

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace AIBot.Unity
@@ -30,6 +31,10 @@ namespace AIBot.Unity
         [Tooltip("game 模式：模型请求工具时，Server 挂起对话并把工具调用回传给 NpcAgent.Tools 本地真实执行。" +
             "要求已注册本地工具，且 NPC 配置的 enabledToolIds 包含对应工具。与 enableSimulatedTools 互斥。")]
         public bool enableGameTools;
+
+        [Tooltip("game 模式声明：本 NPC 本地注册、要上传给 Server 的工具 ID 列表（如 get_quest_status）。" +
+            "Server 仍会与 NPC 配置的 enabledToolIds 求交校验；列表外的工具会被静默过滤。")]
+        public List<string> enabledToolIds = new List<string>();
 
         private void OnValidate()
         {
