@@ -221,5 +221,32 @@ namespace AIBot.Tests
             object llm = checks.GetType().GetProperty("llm").GetValue(checks);
             Assert.False((bool)llm.GetType().GetProperty("ok").GetValue(llm));
         }
+
+        [Fact]
+        public void SettingsLlm_StatusCarriesAllFields_EnvCardDoesNotStaleAfterSave()
+        {
+            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, "env-key-0123456789");
+            SystemSettingsStore.SaveLlmApiKey("sk-new-key-0123456789");
+
+            // 直接反射 GET/PUT 共用的 LlmSettingsStatus：若端点漏掉 envConfigured/priority，
+            // 前端把 PUT 响应赋给状态后，环境变量卡片会误显「未配置」直到手动刷新。
+            var status = (Newtonsoft.Json.Linq.JObject)InvokeLlmStatus(includeOk: true);
+            string json = status.ToString(Newtonsoft.Json.Formatting.None);
+
+            Assert.Contains("\"ok\":true", json);
+            Assert.Contains("\"hasConsoleKey\":true", json);
+            Assert.Contains("\"envConfigured\":true", json);
+            Assert.Contains("\"priority\":\"npc > console > env > appsettings\"", json);
+            Assert.DoesNotContain("sk-new-key-0123456789", json); // 明文永不回显
+            Assert.Contains("…6789", json);                        // 仅尾 4 位
+        }
+
+        private static object InvokeLlmStatus(bool includeOk)
+        {
+            var method = typeof(AdminEndpoints).GetMethod("LlmSettingsStatus",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(method);
+            return method.Invoke(null, new object[] { includeOk });
+        }
     }
 }

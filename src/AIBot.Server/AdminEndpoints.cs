@@ -190,18 +190,7 @@ namespace AIBot.Server
             }));
 
             // ---- 系统设置：全局 LLM Key（控制台集中管理；响应永不回显明文）----
-            app.MapGet("/api/admin/settings/llm", () =>
-            {
-                string key = SystemSettingsStore.LoadLlmApiKey();
-                return JsonNet(new JObject
-                {
-                    ["hasConsoleKey"] = !string.IsNullOrEmpty(key),
-                    ["maskedTail"] = MaskKeyTail(key),
-                    ["envConfigured"] = !string.IsNullOrWhiteSpace(
-                        Environment.GetEnvironmentVariable(ApiKeyResolver.EnvVarName)),
-                    ["priority"] = "npc > console > env > appsettings"
-                });
-            });
+            app.MapGet("/api/admin/settings/llm", () => JsonNet(LlmSettingsStatus(includeOk: false)));
             app.MapPut("/api/admin/settings/llm", (UpdateLlmKeyRequest body, HttpContext http) =>
             {
                 if (body == null || (string.IsNullOrWhiteSpace(body.ApiKey) && !body.Clear))
@@ -220,13 +209,7 @@ namespace AIBot.Server
                     return Results.Problem("系统设置写入失败，请检查 data/ 目录权限");
                 runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "llm_key.update",
                     body.Clear ? "全局 LLM API Key 已清除" : "全局 LLM API Key 已更新（值不落日志）");
-                string saved = SystemSettingsStore.LoadLlmApiKey();
-                return JsonNet(new JObject
-                {
-                    ["ok"] = true,
-                    ["hasConsoleKey"] = !string.IsNullOrEmpty(saved),
-                    ["maskedTail"] = MaskKeyTail(saved)
-                });
+                return JsonNet(LlmSettingsStatus(includeOk: true));
             });
 
             // ---- Game 列表与创建 ----
@@ -1078,6 +1061,25 @@ namespace AIBot.Server
         {
             if (string.IsNullOrEmpty(key)) return null;
             return key.Length <= 8 ? "***" : "…" + key.Substring(key.Length - 4);
+        }
+
+        /// <summary>
+        /// GET/PUT /settings/llm 共用响应。includeOk 供 PUT 附带确认位；
+        /// 字段完整性由 ApiKeyManagementTests 反射钉住，前端 saveKey/clearKey 直接以此刷新状态。
+        /// </summary>
+        private static JObject LlmSettingsStatus(bool includeOk)
+        {
+            string key = SystemSettingsStore.LoadLlmApiKey();
+            JObject status = new JObject
+            {
+                ["hasConsoleKey"] = !string.IsNullOrEmpty(key),
+                ["maskedTail"] = MaskKeyTail(key),
+                ["envConfigured"] = !string.IsNullOrWhiteSpace(
+                    Environment.GetEnvironmentVariable(ApiKeyResolver.EnvVarName)),
+                ["priority"] = "npc > console > env > appsettings"
+            };
+            if (includeOk) status["ok"] = true;
+            return status;
         }
 
         private static MemorySettings RedactMemorySettings(MemorySettings source)
