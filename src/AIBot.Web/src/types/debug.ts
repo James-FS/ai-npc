@@ -28,6 +28,8 @@ export interface DebugAgentConfig {
   memory: Record<string, unknown>
   output: { emotions: string[]; actions: string[] }
   configVersion: number
+  /** Server 管理响应附带：主模型是否已配置 key（明文永不回显）；保存时由 Server 忽略 */
+  hasApiKey?: boolean
 }
 
 export interface DebugWorldConfig {

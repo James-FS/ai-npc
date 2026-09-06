@@ -71,6 +71,8 @@ onMounted(() => { app.loadStorage(); refreshNpcs() })
         <RouterLink to="/debug/sessions"><span>11</span>会话调试</RouterLink>
         <RouterLink to="/debug/logs"><span>12</span>请求日志</RouterLink>
         <RouterLink to="/debug/stats"><span>13</span>用量统计</RouterLink>
+        <div class="nav-divider">系统设置</div>
+        <RouterLink to="/settings/llm"><span>14</span>模型 Key 管理</RouterLink>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot"></span>

@@ -309,8 +309,7 @@ namespace AIBot.Server
             if (cfg == null) return;
             cfg.model = cfg.model ?? new ModelSettings();
             cfg.memory = cfg.memory ?? new MemorySettings();
-            if (string.IsNullOrEmpty(cfg.model.apiKey))
-                cfg.model.apiKey = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY") ?? _configuration["Llm:ApiKey"];
+            cfg.model.apiKey = ApiKeyResolver.Resolve(cfg.model.apiKey, _configuration);
 
             EffectiveMemoryPolicy effective = MemoryPolicyService.Resolve(job.GameId, cfg, null, _configuration);
             MemoryPolicy policy = effective.policy;

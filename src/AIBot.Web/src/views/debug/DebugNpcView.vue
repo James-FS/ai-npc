@@ -73,7 +73,7 @@ async function deleteNpc() {
 async function testConnection() {
   if (!config.value || !npcId.value) return
   testing.value = true
-  try { testResult.value = await debugApi.testConnection(app.gameId, npcId.value, { baseUrl: config.value.model.baseUrl, model: config.value.model.model }); ElMessage.success(testResult.value.ok ? '连接测试成功' : '连接测试完成，请查看诊断') }
+  try { testResult.value = await debugApi.testConnection(app.gameId, npcId.value, { baseUrl: config.value.model.baseUrl, model: config.value.model.model, apiKey: config.value.model.apiKey?.trim() || undefined }); ElMessage.success(testResult.value.ok ? '连接测试成功' : '连接测试完成，请查看诊断') }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '连接测试失败') }
   finally { testing.value = false }
 }
@@ -106,7 +106,7 @@ onMounted(load)
       </div>
       <div class="editor-column">
         <div class="section-title">模型设置</div>
-        <el-form label-position="top"><el-form-item label="Base URL"><el-input v-model="config.model.baseUrl" /></el-form-item><el-form-item label="Model"><el-input v-model="config.model.model" /></el-form-item><el-form-item label="API Key"><el-input model-value="已配置的密钥不会回显；留空表示不修改" disabled /></el-form-item><el-form-item label="Temperature"><el-input-number v-model="config.model.temperature" :min="0" :max="2" :step="0.1" /></el-form-item><el-form-item label="Max Tokens"><el-input-number v-model="config.model.maxTokens" :min="1" :max="10000" /></el-form-item><el-form-item label="Timeout (ms)"><el-input-number v-model="config.model.timeoutMs" :min="1000" :max="120000" /></el-form-item></el-form>
+        <el-form label-position="top"><el-form-item label="Base URL"><el-input v-model="config.model.baseUrl" /></el-form-item><el-form-item label="Model"><el-input v-model="config.model.model" /></el-form-item><el-form-item :label="config.hasApiKey ? 'API Key（已配置）' : 'API Key（未配置）'"><el-input type="password" show-password v-model="config.model.apiKey" :placeholder="config.hasApiKey ? '已配置，不会回显；输入新值可替换，留空保留' : '未配置；留空则使用全局 Key（系统设置）'" /></el-form-item><el-form-item label="Temperature"><el-input-number v-model="config.model.temperature" :min="0" :max="2" :step="0.1" /></el-form-item><el-form-item label="Max Tokens"><el-input-number v-model="config.model.maxTokens" :min="1" :max="10000" /></el-form-item><el-form-item label="Timeout (ms)"><el-input-number v-model="config.model.timeoutMs" :min="1000" :max="120000" /></el-form-item></el-form>
         <el-button :loading="testing" @click="testConnection">⚡ 测试连接</el-button>
         <pre v-if="testResult" class="code-block result-block">{{ JSON.stringify(testResult, null, 2) }}</pre>
       </div>

@@ -27,6 +27,13 @@
     <Compile Include="..\AIBot.Server\ApiErrorContract.cs" Link="Server\ApiErrorContract.cs" />
     <Compile Include="..\AIBot.Server\ChatLogService.cs" Link="Server\ChatLogService.cs" />
     <Compile Include="..\AIBot.Server\ModelErrorContract.cs" Link="Server\ModelErrorContract.cs" />
+    <Compile Include="..\AIBot.Server\SystemSettingsStore.cs" Link="Server\SystemSettingsStore.cs" />
+    <Compile Include="..\AIBot.Server\ApiKeyResolver.cs" Link="Server\ApiKeyResolver.cs" />
+    <Compile Include="..\AIBot.Server\AdminEndpoints.cs" Link="Server\AdminEndpoints.cs" />
+    <Compile Include="..\AIBot.Server\StartupDiagnostics.cs" Link="Server\StartupDiagnostics.cs" />
+    <Compile Include="..\AIBot.Server\ModelDiagnostics.cs" Link="Server\ModelDiagnostics.cs" />
+    <Compile Include="..\AIBot.Server\MySqlMemoryRepository.cs" Link="Server\MySqlMemoryRepository.cs" />
+    <Compile Include="..\AIBot.Server\JsonToMySqlMemoryMigrator.cs" Link="Server\JsonToMySqlMemoryMigrator.cs" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />

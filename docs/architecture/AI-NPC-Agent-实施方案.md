@@ -234,7 +234,8 @@ public class SimGameState { stage, favorability, extras, items }           // �
 | 端点 | 说明 |
 |---|---|
 | `POST /api/games/{gid}/chat/stream` | 对话（SSE；支持 requestId 幂等重放、simState、toolMode 与 override；可由 `AIBOT_CLIENT_TOKEN` 保护；错误统一 `error/code/status/requestId/details`） |
-| `GET/POST/PUT/DELETE …/npcs(/{id})` | NPC CRUD（POST 从模板创建；PUT 空 apiKey 不覆盖已存 key） |
+| `GET/POST/PUT/DELETE …/npcs(/{id})` | NPC CRUD（POST 从模板创建；PUT 空 apiKey 不覆盖已存 key；GET 返回 `hasApiKey` 状态且不回显明文） |
+| `GET/PUT /api/admin/settings/llm` | 控制台全局 LLM Key 管理（PUT 设值/`clear:true` 清除；GET 只返回 `hasConsoleKey`/尾 4 位/环境变量状态，永不回显明文；管理鉴权） |
 | `GET/PUT …/world` | 世界观读写 |
 | `GET/PUT …/memory-policy` | Game 默认记忆策略读写 |
 | `GET/PUT …/npcs/{id}/memory-policy` | NPC 记忆覆盖与最终策略 |
@@ -384,7 +385,7 @@ cd ../AIBot.Server && dotnet build --no-restore -p:UseAppHost=false
 dotnet run     # → 浏览器 http://localhost:5000
 # Vue 控制台回归/部署
 cd ../AIBot.Web && npx vue-tsc -b --force && npm run build
-# key：编辑 data/games/default/npcs/*.json 的 model 段（或管理台编辑页，留空不覆盖）
+# key：优先级 NPC 配置 > 控制台全局 Key（「14 模型 Key 管理」页，存 data/system-settings.json）> 环境变量 AIBOT_LLM_KEY > appsettings；NPC 配置文件与管理台编辑页均可按 NPC 设置（留空不覆盖）
 # Unity：manifest.json 加 "com.aibot.npcagent": "file:D:/Code/aibot/Packages/com.aibot.npcagent"
 ```
 

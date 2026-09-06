@@ -20,6 +20,13 @@ namespace AIBot.Core.Config
         public OutputSettings output = new OutputSettings();
         public int configVersion = 1;
 
+        /// <summary>
+        /// 仅 Server 管理响应填充：主模型是否已配置 key（明文永不回显）。
+        /// 客户端回存时 Server 会忽略此字段；Unity 本地模式读取配置文件时保持 null。
+        /// </summary>
+        [JsonProperty("hasApiKey", NullValueHandling = NullValueHandling.Ignore)]
+        public bool? hasApiKey;
+
         // Unity 运行时传输选择。Server 端读取 NPC 配置时会忽略这些客户端运行时字段。
         // local：Unity 直连 OpenAI 兼容模型；server：Unity 调用 AIBot.Server。
         public string runtimeMode = "local";

@@ -78,6 +78,12 @@ namespace AIBot.Server
             public int Limit { get; set; } = 200;
         }
 
+        public class UpdateLlmKeyRequest
+        {
+            public string ApiKey { get; set; }
+            public bool Clear { get; set; }
+        }
+
         public static void MapAIBotAdmin(this WebApplication app)
         {
             // JSON→MySQL 记忆迁移互斥锁：避免控制台按钮与启动参数并发执行
@@ -183,6 +189,46 @@ namespace AIBot.Server
                 clearsRelatedSessions = true
             }));
 
+            // ---- 系统设置：全局 LLM Key（控制台集中管理；响应永不回显明文）----
+            app.MapGet("/api/admin/settings/llm", () =>
+            {
+                string key = SystemSettingsStore.LoadLlmApiKey();
+                return JsonNet(new JObject
+                {
+                    ["hasConsoleKey"] = !string.IsNullOrEmpty(key),
+                    ["maskedTail"] = MaskKeyTail(key),
+                    ["envConfigured"] = !string.IsNullOrWhiteSpace(
+                        Environment.GetEnvironmentVariable(ApiKeyResolver.EnvVarName)),
+                    ["priority"] = "npc > console > env > appsettings"
+                });
+            });
+            app.MapPut("/api/admin/settings/llm", (UpdateLlmKeyRequest body, HttpContext http) =>
+            {
+                if (body == null || (string.IsNullOrWhiteSpace(body.ApiKey) && !body.Clear))
+                    return Results.BadRequest(new { error = "apiKey 必填；如需清除请显式传 clear=true" });
+                if (SystemSettingsStore.SettingsPath == null)
+                    return Results.Problem("未找到 data/ 根目录（可设置 AIBOT_DATA_ROOT），无法持久化系统设置");
+                string newKey = body.Clear ? null : body.ApiKey.Trim();
+                if (newKey != null)
+                {
+                    if (newKey.Length < 8 || newKey.Length > 4096)
+                        return Results.UnprocessableEntity(new { error = "apiKey 长度需在 8~4096 之间" });
+                    if (newKey.Any(char.IsControl))
+                        return Results.UnprocessableEntity(new { error = "apiKey 含非法控制字符" });
+                }
+                if (!SystemSettingsStore.SaveLlmApiKey(newKey))
+                    return Results.Problem("系统设置写入失败，请检查 data/ 目录权限");
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "llm_key.update",
+                    body.Clear ? "全局 LLM API Key 已清除" : "全局 LLM API Key 已更新（值不落日志）");
+                string saved = SystemSettingsStore.LoadLlmApiKey();
+                return JsonNet(new JObject
+                {
+                    ["ok"] = true,
+                    ["hasConsoleKey"] = !string.IsNullOrEmpty(saved),
+                    ["maskedTail"] = MaskKeyTail(saved)
+                });
+            });
+
             // ---- Game 列表与创建 ----
             app.MapGet("/api/games", () => JsonNet(new { games = DataStore.ListGameIds() }));            app.MapPost("/api/games", (CreateGameRequest body) =>
             {
@@ -265,6 +311,7 @@ namespace AIBot.Server
                 }
                 if (!DataStore.IsValidId(dto.npcId)) return Results.BadRequest("npcId 非法（字母数字下划线短横线，1~64位）");
                 if (DataStore.LoadNpc(gid, dto.npcId) != null) return Results.Conflict("npcId 已存在: " + dto.npcId);
+                dto.hasApiKey = null;   // 回显字段，客户端回传时不得写入配置文件
                 return DataStore.SaveNpc(gid, dto)
                     ? Results.Json(RedactSecrets(dto))
                     : Results.Problem("保存失败");
@@ -293,6 +340,7 @@ namespace AIBot.Server
                 {
                     body.memory.summaryModel.apiKey = existing.memory?.summaryModel?.apiKey;
                 }
+                body.hasApiKey = null;   // 回显字段，客户端回传时不得写入配置文件
                 MemorySettings beforeMemory = RedactMemorySettings(existing.memory);
                 if (!DataStore.SaveNpc(gid, body)) return Results.Problem("保存失败");
                 MemorySettings afterMemory = RedactMemorySettings(body.memory);
@@ -850,9 +898,7 @@ namespace AIBot.Server
                     baseUrl = string.IsNullOrEmpty(body?.BaseUrl) ? cfg.model.baseUrl : body.BaseUrl,
                     model = string.IsNullOrEmpty(body?.Model) ? cfg.model.model : body.Model,
                     apiKey = string.IsNullOrEmpty(body?.ApiKey)
-                        ? (cfg.model.apiKey
-                           ?? Environment.GetEnvironmentVariable("AIBOT_LLM_KEY")
-                           ?? app.Configuration["Llm:ApiKey"])
+                        ? ApiKeyResolver.Resolve(cfg.model.apiKey, app.Configuration)
                         : body.ApiKey,
                     temperature = 0f,
                     maxTokens = 8,
@@ -1018,9 +1064,20 @@ namespace AIBot.Server
         {
             AgentConfigDto clone = JsonConvert.DeserializeObject<AgentConfigDto>(
                 JsonConvert.SerializeObject(source));
-            if (clone?.model != null) clone.model.apiKey = string.Empty;
+            if (clone?.model != null)
+            {
+                clone.hasApiKey = !string.IsNullOrEmpty(source?.model?.apiKey);
+                clone.model.apiKey = string.Empty;
+            }
             if (clone?.memory?.summaryModel != null) clone.memory.summaryModel.apiKey = string.Empty;
             return clone;
+        }
+
+        /// <summary>只暴露末 4 位供人工核对是哪把 key；短 key 一律 ***。</summary>
+        private static string MaskKeyTail(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+            return key.Length <= 8 ? "***" : "…" + key.Substring(key.Length - 4);
         }
 
         private static MemorySettings RedactMemorySettings(MemorySettings source)

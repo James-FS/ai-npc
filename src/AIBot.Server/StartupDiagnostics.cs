@@ -58,15 +58,15 @@ namespace AIBot.Server
                 + string.Join(",", limits.supportedSummaryTriggers)
                 + "; scopes=" + string.Join(",", limits.supportedMemoryScopes));
 
-            string configuredKey = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY")
-                ?? configuration["Llm:ApiKey"];
+            string configuredKey = ApiKeyResolver.Resolve(null, configuration);
             if (string.IsNullOrWhiteSpace(configuredKey))
             {
-                Console.WriteLine("[startup][warning] 未配置全局 LLM API Key；如果 NPC 配置未提供独立 key，对话和摘要请求会失败");
+                Console.WriteLine("[startup][warning] 未配置全局 LLM API Key（控制台设置 / AIBOT_LLM_KEY / appsettings 均为空）；"
+                    + "如果 NPC 配置未提供独立 key，对话和摘要请求会失败");
             }
             else
             {
-                Console.WriteLine("[startup] global LLM API key: configured");
+                Console.WriteLine("[startup] global LLM API key: configured (source=" + ApiKeyResolver.SourceOf(null, configuration) + ")");
             }
 
             List<string> npcIds = DataStore.ListNpcIds("default");

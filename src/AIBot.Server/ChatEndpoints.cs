@@ -182,12 +182,8 @@ namespace AIBot.Server
                 cfg.model = cfg.model ?? new ModelSettings();
                 cfg.memory = cfg.memory ?? new MemorySettings();
 
-                // key 优先级：NPC 配置 > 环境变量 AIBOT_LLM_KEY > appsettings
-                if (string.IsNullOrEmpty(cfg.model.apiKey))
-                {
-                    cfg.model.apiKey = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY")
-                        ?? config["Llm:ApiKey"];
-                }
+                // key 优先级统一走 ApiKeyResolver：NPC 配置 > 控制台全局设置 > 环境变量 > appsettings
+                cfg.model.apiKey = ApiKeyResolver.Resolve(cfg.model.apiKey, config);
                 if (body.Override != null)
                 {
                     if (!string.IsNullOrEmpty(body.Override.Model)) cfg.model.model = body.Override.Model;
