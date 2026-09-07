@@ -18,7 +18,10 @@ function authHeaders() {
 
 export const debugApi = {
   npc: (gameId: string, npcId: string) => request<DebugAgentConfig>(gamePath(gameId, `/npcs/${enc(npcId)}`)),
-  saveNpc: (gameId: string, npcId: string, body: DebugAgentConfig) => request<{ ok: boolean }>(gamePath(gameId, `/npcs/${enc(npcId)}`), { method: 'PUT', headers: authHeaders(), body: JSON.stringify(body) }),
+  /** 保存完整 NPC 配置。apiKey 留空由 Server 视为"不改"；如需清除独立 Key 用 clearNpcApiKey。 */
+  saveNpc: (gameId: string, npcId: string, body: DebugAgentConfig) => request<{ ok: boolean }>(gamePath(gameId, `/npcs/${enc(npcId)}`), { method: 'PUT', headers: authHeaders(), body: JSON.stringify({ npc: body }) }),
+  /** 清除该 NPC 的独立 API Key（主模型 + 摘要模型），回退到控制台全局 / 环境变量 / appsettings。 */
+  clearNpcApiKey: (gameId: string, npcId: string) => request<{ ok: boolean }>(gamePath(gameId, `/npcs/${enc(npcId)}`), { method: 'PUT', headers: authHeaders(), body: JSON.stringify({ npc: { npcId, configVersion: 1 }, clearApiKey: true }) }),
   createNpc: (gameId: string, npcId: string) => request<DebugAgentConfig>(gamePath(gameId, '/npcs'), { method: 'POST', headers: authHeaders(), body: JSON.stringify({ npcId, fromTemplate: true }) }),
   deleteNpc: (gameId: string, npcId: string) => request<{ ok: boolean }>(gamePath(gameId, `/npcs/${enc(npcId)}`), { method: 'DELETE', headers: authHeaders() }),
   world: (gameId: string) => request<DebugWorldConfig>(gamePath(gameId, '/world')),

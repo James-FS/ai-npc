@@ -33,6 +33,14 @@ namespace AIBot.Server
             public string GameId { get; set; }
         }
 
+        /// <summary>PUT /npcs/{id} 请求体。Npc 为完整配置；ClearApiKey 与"留空不改"语义区分，
+        /// 置 true 时清除该 NPC 独立 key（model.apiKey 与 memory.summaryModel.apiKey 回退到全局 key）。</summary>
+        public class SaveNpcRequest
+        {
+            public AgentConfigDto Npc { get; set; }
+            public bool ClearApiKey { get; set; }
+        }
+
         public class PreviewRequest
         {
             public SimGameState SimState { get; set; }
@@ -307,22 +315,18 @@ namespace AIBot.Server
                 return dto != null ? Results.Json(RedactSecrets(dto)) : Results.NotFound("npc not found: " + id);
             });
 
-            app.MapPut("/api/games/{gid}/npcs/{id}", (string gid, string id, AgentConfigDto body, HttpContext http) =>
+            app.MapPut("/api/games/{gid}/npcs/{id}", (string gid, string id, SaveNpcRequest req, HttpContext http) =>
             {
                 if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(id)) return Results.BadRequest("非法 ID");
-                if (body == null || body.npcId != id) return Results.BadRequest("body.npcId 必须与路径一致");
+                AgentConfigDto body = req?.Npc;
+                if (body == null || body.npcId != id) return Results.BadRequest("body.npcId 必须与路径一致（或缺少 npc 包裹对象）");
                 AgentConfigDto existing = DataStore.LoadNpc(gid, id);
                 if (existing == null) return Results.NotFound("npc not found: " + id);
-                if (string.IsNullOrEmpty(body.model?.apiKey) && body.model != null)
-                {
-                    // 编辑器清空 apiKey 视为"不改"，避免误把已配置的 key 抹掉
-                    body.model.apiKey = existing.model?.apiKey;
-                }
-                if (body.memory?.summaryModel != null
-                    && string.IsNullOrEmpty(body.memory.summaryModel.apiKey))
-                {
-                    body.memory.summaryModel.apiKey = existing.memory?.summaryModel?.apiKey;
-                }
+                bool clearKey = req.ClearApiKey;
+                body = ResolveNpcSaveBody(body, existing, clearKey);
+                if (clearKey)
+                    runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "npc", "npc_key.clear",
+                        "已清除 NPC 独立 API Key（值不落日志），回退到全局 Key: " + id);
                 body.hasApiKey = null;   // 回显字段，客户端回传时不得写入配置文件
                 MemorySettings beforeMemory = RedactMemorySettings(existing.memory);
                 if (!DataStore.SaveNpc(gid, body)) return Results.Problem("保存失败");
@@ -1080,6 +1084,27 @@ namespace AIBot.Server
             };
             if (includeOk) status["ok"] = true;
             return status;
+        }
+
+        /// <summary>
+        /// 决定 PUT /npcs/{id} 落盘用的配置体，处理"留空不改 / 显式清除"两种 apiKey 语义。
+        /// clearKey=true 时以已存配置为基准原地清除独立 key（主模型 + 摘要模型），最小负载即可，不误抹其他字段。
+        /// </summary>
+        internal static AgentConfigDto ResolveNpcSaveBody(AgentConfigDto submitted, AgentConfigDto existing, bool clearKey)
+        {
+            if (clearKey)
+            {
+                if (existing.model != null) existing.model.apiKey = null;
+                if (existing.memory?.summaryModel != null) existing.memory.summaryModel.apiKey = null;
+                return existing;
+            }
+            // 编辑器清空 apiKey 视为"不改"，避免误把已配置的 key 抹掉
+            if (submitted.model != null && string.IsNullOrEmpty(submitted.model.apiKey))
+                submitted.model.apiKey = existing.model?.apiKey;
+            if (submitted.memory?.summaryModel != null
+                && string.IsNullOrEmpty(submitted.memory.summaryModel.apiKey))
+                submitted.memory.summaryModel.apiKey = existing.memory?.summaryModel?.apiKey;
+            return submitted;
         }
 
         private static MemorySettings RedactMemorySettings(MemorySettings source)

@@ -155,6 +155,68 @@ namespace AIBot.Tests
             Assert.Contains("\"hasApiKey\":true", json);
         }
 
+        [Fact]
+        public void NpcSave_EmptyKeyInSubmission_PreservesExistingKey()
+        {
+            var existing = new AgentConfigDto { npcId = "tester", persona = "旧人设" };
+            existing.model.apiKey = "sk-existing-0001";
+            existing.memory.summaryModel = new ModelSettings { apiKey = "sk-existing-summary" };
+
+            // 编辑器把输入框留空再保存：应视为"不改"，不得抹掉已配置 key
+            var submitted = new AgentConfigDto { npcId = "tester", persona = "新人设" };
+            submitted.model.apiKey = "";
+            submitted.memory.summaryModel = new ModelSettings { apiKey = null };
+
+            AgentConfigDto toSave = InvokeResolveNpcSaveBody(submitted, existing, clearKey: false);
+
+            Assert.Equal("新人设", toSave.persona);
+            Assert.Equal("sk-existing-0001", toSave.model.apiKey);
+            Assert.Equal("sk-existing-summary", toSave.memory.summaryModel.apiKey);
+        }
+
+        [Fact]
+        public void NpcSave_NewKeySubmission_ReplacesExistingKey()
+        {
+            var existing = new AgentConfigDto { npcId = "tester" };
+            existing.model.apiKey = "sk-existing-0001";
+
+            var submitted = new AgentConfigDto { npcId = "tester" };
+            submitted.model.apiKey = "sk-new-key-0001";
+
+            AgentConfigDto toSave = InvokeResolveNpcSaveBody(submitted, existing, clearKey: false);
+
+            Assert.Equal("sk-new-key-0001", toSave.model.apiKey);
+        }
+
+        [Fact]
+        public void NpcSave_ClearApiKey_RemovesKeys_KeepsAllOtherFields()
+        {
+            var existing = new AgentConfigDto { npcId = "tester", displayName = "林晓", persona = "旧人设" };
+            existing.model.apiKey = "sk-secret-0001";
+            existing.model.baseUrl = "https://custom.example.com";
+            existing.memory.summaryModel = new ModelSettings { apiKey = "sk-summary-0002" };
+
+            // clear 请求只带最小负载（npcId），未提及 persona/displayName 等字段
+            var minimal = new AgentConfigDto { npcId = "tester" };
+
+            AgentConfigDto toSave = InvokeResolveNpcSaveBody(minimal, existing, clearKey: true);
+
+            Assert.Null(toSave.model.apiKey);
+            Assert.Null(toSave.memory.summaryModel.apiKey);
+            Assert.Equal("林晓", toSave.displayName);          // 非 key 字段不被抹掉
+            Assert.Equal("旧人设", toSave.persona);
+            Assert.Equal("https://custom.example.com", toSave.model.baseUrl);
+        }
+
+        private static AgentConfigDto InvokeResolveNpcSaveBody(AgentConfigDto submitted,
+            AgentConfigDto existing, bool clearKey)
+        {
+            var method = typeof(AdminEndpoints).GetMethod("ResolveNpcSaveBody",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(method);
+            return (AgentConfigDto)method.Invoke(null, new object[] { submitted, existing, clearKey });
+        }
+
         private static AgentConfigDto InvokeRedact(AgentConfigDto source)
         {
             var method = typeof(AdminEndpoints).GetMethod("RedactSecrets",

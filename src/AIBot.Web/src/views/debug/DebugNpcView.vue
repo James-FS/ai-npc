@@ -10,6 +10,7 @@ const app = useAppStore()
 const config = ref<DebugAgentConfig | null>(null)
 const loading = ref(false)
 const saving = ref(false)
+const clearingKey = ref(false)
 const testResult = ref<Record<string, unknown> | null>(null)
 const testing = ref(false)
 const npcId = computed(() => app.currentNpcId)
@@ -70,6 +71,17 @@ async function deleteNpc() {
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : 'NPC 删除失败') }
 }
 
+async function clearApiKey() {
+  if (!config.value || !npcId.value) return
+  try {
+    await ElMessageBox.confirm('确认清除该 NPC 的独立 API Key？清除后主模型与摘要模型将回退使用系统设置的全局 Key（或环境变量）。', '清除独立 Key', { type: 'warning', confirmButtonText: '确认清除' })
+  } catch { return }
+  clearingKey.value = true
+  try { await debugApi.clearNpcApiKey(app.gameId, npcId.value); ElMessage.success('已清除独立 Key，回退到全局配置'); await load() }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '清除独立 Key 失败') }
+  finally { clearingKey.value = false }
+}
+
 async function testConnection() {
   if (!config.value || !npcId.value) return
   testing.value = true
@@ -106,7 +118,7 @@ onMounted(load)
       </div>
       <div class="editor-column">
         <div class="section-title">模型设置</div>
-        <el-form label-position="top"><el-form-item label="Base URL"><el-input v-model="config.model.baseUrl" /></el-form-item><el-form-item label="Model"><el-input v-model="config.model.model" /></el-form-item><el-form-item :label="config.hasApiKey ? 'API Key（已配置）' : 'API Key（未配置）'"><el-input type="password" show-password v-model="config.model.apiKey" :placeholder="config.hasApiKey ? '已配置，不会回显；输入新值可替换，留空保留' : '未配置；留空则使用全局 Key（系统设置）'" /></el-form-item><el-form-item label="Temperature"><el-input-number v-model="config.model.temperature" :min="0" :max="2" :step="0.1" /></el-form-item><el-form-item label="Max Tokens"><el-input-number v-model="config.model.maxTokens" :min="1" :max="10000" /></el-form-item><el-form-item label="Timeout (ms)"><el-input-number v-model="config.model.timeoutMs" :min="1000" :max="120000" /></el-form-item></el-form>
+        <el-form label-position="top"><el-form-item label="Base URL"><el-input v-model="config.model.baseUrl" /></el-form-item><el-form-item label="Model"><el-input v-model="config.model.model" /></el-form-item><el-form-item :label="config.hasApiKey ? 'API Key（已配置）' : 'API Key（未配置）'"><el-input type="password" show-password v-model="config.model.apiKey" :placeholder="config.hasApiKey ? '已配置，不会回显；输入新值可替换，留空保留' : '未配置；留空则使用全局 Key（系统设置）'" /><div v-if="config.hasApiKey" class="clear-key-hint">已配置独立 Key，输入新值可替换。<el-button link type="danger" :loading="clearingKey" @click="clearApiKey">清除独立 Key</el-button></div></el-form-item><el-form-item label="Temperature"><el-input-number v-model="config.model.temperature" :min="0" :max="2" :step="0.1" /></el-form-item><el-form-item label="Max Tokens"><el-input-number v-model="config.model.maxTokens" :min="1" :max="10000" /></el-form-item><el-form-item label="Timeout (ms)"><el-input-number v-model="config.model.timeoutMs" :min="1000" :max="120000" /></el-form-item></el-form>
         <el-button :loading="testing" @click="testConnection">⚡ 测试连接</el-button>
         <pre v-if="testResult" class="code-block result-block">{{ JSON.stringify(testResult, null, 2) }}</pre>
       </div>
@@ -131,6 +143,7 @@ onMounted(load)
 .tag-section { display: flex; align-items: center; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
 .tag-section b { width: 40px; color: #65738a; font-size: 13px; }
 .result-block { margin-top: 14px; max-height: 220px; }
+.clear-key-hint { margin-top: 6px; font-size: 12px; color: #909399; line-height: 1.6; }
 @media (max-width: 1100px) { .editor-grid { grid-template-columns: 1fr; } .lore-head { grid-template-columns: 1fr 100px auto auto auto; } }
 </style>
 
