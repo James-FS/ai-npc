@@ -625,12 +625,12 @@ src/AIBot.Web/
 
 #### NPC 记忆覆盖
 
-整合进 `/npc/:id/edit` 的“记忆”Tab：
+路由：`/npc/{npcId}/memory`（独立页面，非 `/npc/:id/edit` 的 Tab；从侧栏「记忆治理 · 03 NPC 覆盖」进入，NPC 列表即路由参数）
 
-- 每个字段提供“继承/覆盖”开关。
-- 显示继承来源。
-- 实时调用 `preview-effective`。
-- 显示修改对现有会话的影响。
+- 顶部开关「继承 Game 默认策略」：开（默认）表示未覆盖字段继承 Game 策略后解析；关表示从 Core 默认值开始。
+- 每个字段提供覆盖表单，按类别（短期轮数、长期记忆、事实、自定义字段、摘要模型等）分组。
+- 修改后约 400ms 自动调用 `preview-effective`，右侧展示每个字段的最终值与来源（`game` 继承 / `npc` 显式覆盖 / `server-limit:*` 被安全边界修正）。
+- 保存前提示影响范围（如 `memoryScope=player_npc` 时提醒调用端提供稳定 playerId）。
 
 #### 记忆检查器
 
@@ -647,6 +647,15 @@ src/AIBot.Web/
 - 手动新增、修改、删除、固定事实。
 - 立即摘要、清空记忆、导出 JSON。
 
+#### 旧记忆迁移
+
+路由：`/memory-migrations`
+
+展示未绑定 playerId 的旧 Session（含摘要或字符串事实）候选列表，支持按 NPC 筛选：
+
+- 候选行显示旧 Session ID、是否有摘要、旧事实数、最后活跃时间。
+- 填写目标 Player ID 后执行显式迁移（不猜测玩家身份）；迁移幂等并写入审计，成功后旧 Session 仅保留短期消息与迁移标记。
+
 #### 审计记录
 
 路由：`/memory-audit`
@@ -661,7 +670,7 @@ src/AIBot.Web/
 - 设置/清除全局 API Key；保存与清除成功后即时刷新状态卡片，无需手动刷新。
 - 展示生效优先级提示与 `AIBOT_ADMIN_TOKEN` 安全提醒。
 
-NPC 配置编辑页（`/debug/npc`）的模型区提供单 NPC 的 API Key 密码框：GET 回显 `hasApiKey`（已配置/未配置标注）但从不回显明文；留空保存视为保留原值；留空测试连接时使用服务端已存 key 或全局 Key。
+NPC 配置编辑页（`/debug/npc`）的模型区提供单 NPC 的 API Key 密码框：GET 回显 `hasApiKey`（已配置/未配置标注）但从不回显明文；留空保存视为保留原值；留空测试连接时使用服务端已存 key 或全局 Key。已配置独立 Key 的 NPC 显示「清除独立 Key」按钮：PUT `/api/games/{gid}/npcs/{npcId}` 请求体为 `{ "npc": <完整配置>, "clearApiKey": true }`（清除时 npc 只需带最小负载 `npcId`），Server 以磁盘上的已存配置为基准清除主模型与摘要模型的独立 Key（回退到控制台全局 Key/环境变量），不覆盖其他字段；该动作写入运行时日志（值不落日志）。
 
 ### 10.3 自定义字段
 
