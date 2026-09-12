@@ -383,7 +383,7 @@ namespace AIBot.Tests
             Directory.CreateDirectory(root);
             try
             {
-                var audit = new MemoryAuditService(() => root);
+                var audit = new MemoryAuditService(new JsonMemoryAuditStore(() => root));
                 Assert.True(audit.Record(new MemoryAuditEntry
                 {
                     gameId = "game",
@@ -410,7 +410,7 @@ namespace AIBot.Tests
         [Fact]
         public void RequiredAudit_ThrowsWhenDataRootIsUnavailable()
         {
-            var audit = new MemoryAuditService(() => null);
+            var audit = new MemoryAuditService(new JsonMemoryAuditStore(() => null));
 
             MemoryAuditWriteException error = Assert.Throws<MemoryAuditWriteException>(() =>
                 audit.RecordRequired(new MemoryAuditEntry

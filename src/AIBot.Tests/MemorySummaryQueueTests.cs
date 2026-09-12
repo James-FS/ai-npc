@@ -80,7 +80,7 @@ namespace AIBot.Tests
                 .Build();
             var repository = new JsonMemoryRepository(() => root);
             return new MemorySummaryQueue(new PlayerMemoryService(repository), config,
-                new MemoryAuditService(() => root));
+                new MemoryAuditService(new JsonMemoryAuditStore(() => root)));
         }
 
         private static string TestRoot()

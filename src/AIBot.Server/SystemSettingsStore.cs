@@ -6,7 +6,7 @@ namespace AIBot.Server
 {
     /// <summary>
     /// 控制台集中管理的系统级设置（data/system-settings.json，已加入 .gitignore）。
-    /// 目前只有全局 LLM API Key。部署级密钥始终留在部署侧文件，不进 MySQL 快照/迁移链路，
+    /// 目前只有全局 LLM API Key。部署级密钥始终留在部署侧文件，不进数据库快照/迁移链路，
     /// 与环境变量 AIBOT_LLM_KEY 属同一信任层级。
     /// </summary>
     public static class SystemSettingsStore

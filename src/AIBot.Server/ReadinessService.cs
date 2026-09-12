@@ -3,18 +3,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Dapper;
+using MongoDB.Driver;
 
 namespace AIBot.Server
 {
     public static class ReadinessService
     {
-        private static readonly string[] RequiredTables =
-        {
-            "schema_migrations", "player_memories", "memory_facts", "memory_audits",
-            "chat_logs", "sessions", "memory_summary_jobs"
-        };
-
         /// <summary>测试缝：覆盖「任一 NPC 自带 key」判定，避免就绪探针用例依赖真实 data 目录。为 null 时走真实扫描。</summary>
         internal static Func<bool> HasAnyNpcKeyOverride = null;
 
@@ -27,27 +21,26 @@ namespace AIBot.Server
         }
 
         public static async Task<(bool Ready, object Body)> CheckAsync(StorageOptions storage,
-            MySqlConnectionFactory mysql, MemorySummaryQueue queue, Microsoft.Extensions.Configuration.IConfiguration config,
-            CancellationToken ct)
+            MemorySummaryQueue queue, Microsoft.Extensions.Configuration.IConfiguration config,
+            CancellationToken ct, MongoConnectionFactory mongo = null)
         {
             bool storageReady = true;
             string storageError = null;
             var missing = new List<string>();
-            if (storage.IsMySql)
+            if (storage.IsMongo)
             {
                 try
                 {
-                    using (var connection = new MySqlConnector.MySqlConnection(mysql.ConnectionString))
+                    IMongoDatabase db = mongo.Database;
+                    await db.RunCommandAsync<MongoDB.Bson.BsonDocument>(
+                        new MongoDB.Bson.BsonDocument("ping", 1), cancellationToken: ct);
+                    var set = new HashSet<string>(StringComparer.Ordinal);
+                    using (var cursor = await db.ListCollectionNamesAsync(cancellationToken: ct))
                     {
-                        await connection.OpenAsync(ct);
-                        await connection.ExecuteScalarAsync(new CommandDefinition("SELECT 1", cancellationToken: ct));
-                        IEnumerable<string> tables = await connection.QueryAsync<string>(new CommandDefinition(
-                            "SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema=DATABASE()",
-                            cancellationToken: ct));
-                        var set = new HashSet<string>(tables, StringComparer.OrdinalIgnoreCase);
-                        missing.AddRange(RequiredTables.Where(x => !set.Contains(x)));
-                        storageReady = missing.Count == 0;
+                        foreach (string name in await cursor.ToListAsync(ct)) set.Add(name);
                     }
+                    missing.AddRange(MongoInitializer.RequiredCollections.Where(x => !set.Contains(x)));
+                    storageReady = missing.Count == 0;
                 }
                 catch (Exception)
                 {

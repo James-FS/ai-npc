@@ -12,7 +12,7 @@ const gamePath = (gameId: string, path: string) => `/api/games/${enc(gameId)}${p
 export const memoryApi = {
   limits: () => request<MemoryPolicyLimits>('/api/admin/memory-limits'),
   storage: () => request<StorageInfo>('/api/admin/storage'),
-  migrateJsonToMysql: () => request<JsonMigrationResult>('/api/admin/storage/migrate-json', { method: 'POST' }),
+  migrateJsonToMongo: () => request<JsonMigrationResult>('/api/admin/storage/migrate-json', { method: 'POST' }),
   games: () => request<{ games: string[] }>('/api/games'),
   createGame: (gameId: string) => request<{ gameId: string }>('/api/games', { method: 'POST', body: JSON.stringify({ gameId }) }),
   queue: () => request<MemorySummaryQueueState>('/api/admin/memory-summary-queue'),

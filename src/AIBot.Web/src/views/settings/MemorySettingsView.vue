@@ -31,15 +31,15 @@ async function retryFailed() {
 async function migrateJson() {
   try {
     await ElMessageBox.confirm(
-      '将把 JSON 存储中的玩家长期记忆（滚动摘要 + 结构化事实）迁移到 MySQL；目标已有记录会跳过（幂等，可重复执行）。迁移期间建议避免产生新的记忆写入。',
-      'JSON → MySQL 记忆迁移',
+      '将把 JSON 存储中的玩家长期记忆（滚动摘要 + 结构化事实）迁移到 MongoDB；目标已有记录会跳过（幂等，可重复执行）。迁移期间建议避免产生新的记忆写入。',
+      'JSON → Mongo 记忆迁移',
       { confirmButtonText: '开始迁移', cancelButtonText: '取消' },
     )
   } catch { return }
   try {
-    const result = await memoryApi.migrateJsonToMysql()
+    const result = await memoryApi.migrateJsonToMongo()
     ElMessage.success(`迁移完成（${result.gameId}）：扫描 ${result.scanned}，新增 ${result.migrated}，跳过 ${result.skipped}`)
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : 'JSON → MySQL 迁移失败') }
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : 'JSON → Mongo 迁移失败') }
 }
 
 onMounted(load)
@@ -52,7 +52,7 @@ onMounted(load)
 
   <el-alert v-if="modeChanged" type="warning" show-icon :closable="false" class="section-gap"
     :title="`上次 Server 以「${app.storageInfo?.previousProvider}」模式运行，本次为「${app.storageInfo?.provider}」模式——两边数据互不可见`"
-    description="会话与记忆分别保存在各自模式的存储里。如需把 JSON 侧积累的玩家长期记忆带入 MySQL，请使用下方「从 JSON 迁移到 MySQL」。" />
+    description="会话与记忆分别保存在各自模式的存储里。如需把 JSON 侧积累的玩家长期记忆带入 MongoDB，请使用下方「从 JSON 迁移到 Mongo」。" />
 
   <div class="metric-grid" v-loading="store.loading">
     <div class="metric-card"><div class="metric-label">最大短期轮数</div><div class="metric-value">{{ store.limits?.maxShortTermTurns ?? '—' }}</div><div class="metric-note">Server 安全上限</div></div>
@@ -65,12 +65,12 @@ onMounted(load)
     <div class="panel">
       <div class="panel-head"><h3>能力与队列状态</h3></div>
       <div class="panel-body settings-list">
-        <div><span>存储模式</span><el-tag :type="app.storageInfo?.provider === 'MySql' ? 'warning' : 'success'">{{ app.storageInfo?.provider ?? '—' }}</el-tag></div>
-        <div v-if="app.storageInfo?.mysql"><span>MySQL 目标</span><span>{{ app.storageInfo.mysql.server }}:{{ app.storageInfo.mysql.port }} / {{ app.storageInfo.mysql.database }}</span></div>
-        <div v-if="app.storageInfo?.mysql"><span>自动建表迁移</span><el-tag :type="app.storageInfo.mysql.autoMigrate ? 'success' : 'info'">{{ app.storageInfo.mysql.autoMigrate ? '开启' : '关闭' }}</el-tag></div>
+        <div><span>存储模式</span><el-tag :type="app.storageInfo?.provider === 'Mongo' ? 'warning' : 'success'">{{ app.storageInfo?.provider ?? '—' }}</el-tag></div>
+        <div v-if="app.storageInfo?.mongo"><span>Mongo 目标</span><span>{{ app.storageInfo.mongo.host }} / {{ app.storageInfo.mongo.database }}</span></div>
+        <div v-if="app.storageInfo?.mongo"><span>自动建索引迁移</span><el-tag :type="app.storageInfo.mongo.autoMigrate ? 'success' : 'info'">{{ app.storageInfo.mongo.autoMigrate ? '开启' : '关闭' }}</el-tag></div>
         <div v-if="app.storageInfo"><span>JSON 记忆迁移</span>
-          <el-button v-if="app.storageInfo.provider === 'MySql'" size="small" type="primary" plain @click="migrateJson">从 JSON 迁移到 MySQL</el-button>
-          <span v-else class="muted-hint">以 MySQL 模式启动后可用</span>
+          <el-button v-if="app.storageInfo.provider === 'Mongo'" size="small" type="primary" plain @click="migrateJson">从 JSON 迁移到 Mongo</el-button>
+          <span v-else class="muted-hint">以 Mongo 模式启动后可用</span>
         </div>
         <div><span>后台摘要能力</span><el-tag :type="store.limits?.allowBackgroundSummarization ? 'success' : 'info'">{{ store.limits?.allowBackgroundSummarization ? '允许' : '禁用' }}</el-tag></div>
         <div><span>支持的摘要触发器</span><span><el-tag v-for="item in store.limits?.supportedSummaryTriggers" :key="item" class="tag-gap" effect="plain">{{ item }}</el-tag></span></div>

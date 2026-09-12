@@ -15,26 +15,35 @@ builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 StorageOptions storageOptions = StorageOptions.From(builder.Configuration);
 storageOptions.Validate();
-MySqlConnectionFactory mySqlFactory = storageOptions.IsMySql
-    ? new MySqlConnectionFactory(storageOptions.MySqlConnectionString) : null;
+MongoConnectionFactory mongoFactory = storageOptions.IsMongo
+    ? new MongoConnectionFactory(storageOptions.MongoConnectionString, storageOptions.MongoDatabase) : null;
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.IncludeFields = true;        // Core DTO 使用公共字段（SimGameState 等）
 });
 builder.Services.AddSingleton(storageOptions);
 builder.Services.AddSingleton<RuntimeLogService>();
-if (storageOptions.IsMySql)
+int chatRetentionDays = Math.Max(1, builder.Configuration.GetValue<int?>("Logging:ChatRetentionDays") ?? 30);
+
+if (storageOptions.IsMongo)
 {
-    builder.Services.AddSingleton(mySqlFactory);
-    builder.Services.AddSingleton<IMemoryRepository, MySqlMemoryRepository>();
-    builder.Services.AddSingleton<MemoryAuditService>(provider =>
-        new MemoryAuditService(provider.GetRequiredService<MySqlConnectionFactory>()));
+    builder.Services.AddSingleton(mongoFactory);
+    builder.Services.AddSingleton<IMemoryRepository, MongoMemoryRepository>();
+    builder.Services.AddSingleton<IMemoryAuditStore>(new MongoMemoryAuditStore(mongoFactory));
+    builder.Services.AddSingleton<IChatLogStore>(new MongoChatLogStore(mongoFactory));
+    builder.Services.AddSingleton<IMemorySummaryJobPersistence>(new MongoMemorySummaryJobPersistence(mongoFactory));
+    builder.Services.AddSingleton<ISessionPersistence>(new MongoSessionPersistence(mongoFactory));
 }
 else
 {
     builder.Services.AddSingleton<IMemoryRepository, JsonMemoryRepository>();
-    builder.Services.AddSingleton<MemoryAuditService>();
+    builder.Services.AddSingleton<IMemoryAuditStore>(new JsonMemoryAuditStore(DataStore.FindDataRoot));
+    builder.Services.AddSingleton<IChatLogStore>(new JsonChatLogStore(chatRetentionDays));
+    builder.Services.AddSingleton<ISessionPersistence>(new JsonSessionPersistence(DataStore.FindDataRoot));
+    // 摘要任务 Json 模式无持久化实现（MemorySummaryQueue 的 IMemorySummaryJobPersistence 参数保持 null）
 }
+// MemoryAuditService 由 IMemoryAuditStore 构造，两种模式都要注册
+builder.Services.AddSingleton<MemoryAuditService>();
 builder.Services.AddSingleton<PlayerMemoryService>();
 builder.Services.AddSingleton<MemorySummaryQueue>();
 builder.Services.AddHostedService(provider => provider.GetRequiredService<MemorySummaryQueue>());
@@ -64,33 +73,32 @@ var app = builder.Build();
 
 app.UseAIBotApiErrors();
 
-if (storageOptions.IsMySql)
-{
-    SessionStore.UseMySql(mySqlFactory);
-    ChatLogService.UseMySql(mySqlFactory);
-}
+// Session 持久化由容器注入（Json/Mongo 二选一）；UsePersistence 会清空进程内缓存。
+SessionStore.UsePersistence(app.Services.GetRequiredService<ISessionPersistence>());
+// ChatLog 落盘由容器注入的 IChatLogStore 决定（Json/Mongo 二选一）。
+ChatLogService.UseStore(app.Services.GetRequiredService<IChatLogStore>());
 ChatLogService.Configure(builder.Configuration, app.Services.GetRequiredService<RuntimeLogService>());
 
-if (storageOptions.IsMySql && storageOptions.AutoMigrate)
+if (storageOptions.IsMongo && storageOptions.MongoAutoMigrate)
 {
-    await DatabaseMigrator.ApplyAsync(mySqlFactory, app.Lifetime.ApplicationStopping);
+    await MongoInitializer.ApplyAsync(mongoFactory, builder.Configuration, app.Lifetime.ApplicationStopping);
 }
 
-if (storageOptions.IsMySql && Array.Exists(args, value => string.Equals(value, "--migrate-json",
+if (storageOptions.IsMongo && Array.Exists(args, value => string.Equals(value, "--migrate-json",
     StringComparison.OrdinalIgnoreCase)))
 {
     var source = new JsonMemoryRepository();
-    var target = new MySqlMemoryRepository(mySqlFactory);
-    var migration = await new JsonToMySqlMemoryMigrator(source, target)
+    var target = new MongoMemoryRepository(mongoFactory);
+    var migration = await new JsonToMemoryRepositoryMigrator(source, target)
         .RunAsync(builder.Configuration["Storage:MigrationGameId"] ?? "default", app.Lifetime.ApplicationStopping);
-    Console.WriteLine("JSON→MySQL memory migration: scanned=" + migration.Scanned
+    Console.WriteLine("JSON→Mongo memory migration: scanned=" + migration.Scanned
         + ", migrated=" + migration.Migrated + ", skipped=" + migration.Skipped);
     if (Array.Exists(args, value => string.Equals(value, "--exit-after-migrate", StringComparison.OrdinalIgnoreCase)))
         return;
 }
 
-await StartupDiagnostics.RunAsync(storageOptions, mySqlFactory, builder.Configuration,
-    app.Lifetime.ApplicationStopping);
+await StartupDiagnostics.RunAsync(storageOptions, builder.Configuration,
+    app.Lifetime.ApplicationStopping, mongoFactory);
 
 // 可选管理鉴权：本地未配置时保持零门槛；部署时设置 AIBOT_ADMIN_TOKEN 即保护管理 API。
 string adminToken = Environment.GetEnvironmentVariable("AIBOT_ADMIN_TOKEN")
@@ -101,7 +109,7 @@ if (string.IsNullOrWhiteSpace(clientToken))
 {
     app.Logger.LogWarning("AIBOT_CLIENT_TOKEN 未配置：聊天 API 未启用客户端鉴权，仅适合本机开发环境");
 }
-if (!storageOptions.IsMySql)
+if (!storageOptions.IsMongo)
 {
     app.Logger.LogWarning("当前使用 JSON 存储：请保持单 Server 实例运行，不要让多个进程同时写入同一 data 目录");
 }
@@ -155,8 +163,9 @@ app.MapGet("/api/health", () => Microsoft.AspNetCore.Http.Results.Ok(new
 
 app.MapGet("/api/ready", async (HttpContext http) =>
 {
-    var result = await ReadinessService.CheckAsync(storageOptions, mySqlFactory,
-        app.Services.GetRequiredService<MemorySummaryQueue>(), app.Configuration, http.RequestAborted);
+    var result = await ReadinessService.CheckAsync(storageOptions,
+        app.Services.GetRequiredService<MemorySummaryQueue>(), app.Configuration, http.RequestAborted,
+        mongoFactory);
     return Results.Json(result.Body, statusCode: result.Ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
 });
 

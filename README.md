@@ -14,9 +14,9 @@ Packages/com.aibot.npcagent   Unity 包（Runtime/Core = 三端共享的 AIBot.C
 src/AIBot.Server              ASP.NET Core 独立宿主 + 静态托管（根入口跳转 wwwroot/app）
 src/AIBot.Web                 Vue 3 + TypeScript 统一管理/调试控制台（可选后台）
 src/AIBot.Tests               xUnit 测试（107 项，Core/协议/请求幂等/工具边界/记忆仓储/摘要队列/运行日志与审计免网全链路）
-data/games/{gameId}           NPC 配置/世界观/JSON 兼容存储（MySQL 模式下为迁移源/配置源）
-database/mysql/schema.sql     MySQL + Dapper 的表结构
-database/mysql/migrations     按版本维护的增量迁移 SQL（当前 001/002）
+data/games/{gameId}           NPC 配置/世界观/JSON 兼容存储（Mongo 模式下为迁移源/配置源）
+src/AIBot.Server/MongoInitializer.cs  MongoDB 集合/索引初始化与 TTL（AutoMigrate）
+docker.yml / start-server-mongo.ps1   本地 MongoDB 容器与 Server 启动脚本
 ```
 
 ## 架构概览
@@ -39,9 +39,9 @@ database/mysql/migrations     按版本维护的增量迁移 SQL（当前 001/00
 │      └→ ChatLog / RuntimeLog / Audit                 │
 │  Admin API / Health / Ready / 静态托管 Vue            │
 └───────────────┬───────────────────────┬──────────────┘
-                │ Dapper                │ OpenAI 兼容 HTTP
+                │ Mongo Driver           │ OpenAI 兼容 HTTP
         ┌───────▼────────┐       ┌─────▼────────────────┐
-        │ MySQL（可选）   │       │ OpenCode/DeepSeek/GLM │
+        │ MongoDB（正式） │       │ OpenCode/DeepSeek/GLM │
         │ 记忆/Session/日志│       │ 主模型与摘要模型      │
         └────────────────┘       └──────────────────────┘
 
@@ -53,11 +53,11 @@ database/mysql/migrations     按版本维护的增量迁移 SQL（当前 001/00
 
 ### 各层职责
 
-- **AIBot.Core**：跨 Unity/Server 共享的 Agent 引擎，包括 Prompt 组装、上下文、SSE 聚合、工具调用、结构化回复、短期记忆和摘要契约。它不依赖 ASP.NET Core、Vue 或 MySQL。
+- **AIBot.Core**：跨 Unity/Server 共享的 Agent 引擎，包括 Prompt 组装、上下文、SSE 聚合、工具调用、结构化回复、短期记忆和摘要契约。它不依赖 ASP.NET Core、Vue 或 MongoDB。
 - **AIBot.Unity**：Unity 适配层，提供 `NpcAgent`、`UnityWebRequestBackend` 和 `UnityServerBackend`。单机可直连模型；多人或需要集中管理时调用 Server。
 - **AIBot.Server**：唯一的业务编排和数据边界。负责 NPC/世界观配置、对话流式 API、记忆读写、后台摘要、日志、审计、限流和可选管理 API 鉴权。
 - **AIBot.Web**：Vue 3 + TypeScript 管理台，通过 HTTP/SSE 调用 Server。生产构建产物由 Server 的 `wwwroot/app` 静态托管。
-- **MySQL + Dapper**：Server 的可选持久化实现。保存玩家长期记忆、结构化事实、Session、对话日志、审计和摘要任务；默认仍可使用 JSON 文件，便于单机开发。
+- **MongoDB（正式）**：Server 的正式/在线持久化实现，由官方 MongoDB.Driver 访问。保存玩家长期记忆、结构化事实、Session、对话日志、审计和摘要任务；开发/单机默认使用 JSON 文件，便于零依赖启动。
 
 ### 一次对话的处理链路
 
@@ -70,18 +70,18 @@ database/mysql/migrations     按版本维护的增量迁移 SQL（当前 001/00
 
 ### 记忆与数据边界
 
-短期记忆属于具体 Session，保存最近对话和待摘要消息；长期记忆属于 `gameId + npcId + playerId`，保存滚动摘要和可独立编辑的结构化事实。Unity 与 Vue 都不直接连接 MySQL，API Key、数据库连接串和审计数据只由 Server 管理。MySQL 模式下摘要任务存放在 `memory_summary_jobs`，迁移版本记录在 `schema_migrations`。
+短期记忆属于具体 Session，保存最近对话和待摘要消息；长期记忆属于 `gameId + npcId + playerId`，保存滚动摘要和可独立编辑的结构化事实。Unity 与 Vue 都不直接连接数据库，API Key、数据库连接串和审计数据只由 Server 管理。Mongo 模式下摘要任务存放在 `memory_summary_jobs` 集合，初始化与 TTL 索引状态记录在 `_meta` 集合。
 
 ### 两种运行模式
 
 | 模式 | 调用链路 | 适用场景 |
 | --- | --- | --- |
 | `local` | Unity → LLM | 单机 Demo、无需后台的原型、无需集中记忆 |
-| `server` | Unity → AIBot.Server → LLM/MySQL | 集中配置、玩家长期记忆、日志审计、多客户端共享 |
+| `server` | Unity → AIBot.Server → LLM/MongoDB | 集中配置、玩家长期记忆、日志审计、多客户端共享 |
 
 #### Local：轻量直连模式
 
-Local 模式不需要部署 `AIBot.Server`、Vue 管理台或 MySQL，Unity 插件可以直接运行。
+Local 模式不需要部署 `AIBot.Server`、Vue 管理台或 MongoDB，Unity 插件可以直接运行。
 
 ```text
 NpcAgent → AIBot.Core/AgentLoop → UnityWebRequestBackend → OpenAI 兼容模型
@@ -101,7 +101,7 @@ Local 模式的特点：
 - 短期记忆保存在当前 `NpcAgent` 实例中，适合 Demo 和小型单机项目。
 - 游戏可以通过 `NpcAgent.Tools` 注册并执行真实 Unity 工具。
 - Unity 直接连接模型，API Key 会进入客户端运行环境，仅建议用于开发、Demo 或可信的本地场景。
-- 不依赖后台和 MySQL，部署结构最简单；但仍需要能够访问配置的模型地址，也不提供跨设备的统一记忆、日志和 NPC 运营管理。
+- 不依赖后台和数据库，部署结构最简单；但仍需要能够访问配置的模型地址，也不提供跨设备的统一记忆、日志和 NPC 运营管理。
 
 #### Server：集中管理模式
 
@@ -117,13 +117,13 @@ NpcAgent → UnityServerBackend → HTTP/SSE → AIBot.Server
 
 推荐配置方式：
 
-1. 启动 `AIBot.Server`，需要时再启用 MySQL 和 Vue 管理台。
+1. 启动 `AIBot.Server`，需要时再启用 MongoDB 和 Vue 管理台。
 2. 在 Unity 中创建 `AI NPC → Server Connection Profile`（`AIBotConnectionProfile`）。
 3. 填写 Server 地址、`gameId`、`npcId`，以及可选的 `playerId`、`sessionId`。
 4. 将 Profile 拖到 `NpcAgent.connectionProfile`。
 5. 可选调用 `await agent.CheckServerAsync()`，检查网络、Server 就绪状态和目标 NPC 是否存在。
 
-Server 模式下 Unity 每轮可以上传可选的游戏状态快照，Server 会把它作为当前上下文注入 Prompt。玩家长期记忆、Session、摘要队列、日志和审计均由 Server 管理，存储可以选择 JSON 或 MySQL。
+Server 模式下 Unity 每轮可以上传可选的游戏状态快照，Server 会把它作为当前上下文注入 Prompt。玩家长期记忆、Session、摘要队列、日志和审计均由 Server 管理，存储可以选择 JSON 或 Mongo。
 
 Server 模式的当前工具边界需要特别注意：
 
@@ -141,7 +141,7 @@ Server 模式的当前工具边界需要特别注意：
 
 两种模式对游戏层保持相同的 `NpcAgent.ChatAsync()`、流式事件和结构化回复接口。切换模式主要是更换配置来源：Local 使用 `AgentConfigAsset`，Server 使用 `AIBotConnectionProfile`；旧的 `runtimeMode=local/server` 配置方式仍然兼容。Unity 侧模型故障但仍交付兜底台词时会触发 `onFallback`，请求取消时触发 `onCancelled`；两者都不替代正常的 `onReply`/终止错误语义。
 
-Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包含 Vue、ASP.NET Core、MySQL 或 Dapper。开发/单机使用 `UnityWebRequestBackend` 直连模型；Server 使用 `UnityServerBackend` 连接 `AIBot.Server`。Unity 与 Vue 都不直接连接 MySQL；Server 默认使用 JSON，启用 MySQL 时由 Dapper 访问数据库，两种存储可通过配置切换。Server 配置 `AIBOT_CLIENT_TOKEN` 后会强制聊天客户端携带令牌；未配置时仅适合本机开发，正式部署还应配合 HTTPS、网关认证和访问控制。
+Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包含 Vue、ASP.NET Core 或 MongoDB 驱动。开发/单机使用 `UnityWebRequestBackend` 直连模型；Server 使用 `UnityServerBackend` 连接 `AIBot.Server`。Unity 与 Vue 都不直接连接数据库；Server 默认使用 JSON，启用 Mongo 时通过 MongoDB.Driver 访问数据库，两种存储可通过配置切换。Server 配置 `AIBOT_CLIENT_TOKEN` 后会强制聊天客户端携带令牌；未配置时仅适合本机开发，正式部署还应配合 HTTPS、网关认证和访问控制。
 
 ## 快速开始（脱离 Unity 独立运行）
 
@@ -165,18 +165,18 @@ cd src/AIBot.Tests && dotnet test
 # 3) 启动（Windows 双击 start-server.bat 同效）
 cd src/AIBot.Server && dotnet run        # → 浏览器打开 http://localhost:5000
 
-# 可选：使用 Docker MySQL 启动 Server（自动读取根目录 .env）
+# 可选：使用 Docker MongoDB 启动 Server（自动读取根目录 .env）
 Copy-Item .env.example .env       # 首次使用时执行；可修改密码和端口
-.\start-server-mysql.ps1          # 自动起 MySQL 容器、按 AIBOT_MYSQL_AUTOMIGRATE 补齐缺失表、以 MySql 模式运行
+.\start-server-mongo.ps1          # 自动起 mongo 容器、按 AIBOT_MONGO_AUTOMIGRATE 创建集合与索引、以 Mongo 模式运行
 # 如果 PowerShell 阻止脚本，可仅对当前窗口放行：
 # Set-ExecutionPolicy -Scope Process Bypass
 
-# 可选：把现有 JSON 玩家长期记忆迁移到 MySQL（幂等，目标已有记录会跳过）；
-# MySQL 模式下也可以在控制台「01 系统边界」页点击「从 JSON 迁移到 MySQL」按钮完成同样的事
+# 可选：把现有 JSON 玩家长期记忆迁移到 Mongo（幂等，目标已有记录会跳过）；
+# Mongo 模式下也可以在控制台「01 系统边界」页点击「从 JSON 迁移到 Mongo」按钮完成同样的事
 dotnet run -- --migrate-json --exit-after-migrate
 
 # 也可以只启动数据库
-docker compose -f docker.yml up -d mysql
+docker compose -f docker.yml up -d mongo
 docker compose -f docker.yml ps
 
 # 修改 Vue 控制台后重新类型检查并部署到 Server/wwwroot/app
@@ -208,11 +208,22 @@ curl -N -X POST http://localhost:5000/api/games/default/chat/stream \
 
 JSON 存储会由维护任务清理长期不活跃的 Session 文件；`Sessions:MemoryIdleHours` 同时控制内存会话和文件的闲置清理。JSON 模式适合单 Server 实例，多个进程不要同时写入同一 data 目录。聊天请求中的模型覆盖参数仅允许管理端调试请求使用，并会被 Server 限制在安全范围内。
 
-MySQL 模式会把摘要任务状态持久化到 `memory_summary_jobs`，Server 重启后自动恢复 pending/processing 任务；数据库迁移由 `schema_migrations` 管理。本地开发可设置 `AIBOT_MYSQL_AUTOMIGRATE=true`（`.env` 配置后由启动脚本透传）让 Server 启动时自动补齐缺失表。`GET /api/ready` 可用于启动探针，未连接数据库、缺少表、未配置模型或没有默认 NPC 时返回 503。模型故障若已由 AgentLoop 降级为兜底回复，会在 SSE `reply.diagnostic` 中提供稳定的 `code/status/retryable` 字段；只有无法返回任何有效回复的终止故障才使用 `error` 事件。连接测试接口继续返回同一套错误码契约。
+Mongo 模式会把摘要任务状态持久化到 `memory_summary_jobs` 集合，Server 重启后自动恢复 pending/processing 任务；集合与索引由 `MongoInitializer` 初始化，初始化与 TTL 状态记录在 `_meta` 集合。本地开发可设置 `AIBOT_MONGO_AUTOMIGRATE=true`（`.env` 配置后由启动脚本透传，Mongo 模式必需）让 Server 启动时自动创建集合与索引。`GET /api/ready` 可用于启动探针，未连接数据库、缺少集合、未配置模型或没有默认 NPC 时返回 503。模型故障若已由 AgentLoop 降级为兜底回复，会在 SSE `reply.diagnostic` 中提供稳定的 `code/status/retryable` 字段；只有无法返回任何有效回复的终止故障才使用 `error` 事件。连接测试接口继续返回同一套错误码契约。
 
-注意存储模式跟随启动方式：纯 `dotnet run` 回到 JSON 模式（数据保留在 MySQL 但本进程不可见），固定使用 MySQL 请始终通过 `start-server-mysql.ps1` 启动。两种模式切换时控制台「01 系统边界」页会显示提醒横幅，避免"数据丢失"的误解。
+注意存储模式跟随启动方式：纯 `dotnet run` 回到 JSON 模式（数据仍保留在 MongoDB，但该进程按 JSON 读写而不可见），固定使用 Mongo 请始终通过 `start-server-mongo.ps1` 启动。两种模式切换时控制台「01 系统边界」页会显示提醒横幅，避免"数据丢失"的误解。
 
-Docker MySQL 首次初始化会自动执行 `database/mysql/schema.sql`，数据保存在 `ai_npc_mysql_data` volume。`docker.yml` 默认映射宿主机 `3306`；如果该端口已被其他 MySQL 服务占用，可在根目录 `.env` 中设置 `AIBOT_MYSQL_PORT=3307`（本机当前示例已使用 3307），此时宿主机运行 Server 要连接 `127.0.0.1:3307`。以后若把 Server 也容器化，连接地址改为 `mysql:3306`。停止容器使用 `docker compose -f docker.yml down`，不要随意使用 `down -v`，否则会删除数据库卷。
+Docker MongoDB 首次启动即由 Server 的 `MongoInitializer` 创建所需集合与索引（无外部 schema 脚本），数据保存在 `ai_npc_mongo_data` volume。`docker.yml` 默认映射宿主机 `27017`；如果该端口已被其他 MongoDB 服务占用，可在根目录 `.env` 中设置 `AIBOT_MONGO_PORT=27018`（本机可自行调整），此时宿主机运行 Server 要连接 `127.0.0.1:27018`。以后若把 Server 也容器化，连接地址改为 `mongo:27017`。停止容器使用 `docker compose -f docker.yml down`，不要随意使用 `down -v`，否则会删除数据库卷。
+
+**Mongo 数据备份**：`ai_npc_mongo_data` volume 是 Mongo 模式下全部业务数据（长期记忆、Session、日志、审计、摘要任务）的唯一载体，请定期备份。容器在运行时可直接导出：
+
+```bash
+# 导出（写入宿主机当前目录的 dump/ 目录）
+docker exec ai-npc-mongo mongodump --username aibot --password <密码> --authenticationDatabase admin --db ai_npc --archive > ai_npc_backup.archive
+# 恢复
+docker exec -i ai-npc-mongo mongorestore --username aibot --password <密码> --authenticationDatabase admin --archive < ai_npc_backup.archive
+```
+
+也可以直接快照 Docker volume（`docker run --rm -v aibot_ai_npc_mongo_data:/data -v <宿主机目录>:/backup alpine tar czf /backup/mongo-data.tgz /data`）。注意 `docker compose -f docker.yml down -v` 会删除该卷，等同于删除全部业务数据。
 
 ### 管理控制台
 
@@ -220,8 +231,8 @@ Docker MySQL 首次初始化会自动执行 `database/mysql/schema.sql`，数据
 
 - **Game / NPC 管理**：「02 Game 策略」页右上角可应用策略预设；Game 旁的「＋」按钮可直接创建新 Game（生成 world 与 memory-policy 骨架）；「08 NPC 配置」页弹窗式新建 NPC（内置模板兜底，无需先准备模板文件）。
 - **模型 Key 管理**：「14 模型 Key 管理」页集中保存全局 LLM API Key（写入 `data/system-settings.json`，已入 .gitignore），对所有未单独配置 Key 的 NPC 生效；密钥保存后永不回显明文，页面只显示尾 4 位。NPC 配置页的 API Key 输入框可给单个 NPC 设独立 Key（留空保留原值，旁边标注已配置/未配置）。公共部署务必设置 `AIBOT_ADMIN_TOKEN` 保护管理 API。
-- **存储模式指示**：「01 系统边界」页显示当前存储模式（Json/MySql）、MySQL 目标与自动建表迁移状态；检测到本次与上次运行模式不同时，会显示提醒横幅（两种模式数据互不可见）。
-- **JSON→MySQL 迁移按钮**：MySQL 模式下「01 系统边界」页可一键把 JSON 侧的玩家长期记忆迁入 MySQL（幂等，与 `--migrate-json` 等效）。
+- **存储模式指示**：「01 系统边界」页显示当前存储模式（Json/Mongo）、Mongo 目标（host/库名）与自动创建集合/索引状态；检测到本次与上次运行模式不同时，会显示提醒横幅（两种模式数据互不可见）。
+- **JSON→Mongo 迁移按钮**：Mongo 模式下「01 系统边界」页可一键把 JSON 侧的玩家长期记忆迁入 Mongo（幂等，与 `--migrate-json` 等效）。
 - **会话按 NPC 隔离**：调试对话页为每个 NPC 记住独立会话，切换 NPC 自动切换会话，不再串扰。
 - **时间显示**：会话与日志页的时间统一转换为本地时区显示，原始 UTC 值可在日志行展开或悬浮提示中查看。
 

@@ -226,7 +226,7 @@ namespace AIBot.Tests
         [Fact]
         public void PendingToolRound_RoundTripsThroughSessionFileDto()
         {
-            // 持久化契约：SessionFileDto v4 必须无损携带挂起轮（JSON 与 MySQL payload 共用此 DTO）
+            // 持久化契约：SessionFileDto v4 必须无损携带挂起轮（JSON 与数据库 payload 共用此 DTO）
             var dto = new SessionStore.SessionFileDto
             {
                 npcId = "lin",

@@ -1,33 +1,28 @@
 using System;
-using System.Data;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using AIBot.Core.Logging;
-using Dapper;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
 namespace AIBot.Server
 {
-    /// <summary>每天执行轻量日志保留清理；MySQL 与 JSON 模式共用。</summary>
+    /// <summary>每天执行轻量日志保留清理；三种存储模式共用。</summary>
     public sealed class LogMaintenanceService : BackgroundService
     {
         private readonly StorageOptions _storage;
-        private readonly MySqlConnectionFactory _mysql;
+        private readonly IMemoryAuditStore _auditStore;
         private readonly RuntimeLogService _logs;
-        private readonly int _chatDays;
         private readonly int _auditDays;
         private readonly TimeSpan _sessionIdle;
         private readonly TimeSpan _interval;
 
         public LogMaintenanceService(StorageOptions storage, RuntimeLogService logs,
-            IConfiguration configuration, MySqlConnectionFactory mysql = null)
+            IConfiguration configuration, IMemoryAuditStore auditStore = null)
         {
             _storage = storage;
-            _mysql = mysql;
+            _auditStore = auditStore;
             _logs = logs;
-            _chatDays = Math.Max(1, configuration.GetValue<int?>("Logging:ChatRetentionDays") ?? 30);
             _auditDays = Math.Max(1, configuration.GetValue<int?>("Logging:AuditRetentionDays") ?? 365);
             int idleHours = Math.Max(1, configuration.GetValue<int?>("Sessions:MemoryIdleHours") ?? 24);
             _sessionIdle = TimeSpan.FromHours(idleHours);
@@ -52,26 +47,12 @@ namespace AIBot.Server
                 int runtimeDeleted = _logs.CleanupNow();
                 int sessionsPruned = SessionStore.PruneInactive(_sessionIdle);
                 int sessionFilesPruned = SessionStore.PruneInactiveFiles(_sessionIdle);
-                int chatDeleted = 0;
-                int auditDeleted = 0;
-                if (_storage.IsMySql && _mysql != null)
-                {
-                    using (IDbConnection connection = _mysql.OpenConnection())
-                    {
-                        DateTime chatCutoff = DateTime.UtcNow.AddDays(-_chatDays);
-                        DateTime auditCutoff = DateTime.UtcNow.AddDays(-_auditDays);
-                        chatDeleted = connection.Execute(
-                            "DELETE FROM chat_logs WHERE ts < @Cutoff", new { Cutoff = chatCutoff });
-                        auditDeleted = connection.Execute(
-                            "DELETE FROM memory_audits WHERE ts < @Cutoff", new { Cutoff = auditCutoff });
-                    }
-                }
-                else
-                {
-                    auditDeleted = CleanupAuditFiles();
-                }
+                // JSON：chat 由 JsonChatLogStore 写入时自清理；audit 走 store 的 DeleteExpired。
+                // Mongo：chat/audit 均交 TTL（DELETE 返回 0，跳过）。
+                int auditDeleted = _auditStore == null
+                    ? 0 : _auditStore.DeleteExpired(DateTime.UtcNow.AddDays(-_auditDays));
                 _logs.Write(LogLevel.Info, "LogMaintenance", "cleanup_completed",
-                    "日志保留清理完成: runtime=" + runtimeDeleted + ", chat=" + chatDeleted
+                    "日志保留清理完成: provider=" + _storage.Provider + ", runtime=" + runtimeDeleted
                     + ", audit=" + auditDeleted + ", sessionsPruned=" + sessionsPruned
                     + ", sessionFilesPruned=" + sessionFilesPruned);
             }
@@ -80,33 +61,6 @@ namespace AIBot.Server
                 _logs.Write(LogLevel.Warning, "LogMaintenance", "cleanup_failed",
                     "日志保留清理失败: " + ex.Message, null, ex);
             }
-        }
-
-        private int CleanupAuditFiles()
-        {
-            string root = DataStore.FindDataRoot();
-            string logsRoot = root == null ? null : Path.Combine(root, "logs");
-            if (logsRoot == null || !Directory.Exists(logsRoot)) return 0;
-            DateTime cutoff = DateTime.UtcNow.AddDays(-_auditDays);
-            int deleted = 0;
-            foreach (string directory in Directory.GetDirectories(logsRoot, "memory-audit",
-                SearchOption.AllDirectories))
-            {
-                foreach (string file in Directory.GetFiles(directory, "*.jsonl"))
-                {
-                    try
-                    {
-                        if (File.GetLastWriteTimeUtc(file) < cutoff)
-                        {
-                            File.Delete(file);
-                            deleted++;
-                        }
-                    }
-                    catch (IOException) { }
-                    catch (UnauthorizedAccessException) { }
-                }
-            }
-            return deleted;
         }
     }
 }

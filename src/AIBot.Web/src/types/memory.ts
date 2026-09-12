@@ -152,9 +152,9 @@ export interface MemoryAuditEntry {
 }
 
 export interface StorageInfo {
-  provider: 'MySql' | 'Json'
-  mysql: { server: string; port: number; database: string; autoMigrate: boolean } | null
-  previousProvider: 'MySql' | 'Json' | null
+  provider: 'Mongo' | 'Json'
+  mongo: { host: string; database: string; autoMigrate: boolean } | null
+  previousProvider: 'Mongo' | 'Json' | null
   startedAt: string
 }
 

@@ -1,28 +1,25 @@
 services:
-  mysql:
-    image: mysql:8.4
-    container_name: ai-npc-mysql
+  # 正式存储：standalone 单机即可（本方案不需要事务）。若将来需要事务，
+  # 改为 command: ["--replSet","rs0"] 并执行 rs.initiate()。
+  mongo:
+    image: mongo:7
+    container_name: ai-npc-mongo
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${AIBOT_MYSQL_ROOT_PASSWORD:-change-this-root-password}
-      MYSQL_DATABASE: ${AIBOT_MYSQL_DATABASE:-ai_npc}
-      MYSQL_USER: ${AIBOT_MYSQL_USER:-aibot}
-      MYSQL_PASSWORD: ${AIBOT_MYSQL_PASSWORD:-change-this-password}
+      MONGO_INITDB_ROOT_USERNAME: ${AIBOT_MONGO_USER:-aibot}
+      MONGO_INITDB_ROOT_PASSWORD: ${AIBOT_MONGO_PASSWORD:-change-this-password}
       TZ: Asia/Shanghai
     ports:
-      - "${AIBOT_MYSQL_PORT:-3306}:3306"
+      - "${AIBOT_MONGO_PORT:-27017}:27017"
     volumes:
-      - ai_npc_mysql_data:/var/lib/mysql
-      - ./database/mysql/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
+      - ai_npc_mongo_data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      # 带凭据 ping：避免在启用认证的实例上依赖「未认证也能 ping」的行为差异
+      test: ["CMD-SHELL", "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"db.runCommand({ping:1}).ok\" | grep -q 1"]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 20s
 
 volumes:
-  ai_npc_mysql_data:
+  ai_npc_mongo_data:

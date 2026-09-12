@@ -1,12 +1,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using AIBot.Core.Llm;
 using AIBot.Core.Logging;
+using AIBot.Core.Llm;
 using AIBot.Core.Memory;
 using Newtonsoft.Json;
 
@@ -68,20 +67,20 @@ namespace AIBot.Server
     }
 
     /// <summary>
-    /// 会话注册表：玩家会话写入 sessions/{npcId}/{playerId}/{sessionId}.json；
-    /// 未提供 playerId 时继续使用旧的 sessions/{npcId}/{sessionId}.json。
+    /// 会话注册表门面：进程内 Map + 可插拔的 <see cref="ISessionPersistence"/>（JSON / MongoDB）。
+    /// 默认实现为 JSON，便于测试与未启动 Program 的场景直接使用。
     /// </summary>
     public static class SessionStore
     {
         private static readonly ConcurrentDictionary<string, SessionState> Map =
             new ConcurrentDictionary<string, SessionState>();
-        private static readonly object IoLock = new object();
         private static readonly ILogSink Log = new ConsoleLogSink();
-        private static MySqlSessionPersistence MySqlPersistence;
+        private static ISessionPersistence _persistence = new JsonSessionPersistence(DataStore.FindDataRoot);
 
-        public static void UseMySql(MySqlConnectionFactory factory)
+        public static void UsePersistence(ISessionPersistence persistence)
         {
-            MySqlPersistence = factory == null ? null : new MySqlSessionPersistence(factory);
+            _persistence = persistence ?? new JsonSessionPersistence(DataStore.FindDataRoot);
+            // 切换后端时丢弃进程内缓存，避免读到上一个后端的陈旧会话。
             Map.Clear();
         }
 
@@ -99,6 +98,8 @@ namespace AIBot.Server
             public List<ChatRequestRecord> recentRequests = new List<ChatRequestRecord>();
             public PendingToolRound pendingToolRound;   // v4：game 模式挂起工具轮
             public DateTime lastActiveUtc;
+            /// <summary>仅进程内使用：v1 legacy 文件的来源路径（不落盘、不进 BSON）。</summary>
+            [JsonIgnore] public string legacySourcePath;
         }
 
         private static string Key(string gid, string npcId, string playerId, string sid)
@@ -106,19 +107,10 @@ namespace AIBot.Server
             return gid + "|" + npcId + "|" + (playerId ?? "<legacy>") + "|" + sid;
         }
 
-        private static string SafeName(string id)
+        /// <summary>存储层规范身份键（playerId 空位为空串），JSON 保护路径与 Mongo _id 共用。</summary>
+        public static string IdentityKey(string gid, string npcId, string playerId, string sid)
         {
-            return Uri.EscapeDataString(id ?? "x");
-        }
-
-        private static string FilePath(string gid, string npcId, string playerId, string sid)
-        {
-            string root = DataStore.FindDataRoot();
-            if (root == null) return null;
-            string npcRoot = Path.Combine(root, "games", gid, "sessions", SafeName(npcId));
-            return string.IsNullOrEmpty(playerId)
-                ? Path.Combine(npcRoot, SafeName(sid) + ".json")
-                : Path.Combine(npcRoot, SafeName(playerId), SafeName(sid) + ".json");
+            return gid + "|" + npcId + "|" + (playerId ?? string.Empty) + "|" + sid;
         }
 
         public static SessionState GetOrCreate(string gid, string npcId, string sid, int maxTurns)
@@ -145,37 +137,14 @@ namespace AIBot.Server
         private static SessionState LoadFromDisk(string gid, string npcId, string playerId,
             string sid, int maxTurns)
         {
-            if (MySqlPersistence != null)
-            {
-                try
-                {
-                    SessionFileDto mysqlDto = MySqlPersistence.Load(gid, npcId, playerId, sid);
-                    return mysqlDto == null ? null : FromDto(gid, playerId, sid, maxTurns, mysqlDto, null);
-                }
-                catch (Exception ex)
-                {
-                    Log.Log(LogLevel.Warning, "MySQL 会话恢复失败(" + sid + ")，从空白开始: " + ex.Message);
-                    return null;
-                }
-            }
-            string path = FilePath(gid, npcId, playerId, sid);
-            string legacyPath = null;
-            if (!string.IsNullOrEmpty(playerId) && (path == null || !File.Exists(path)))
-            {
-                legacyPath = FilePath(gid, npcId, null, sid);
-                if (legacyPath != null && File.Exists(legacyPath)) path = legacyPath;
-            }
-            if (path == null || !File.Exists(path)) return null;
-
             try
             {
-                SessionFileDto dto = JsonConvert.DeserializeObject<SessionFileDto>(File.ReadAllText(path));
-                if (dto == null) return null;
-                return FromDto(gid, playerId, sid, maxTurns, dto, legacyPath,
-                    File.GetLastWriteTimeUtc(path));
+                SessionFileDto dto = _persistence.Load(gid, npcId, playerId, sid);
+                return dto == null ? null : FromDto(gid, playerId, sid, maxTurns, dto);
             }
             catch (Exception ex)
             {
+                // 存储抖动不应升级为聊天请求失败：从空白会话继续。
                 Log.Log(LogLevel.Warning, "会话恢复失败(" + sid + ")，从空白开始: " + ex.Message);
                 return null;
             }
@@ -184,61 +153,24 @@ namespace AIBot.Server
         /// <summary>原子落盘；待摘要队列也持久化，后台失败或重启后可继续处理。</summary>
         public static bool Save(SessionState session)
         {
-            try
+            var dto = new SessionFileDto
             {
-                var dto = new SessionFileDto
-                {
-                    npcId = session.NpcId,
-                    playerId = session.PlayerId,
-                    sessionId = session.SessionId,
-                    summary = session.Summary,
-                    facts = session.Facts ?? new List<string>(),
-                    simState = session.SimState,
-                    messages = session.Memory.Messages.Select(CopyMessage).ToList(),
-                    evictedMessages = session.Memory.SnapshotEvicted().Select(CopyMessage).ToList(),
-                    recentRequests = CopyRequests(session.RecentRequests),
-                    pendingToolRound = session.PendingToolRound,
-                    lastActiveUtc = session.LastActiveUtc
-                };
-                if (MySqlPersistence != null)
-                {
-                    MySqlPersistence.Save(session.GameId, dto);
-                    return true;
-                }
-                string path = FilePath(session.GameId, session.NpcId, session.PlayerId, session.SessionId);
-                if (path == null) return false;
-                lock (IoLock)
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(path));
-                    WriteAtomic(path, JsonConvert.SerializeObject(dto, Formatting.Indented));
-
-                    // 只有旧长期字段已经成功迁出后，才归档 v1 文件。
-                    if (!string.IsNullOrEmpty(session.LegacySourcePath)
-                        && string.IsNullOrEmpty(session.Summary)
-                        && (session.Facts == null || session.Facts.Count == 0)
-                        && File.Exists(session.LegacySourcePath))
-                    {
-                        try
-                        {
-                            string backup = session.LegacySourcePath + ".migrated.bak";
-                            if (File.Exists(backup)) File.Delete(backup);
-                            File.Move(session.LegacySourcePath, backup);
-                            session.LegacySourcePath = null;
-                        }
-                        catch (Exception ex)
-                        {
-                            // v2 文件已经安全写入；归档失败不应把本次持久化判为失败。
-                            Log.Log(LogLevel.Warning, "旧会话归档失败，稍后重试: " + ex.Message);
-                        }
-                    }
-                }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Log.Log(LogLevel.Warning, "会话保存失败(" + session.SessionId + "): " + ex.Message);
-                return false;
-            }
+                npcId = session.NpcId,
+                playerId = session.PlayerId,
+                sessionId = session.SessionId,
+                summary = session.Summary,
+                facts = session.Facts ?? new List<string>(),
+                simState = session.SimState,
+                messages = session.Memory.Messages.Select(CopyMessage).ToList(),
+                evictedMessages = session.Memory.SnapshotEvicted().Select(CopyMessage).ToList(),
+                recentRequests = CopyRequests(session.RecentRequests),
+                pendingToolRound = session.PendingToolRound,
+                lastActiveUtc = session.LastActiveUtc,
+                legacySourcePath = session.LegacySourcePath
+            };
+            SessionSaveResult result = _persistence.Save(session.GameId, dto);
+            if (result.LegacyArchived) session.LegacySourcePath = null;
+            return result.Persisted;
         }
 
         public static List<SessionState> ListByGame(string gid, string npcId = null, string playerId = null)
@@ -249,49 +181,16 @@ namespace AIBot.Server
                     && (playerId == null || s.PlayerId == playerId))
                 .ToDictionary(s => Key(s.GameId, s.NpcId, s.PlayerId, s.SessionId), s => s);
 
-            if (MySqlPersistence != null)
+            foreach (SessionFileDto dto in _persistence.List(gid, npcId, playerId))
             {
-                foreach (SessionFileDto dto in MySqlPersistence.List(gid, npcId, playerId))
+                if (dto == null || string.IsNullOrEmpty(dto.npcId) || string.IsNullOrEmpty(dto.sessionId)) continue;
+                string key = Key(gid, dto.npcId, dto.playerId, dto.sessionId);
+                if (!result.ContainsKey(key))
                 {
-                    if (dto == null || string.IsNullOrEmpty(dto.npcId) || string.IsNullOrEmpty(dto.sessionId)) continue;
-                    string key = Key(gid, dto.npcId, dto.playerId, dto.sessionId);
-                    if (!result.ContainsKey(key)) result[key] = FromDto(gid, dto.playerId,
-                        dto.sessionId, Math.Max(1, (dto.messages?.Count ?? 0) / 2 + 1), dto, null);
-                }
-                return result.Values.OrderByDescending(s => s.LastActiveUtc).ToList();
-            }
-
-            foreach (string path in EnumerateSessionFiles(gid))
-            {
-                try
-                {
-                    SessionFileDto dto = JsonConvert.DeserializeObject<SessionFileDto>(File.ReadAllText(path));
-                    if (dto == null || string.IsNullOrEmpty(dto.npcId) || string.IsNullOrEmpty(dto.sessionId)) continue;
-                    if (npcId != null && dto.npcId != npcId) continue;
-                    if (playerId != null && dto.playerId != playerId) continue;
-                    string key = Key(gid, dto.npcId, dto.playerId, dto.sessionId);
-                    if (result.ContainsKey(key)) continue;
-                    var memory = new ShortTermMemory(Math.Max(2, (dto.messages?.Count ?? 0) + 2));
-                    memory.RestoreEvicted((dto.evictedMessages ?? new List<LlmMessage>()).Select(CopyMessage));
-                    foreach (LlmMessage message in dto.messages ?? new List<LlmMessage>()) memory.Add(CopyMessage(message));
-                    result[key] = new SessionState
-                    {
-                        GameId = gid,
-                        NpcId = dto.npcId,
-                        PlayerId = dto.playerId,
-                        SessionId = dto.sessionId,
-                        Memory = memory,
-                        Summary = dto.summary,
-                        Facts = dto.facts ?? new List<string>(),
-                        SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
-                        RecentRequests = CopyRequests(dto.recentRequests),
-                        PendingToolRound = dto.pendingToolRound,
-                        LastActiveUtc = dto.lastActiveUtc == default(DateTime) ? File.GetLastWriteTimeUtc(path) : dto.lastActiveUtc
-                    };
-                }
-                catch (Exception ex)
-                {
-                    Log.Log(LogLevel.Warning, "跳过损坏的会话文件: " + path + " - " + ex.Message);
+                    // 与磁盘加载保持一致的容量：按消息条数（原 JSON 列表分支语义）。
+                    result[key] = FromDto(gid, dto.playerId, dto.sessionId,
+                        Math.Max(1, (dto.messages?.Count ?? 0) / 2 + 1), dto,
+                        Math.Max(2, (dto.messages?.Count ?? 0) + 2));
                 }
             }
             return result.Values.OrderByDescending(s => s.LastActiveUtc).ToList();
@@ -299,35 +198,7 @@ namespace AIBot.Server
 
         public static List<PendingMemorySession> ScanPendingPlayerSessions()
         {
-            if (MySqlPersistence != null) return MySqlPersistence.ScanPending();
-            var result = new List<PendingMemorySession>();
-            string root = DataStore.FindDataRoot();
-            if (root == null) return result;
-            string gamesRoot = Path.Combine(root, "games");
-            if (!Directory.Exists(gamesRoot)) return result;
-            foreach (string gameDir in Directory.GetDirectories(gamesRoot))
-            {
-                string gid = Path.GetFileName(gameDir);
-                if (!DataStore.IsValidId(gid)) continue;
-                foreach (string path in EnumerateSessionFiles(gid))
-                {
-                    try
-                    {
-                        SessionFileDto dto = JsonConvert.DeserializeObject<SessionFileDto>(File.ReadAllText(path));
-                        if (dto == null || string.IsNullOrEmpty(dto.playerId)
-                            || dto.evictedMessages == null || dto.evictedMessages.Count == 0) continue;
-                        result.Add(new PendingMemorySession
-                        {
-                            GameId = gid,
-                            NpcId = dto.npcId,
-                            PlayerId = dto.playerId,
-                            SessionId = dto.sessionId
-                        });
-                    }
-                    catch (Exception) { }
-                }
-            }
-            return result;
+            return _persistence.ScanPending();
         }
 
         /// <summary>删除长期记忆时同时清除该玩家全部 Session 的窗口与待摘要批次，防止旧对话重新生成记忆。</summary>
@@ -359,35 +230,15 @@ namespace AIBot.Server
         public static bool Delete(string gid, string npcId, string playerId, string sid)
         {
             string key = Key(gid, npcId, playerId, sid);
-            if (MySqlPersistence != null)
-            {
-                bool mysqlPersisted = MySqlPersistence.Delete(gid, npcId, playerId, sid);
-                bool removedFromMemory = Map.TryRemove(key, out _);
-                return mysqlPersisted || removedFromMemory;
-            }
-            string path = FilePath(gid, npcId, playerId, sid);
-            bool persisted = false;
-            try
-            {
-                lock (IoLock)
-                {
-                    persisted = path != null && File.Exists(path);
-                    if (persisted) File.Delete(path);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Log(LogLevel.Warning, "会话文件删除失败(" + sid + "): " + ex.Message);
-                throw new IOException("会话文件删除失败，内存状态已保留，可安全重试", ex);
-            }
-            bool removed = Map.TryRemove(key, out _);
-            return persisted || removed;
+            bool persisted = _persistence.Delete(gid, npcId, playerId, sid);
+            bool removedFromMemory = Map.TryRemove(key, out _);
+            return persisted || removedFromMemory;
         }
 
         public static int Count { get { return Map.Count; } }
 
         /// <summary>
-        /// 淘汰长时间不活跃的内存会话。持久化文件/MySQL 不删除，下次访问仍会恢复。
+        /// 淘汰长时间不活跃的内存会话。持久化文件/数据库不删除，下次访问仍会恢复。
         /// 正在使用的会话无法立即获取 Gate 时跳过，避免打断聊天。
         /// </summary>
         public static int PruneInactive(TimeSpan idle)
@@ -410,72 +261,21 @@ namespace AIBot.Server
         }
 
         /// <summary>
-        /// 清理 JSON 模式下长期不活跃的 Session 文件。只删除未被当前进程跟踪、
-        /// 且 lastActive/file time 均早于截止时间的文件；MySQL 模式无需处理文件。
+        /// 清理长期不活跃的持久化会话。门面从 Map 构造规范身份键与 legacy 保护路径，删除动作下沉到
+        /// <see cref="ISessionPersistence.DeleteExpired"/>（JSON 删文件；Mongo deleteMany；MySQL 跳过）。
         /// </summary>
         public static int PruneInactiveFiles(TimeSpan idle)
         {
-            if (idle <= TimeSpan.Zero || MySqlPersistence != null) return 0;
-            DateTime cutoff = DateTime.UtcNow - idle;
-            var tracked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (idle <= TimeSpan.Zero) return 0;
+            var activeKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var protectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (SessionState session in Map.Values)
             {
                 if (session == null) continue;
-                string path = FilePath(session.GameId, session.NpcId, session.PlayerId, session.SessionId);
-                if (!string.IsNullOrEmpty(path)) tracked.Add(path);
-                if (!string.IsNullOrEmpty(session.LegacySourcePath)) tracked.Add(session.LegacySourcePath);
+                activeKeys.Add(IdentityKey(session.GameId, session.NpcId, session.PlayerId, session.SessionId));
+                if (!string.IsNullOrEmpty(session.LegacySourcePath)) protectedPaths.Add(session.LegacySourcePath);
             }
-
-            int removed = 0;
-            string root = DataStore.FindDataRoot();
-            string gamesRoot = root == null ? null : Path.Combine(root, "games");
-            if (gamesRoot == null || !Directory.Exists(gamesRoot)) return 0;
-            foreach (string gameDir in Directory.GetDirectories(gamesRoot))
-            {
-                string gid = Path.GetFileName(gameDir);
-                if (!DataStore.IsValidId(gid)) continue;
-                foreach (string path in EnumerateSessionFiles(gid))
-                {
-                    if (tracked.Contains(path)) continue;
-                    try
-                    {
-                        DateTime fileTime = File.GetLastWriteTimeUtc(path);
-                        if (fileTime >= cutoff) continue;
-                        SessionFileDto dto = JsonConvert.DeserializeObject<SessionFileDto>(File.ReadAllText(path));
-                        // 待摘要消息、processing 幂等请求或未消费的工具挂起轮仍可能带有业务副作用，
-                        // 不能因闲置被清掉。
-                        if (dto != null && ((dto.evictedMessages != null && dto.evictedMessages.Count > 0)
-                            || dto.pendingToolRound != null
-                            || (dto.recentRequests ?? new List<ChatRequestRecord>())
-                                .Any(x => x != null && x.status == ChatRequestStatuses.Processing)))
-                            continue;
-                        DateTime lastActive = dto == null || dto.lastActiveUtc == default(DateTime)
-                            ? fileTime : dto.lastActiveUtc.ToUniversalTime();
-                        if (lastActive >= cutoff) continue;
-                        lock (IoLock)
-                        {
-                            if (File.Exists(path) && File.GetLastWriteTimeUtc(path) < cutoff)
-                            {
-                                File.Delete(path);
-                                removed++;
-                            }
-                        }
-                    }
-                    catch (IOException) { }
-                    catch (UnauthorizedAccessException) { }
-                    catch (JsonException) { }
-                }
-            }
-            return removed;
-        }
-
-        private static IEnumerable<string> EnumerateSessionFiles(string gid)
-        {
-            string root = DataStore.FindDataRoot();
-            string dir = root == null ? null : Path.Combine(root, "games", gid, "sessions");
-            return dir != null && Directory.Exists(dir)
-                ? Directory.GetFiles(dir, "*.json", SearchOption.AllDirectories)
-                : Array.Empty<string>();
+            return _persistence.DeleteExpired(idle, activeKeys, protectedPaths);
         }
 
         private static LlmMessage CopyMessage(LlmMessage message)
@@ -484,9 +284,9 @@ namespace AIBot.Server
         }
 
         private static SessionState FromDto(string gid, string playerId, string sid, int maxTurns,
-            SessionFileDto dto, string legacySourcePath, DateTime? fileTime = null)
+            SessionFileDto dto, int? messageCapacity = null)
         {
-            var memory = new ShortTermMemory(ToMessageCapacity(maxTurns));
+            var memory = new ShortTermMemory(messageCapacity ?? ToMessageCapacity(maxTurns));
             memory.RestoreEvicted((dto.evictedMessages ?? new List<LlmMessage>()).Select(CopyMessage));
             foreach (LlmMessage message in dto.messages ?? new List<LlmMessage>()) memory.Add(CopyMessage(message));
             return new SessionState
@@ -501,25 +301,9 @@ namespace AIBot.Server
                 SimState = dto.simState ?? new AIBot.Core.Context.SimGameState(),
                 RecentRequests = CopyRequests(dto.recentRequests),
                 PendingToolRound = dto.pendingToolRound,
-                LastActiveUtc = dto.lastActiveUtc == default(DateTime)
-                    ? (fileTime ?? DateTime.UtcNow) : dto.lastActiveUtc,
-                LegacySourcePath = legacySourcePath
+                LastActiveUtc = dto.lastActiveUtc == default(DateTime) ? DateTime.UtcNow : dto.lastActiveUtc,
+                LegacySourcePath = dto.legacySourcePath
             };
-        }
-
-        private static void WriteAtomic(string path, string content)
-        {
-            string temp = path + ".tmp-" + Guid.NewGuid().ToString("N");
-            try
-            {
-                File.WriteAllText(temp, content);
-                if (File.Exists(path)) File.Move(temp, path, true);
-                else File.Move(temp, path);
-            }
-            finally
-            {
-                if (File.Exists(temp)) File.Delete(temp);
-            }
         }
 
         public static ChatRequestRecord FindRequest(SessionState session, string requestId)

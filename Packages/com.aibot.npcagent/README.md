@@ -77,7 +77,7 @@ public class NpcDemo : MonoBehaviour
 - `onToolExecuted`：工具执行结果；
 - `onServerStatus`：Server 连接状态。
 
-Server 模式每轮请求使用幂等 `requestId`。断线时插件会自动进行有限次数恢复；需要手动恢复时，可使用 `agent.LastServerRequestId` 和 `RetryServerRequestAsync`。Server 的 JSON 存储模式适合单实例运行；维护任务会按 `Sessions:MemoryIdleHours` 清理长期不活跃的 Session 文件。正式环境若需要多实例，应切换到 MySQL 等共享存储。
+Server 模式每轮请求使用幂等 `requestId`。断线时插件会自动进行有限次数恢复；需要手动恢复时，可使用 `agent.LastServerRequestId` 和 `RetryServerRequestAsync`。Server 的 JSON 存储模式适合单实例运行；维护任务会按 `Sessions:MemoryIdleHours` 清理长期不活跃的 Session 文件。正式环境若需要多实例，应切换到 MongoDB 等共享存储。
 
 Local 模式若从仓库 `data/` 目录加载配置，可在游戏启动阶段调用
 `DevConfigStore.SetDataRoot(path)`，进行目录存在性校验后再创建 NPC；不要在运行中依赖绝对开发机路径。

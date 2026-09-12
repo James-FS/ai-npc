@@ -923,7 +923,7 @@ namespace AIBot.Server
 
             /// <summary>
             /// 幂等重放只需终态事件；token/reasoning 会随回复长度线性膨胀，
-            /// 不应写入 Session 文件或 MySQL payload。
+            /// 不应写入 Session 文件或数据库 payload。
             /// </summary>
             public List<string> SnapshotReplayEvents()
             {

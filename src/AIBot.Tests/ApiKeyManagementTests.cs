@@ -235,9 +235,9 @@ namespace AIBot.Tests
                 var config = ConfigWith(null);
                 var repository = new JsonMemoryRepository(() => tempRoot);
                 var queue = new MemorySummaryQueue(new PlayerMemoryService(repository), config,
-                    new MemoryAuditService(() => tempRoot));
+                    new MemoryAuditService(new JsonMemoryAuditStore(() => tempRoot)));
                 return await ReadinessService.CheckAsync(new StorageOptions { Provider = "Json" },
-                    mysql: null, queue: queue, config: config, ct: System.Threading.CancellationToken.None);
+                    queue: queue, config: config, ct: System.Threading.CancellationToken.None);
             }
             finally
             {

@@ -23,7 +23,7 @@
 - 策划可以配置 NPC 记忆偏好，但不能接触 API key、文件路径等敏感项。
 - 测试人员可以查看、纠正、删除、重新摘要玩家记忆。
 - 支持游戏自定义记忆字段，同时避免 Core DTO 无限增加游戏专属字段。
-- 保持现有 JSON 存储可用，同时提供 MySQL+Dapper 替换实现；两种存储由 Server 配置切换。
+- 保持现有 JSON 存储可用，同时提供 MongoDB 替换实现；两种存储由 Server 配置切换。
 - 对现有 session JSON 做兼容迁移，不要求一次性停机转换全部数据。
 
 ## 3. 非目标
@@ -62,15 +62,15 @@
 
 ### 客户端部署边界
 
-Unity 游戏运行时不属于 Vue 管理端，也不直接连接 MySQL。Unity 只打包 `AIBot.Core`、`AIBot.Unity` 和一个 `ILlmBackend` 实现：
+Unity 游戏运行时不属于 Vue 管理端，也不直接连接数据库。Unity 只打包 `AIBot.Core`、`AIBot.Unity` 和一个 `ILlmBackend` 实现：
 
 ```text
 Local 开发模式：Unity → OpenAI 兼容 LLM
-Server 正式模式：Unity → AIBot.Server → LLM / MySQL
-Vue 管理端：Vue → AIBot.Server → MySQL
+Server 正式模式：Unity → AIBot.Server → LLM / MongoDB
+Vue 管理端：Vue → AIBot.Server → MongoDB
 ```
 
-Local 模式用于 Demo、单机和离线联调；Server 模式用于在线游戏，负责隐藏模型 Key、统一校验游戏状态、保存玩家长期记忆、审计和限流。Vue、ASP.NET Core、MySQL、Dapper 和管理 API 都不进入 Unity 构建包。两种模式通过同一 `NpcAgent.ChatAsync()` 和事件契约切换，游戏业务层无需改写。
+Local 模式用于 Demo、单机和离线联调；Server 模式用于在线游戏，负责隐藏模型 Key、统一校验游戏状态、保存玩家长期记忆、审计和限流。Vue、ASP.NET Core、MongoDB 驱动和管理 API 都不进入 Unity 构建包。两种模式通过同一 `NpcAgent.ChatAsync()` 和事件契约切换，游戏业务层无需改写。
 
 当前 Unity 包已实现 `UnityWebRequestBackend`（Local 模式）和 `UnityServerBackend`（Server 模式）。在 `AgentConfigAsset` 或 NPC JSON 中设置 `runtimeMode=server`、`serverBaseUrl`，并在 `NpcAgent` 上填写可选的 `playerId/sessionId` 即可通过 Server 中转。Server 可通过 `AIBOT_CLIENT_TOKEN` 强制聊天客户端携带 Bearer Token，Unity `AIBotConnectionProfile.serverAuthToken` 应填写同一令牌；未配置时保持本机开发兼容模式，正式环境建议开启并配合 HTTPS/网关访问控制。
 
@@ -451,19 +451,19 @@ public interface IMemoryRepository
 }
 ```
 
-JSON 仍是默认开发存储，并采用逐文件信号量、乐观版本检查、临时文件 + 原子替换。MySQL 模式使用 Dapper、InnoDB 事务和 `memoryVersion` 乐观锁；长期记忆、Session、聊天日志和审计分别落到数据库表，Server API 契约保持不变。Session 由 `SessionStore` 独立管理，不与长期记忆仓储耦合。
+JSON 仍是默认开发存储，并采用逐文件信号量、乐观版本检查、临时文件 + 原子替换。Mongo 模式使用 MongoDB.Driver 和 `memoryVersion` 乐观锁；长期记忆、Session、聊天日志和审计分别落到 MongoDB 集合，Server API 契约保持不变。Session 由 `SessionStore` 独立管理，不与长期记忆仓储耦合。
 
 NPC、World 和 Memory Policy 配置读取使用基于文件修改时间的轻量缓存，并向调用方返回深拷贝，避免每次请求重复解析 JSON 或出现跨请求对象被意外修改。配置写入统一采用临时文件 + 原子替换；聊天、运行日志和审计日志文件名及查询时间统一使用 UTC。
 
 `GET /api/health` 只返回最小健康信息（`ok`/版本），不暴露 data 根目录、存储目标或 NPC 列表；`GET /api/ready` 用于部署探针，数据库不可用时仅返回稳定的 `database_unavailable` 错误码，不回传原始异常。
 
-当前 MySQL 表结构位于 `database/mysql/schema.sql`，Server 也支持 `Storage:MySql:AutoMigrate=true` 自动建表。迁移由 `schema_migrations` 版本表管理，当前版本 001 为基础表、002 为 `memory_summary_jobs` 摘要任务表；人工迁移 SQL 参考位于 `database/mysql/migrations/`。现有 JSON 长期记忆可通过 `dotnet run -- --migrate-json --exit-after-migrate` 幂等迁移。管理 API 可用 `AIBOT_ADMIN_TOKEN` 保护，聊天 API 可用 `AIBOT_CLIENT_TOKEN` 保护；本地可留空，正式部署不应依赖未鉴权模式。
+当前 MongoDB 存储没有外部 schema 文件：Server 在 `Storage:Mongo:AutoMigrate=true`（Mongo 模式必需）时通过 `MongoInitializer` 自动创建集合与索引，包括 `player_memories`（结构化事实内嵌）、`sessions`、`chat_logs`、`memory_audits`、`memory_summary_jobs` 与 `_meta`（记录初始化时间与 TTL 秒数）；`chat_logs`（默认 30 天）与 `memory_audits`（默认 365 天）的保留期由 TTL 索引控制。现有 JSON 长期记忆可通过 `dotnet run -- --migrate-json --exit-after-migrate` 幂等迁移（可用 `Storage__MigrationGameId` 指定游戏，仅迁移长期记忆）。管理 API 可用 `AIBOT_ADMIN_TOKEN` 保护，聊天 API 可用 `AIBOT_CLIENT_TOKEN` 保护；本地可留空，正式部署不应依赖未鉴权模式。
 
-开发环境可直接执行项目根目录的 `docker compose -f docker.yml up -d mysql` 启动 MySQL。该 Compose 文件只包含数据库服务，不会把 Unity、Vue 或 Server 打包进容器。默认使用宿主机 `3306`；若被其他 MySQL 占用，可在 `.env` 设置 `AIBOT_MYSQL_PORT`（本机示例为 `3307`），Server 连接宿主机映射端口，容器内部仍使用 `mysql:3306`。
+开发环境可直接执行项目根目录的 `docker compose -f docker.yml up -d mongo` 启动 MongoDB。该 Compose 文件只包含数据库服务，不会把 Unity、Vue 或 Server 打包进容器。默认使用宿主机 `27017`；若被其他 MongoDB 占用，可在 `.env` 设置 `AIBOT_MONGO_PORT`，Server 连接宿主机映射端口，容器内部仍使用 `mongo:27017`。
 
-本机联调请在被 Git 忽略的 `.env` 中自行设置数据库账号与强密码，不要把真实凭据写入文档或提交。宿主机 Server 的连接串需要包含 `SslMode=None;AllowPublicKeyRetrieval=True` 以兼容本地 Docker MySQL 的 `caching_sha2_password`；线上部署应使用 TLS 与独立强密码。
+本机联调请在被 Git 忽略的 `.env` 中自行设置数据库账号与强密码，不要把真实凭据写入文档或提交。Server 通过 `Storage:Mongo:ConnectionString` / `AIBOT_MONGO_CONNECTION_STRING` 与 `Storage:Mongo:Database` / `AIBOT_MONGO_DATABASE` 连接 MongoDB；Mongo 模式必须设置 `Storage:Mongo:AutoMigrate=true` / `AIBOT_MONGO_AUTOMIGRATE=true` 以创建集合与索引。线上部署应使用 TLS（连接串 `tls=true`）与独立强密码。
 
-Windows 本地开发可从项目根目录执行 `.\start-server-mysql.ps1`。该脚本读取 `.env` 中的数据库名、账号、密码和映射端口，确保 MySQL 容器健康后为当前 AIBot.Server 进程生成连接串；不需要永久写入 Windows 用户环境变量。
+Windows 本地开发可从项目根目录执行 `.\start-server-mongo.ps1`。该脚本读取 `.env` 中的库名、账号、密码和映射端口，确保 MongoDB 容器健康后为当前 AIBot.Server 进程生成连接串；不需要永久写入 Windows 用户环境变量。
 
 ### 9.4 管理 API
 
@@ -825,7 +825,7 @@ memory.audit
 
 - 引入 playerId。
 - 拆分 session 短期记忆与 player/NPC 长期记忆。
-- 实现 `IMemoryRepository`、JSON 版本和 MySQL/Dapper 版本。
+- 实现 `IMemoryRepository`、JSON 版本和 MongoDB 版本。
 - 实现后台摘要队列、版本控制和失败重试。
 - 实现旧数据懒迁移。
 
@@ -907,10 +907,10 @@ memory.audit
 
 - Server 对 `SupportedSummaryTriggers`、`SupportedMemoryScopes` 做大小写不敏感去重和空值清理，策略预览与控制台不会再出现重复能力标签。
 - 摘要队列增加幂等入队、玩家级失效后重新入队、非法标识拒绝和失败重试空队列等回归测试。
-- MySQL 模式下摘要任务持久化保存 pending/processing/failed 状态，Server 重启后恢复未完成任务；成功后删除任务记录，失败记录保留供后台重试。
-- 新增 `/api/ready` 就绪探针，检查 MySQL/表结构、LLM 配置、默认 NPC 和摘要队列，未就绪返回 503。
+- Mongo 模式下摘要任务持久化保存 pending/processing/failed 状态，Server 重启后恢复未完成任务；成功后删除任务记录，失败记录保留供后台重试。
+- 新增 `/api/ready` 就绪探针，检查 Mongo 连接与集合/索引、LLM 配置、默认 NPC 和摘要队列，未就绪返回 503。
 - 模型连接错误统一返回稳定错误码和 `retryable` 标志，便于 Vue、Unity 端按错误类型提示和重试。
-- Server 启动时输出存储提供方、JSON data 根目录或 MySQL 目标、MySQL 必需表存在性、记忆边界/能力、全局 LLM Key 是否配置及 default NPC 发现结果；不会输出任何密钥或完整连接字符串。
+- Server 启动时输出存储提供方、JSON data 根目录或 Mongo 目标（host/库名）、Mongo 必需集合存在性、记忆边界/能力、全局 LLM Key 是否配置及 default NPC 发现结果；不会输出任何密钥或完整连接字符串。
 
 ### 统一 API 错误处理（✅ 2026-08-27 已完成）
 
@@ -923,7 +923,7 @@ memory.audit
 - Server 运行日志由 `RuntimeLogService` 同时输出标准控制台和按日 JSONL，默认位于 `data/logs/runtime/`，保留 14 天；可通过 `Logging:RuntimeFileEnabled`、`Logging:RuntimeDirectory` 和 `Logging:RuntimeRetentionDays` 调整。
 - API 请求完成、未处理异常、限流和日志写入失败均带 `requestId`、HTTP 状态和耗时；运行日志默认只保存脱敏后的消息，不记录 API Key、Bearer Token 或完整敏感连接信息。
 - 新增 `GET /api/admin/runtime-logs`，支持按日期、级别、类别和 requestId 查询，Vue“请求日志”页可切换查看对话日志或 Server 运行日志。
-- `LogMaintenanceService` 每 24 小时清理过期数据：JSON 运行/审计日志按保留期删除；MySQL 模式清理 `chat_logs`（默认 30 天）和 `memory_audits`（默认 365 天）。
+- `LogMaintenanceService` 每 24 小时清理过期数据：JSON 运行/审计日志按保留期删除；Mongo 模式依赖 `chat_logs`（默认 30 天）和 `memory_audits`（默认 365 天）的 TTL 索引自动过期。
 - 会话列表返回 `idle`、`waiting`、`pending`、`failed` 状态及最近失败原因。
 - Vue 记忆检查器增加队列概览、当前/累计失败统计、失败提示和全局/会话级重试入口。
 - 验收重点：摘要写入、审计写入、Session 确认落盘三者全部成功后才消费待摘要消息；服务重启和重试均保持幂等。
@@ -932,7 +932,7 @@ memory.audit
 
 - 聊天 SSE 改为有界 Channel：中间 token/reasoning/tool 事件在拥塞时可丢弃，reply/done/error 终态事件强制保留；幂等重放仅保存终态事件并限制约 64 KB。
 - 增加模型参数服务端边界、上游 `[DONE]`/`finish_reason` 完整性检查、统一 Chat JSON 错误契约，以及仅管理端可用的 override。
-- JSON Session 闲置清理与保护规则落地；明确 JSON 单 Server 实例边界，多实例应使用 MySQL 等共享存储。
+- JSON Session 闲置清理与保护规则落地；明确 JSON 单 Server 实例边界，多实例应使用 Mongo 等共享存储。
 - 配置读取增加 mtime 缓存和深拷贝，配置文件采用原子替换；聊天/运行/审计日志统一按 UTC 写入和查询。
 - `/api/health` 最小化返回，`/api/ready` 隐藏数据库异常原文；RPG 接入改为可移植数据根定位，不再依赖固定 `D:/Code/aibot/data` 路径。
 - 当前验证：xUnit 107/107 通过，Server 构建 0 警告/0 错误；Unity/RPG 仍需在 Unity 编辑器中完成真实编译与联调。

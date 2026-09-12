@@ -12,7 +12,6 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using MySqlConnector;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -94,7 +93,7 @@ namespace AIBot.Server
 
         public static void MapAIBotAdmin(this WebApplication app)
         {
-            // JSON→MySQL 记忆迁移互斥锁：避免控制台按钮与启动参数并发执行
+            // JSON→Mongo 记忆迁移互斥锁：避免控制台按钮与启动参数并发执行
             SemaphoreSlim migrateGate = new SemaphoreSlim(1, 1);
             PlayerMemoryService playerMemories = app.Services.GetRequiredService<PlayerMemoryService>();
             MemorySummaryQueue summaryQueue = app.Services.GetRequiredService<MemorySummaryQueue>();
@@ -107,44 +106,48 @@ namespace AIBot.Server
             app.MapGet("/api/admin/storage", () =>
             {
                 StorageOptions storage = StorageOptions.From(app.Configuration);
-                JObject mysql = null;
-                if (storage.IsMySql && !string.IsNullOrWhiteSpace(storage.MySqlConnectionString))
+                JObject mongo = null;
+                if (storage.IsMongo && !string.IsNullOrWhiteSpace(storage.MongoConnectionString))
                 {
-                    MySqlConnectionStringBuilder cs = new MySqlConnectionStringBuilder(storage.MySqlConnectionString);
-                    mysql = new JObject
+                    // 只解析 host/库名，绝不回传连接串或凭据。
+                    var url = new MongoDB.Driver.MongoUrl(storage.MongoConnectionString);
+                    MongoDB.Driver.MongoServerAddress first = url.Servers == null
+                        ? null : url.Servers.FirstOrDefault();
+                    string host = first != null ? first.ToString() : "localhost";
+                    mongo = new JObject
                     {
-                        ["server"] = string.IsNullOrWhiteSpace(cs.Server) ? "localhost" : cs.Server,
-                        ["port"] = cs.Port,
-                        ["database"] = string.IsNullOrWhiteSpace(cs.Database) ? "<none>" : cs.Database,
-                        ["autoMigrate"] = storage.AutoMigrate
+                        ["host"] = host,
+                        ["database"] = string.IsNullOrWhiteSpace(storage.MongoDatabase) ? "<none>" : storage.MongoDatabase,
+                        ["autoMigrate"] = storage.MongoAutoMigrate
                     };
                 }
                 return JsonNet(new JObject
                 {
-                    ["provider"] = storage.IsMySql ? "MySql" : "Json",
-                    ["mysql"] = mysql,
+                    ["provider"] = storage.IsMongo ? "Mongo" : "Json",
+                    ["mongo"] = mongo,
                     ["previousProvider"] = StartupDiagnostics.PreviousStorageMode,
                     ["startedAt"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
                 });
             });
-            // JSON→MySQL 玩家记忆迁移：幂等，与启动参数 --migrate-json 等效；仅 MySQL 模式可用
+            // JSON→Mongo 记忆迁移：幂等，与启动参数 --migrate-json 等效；仅 Mongo 模式可用
             app.MapPost("/api/admin/storage/migrate-json", async (HttpContext http) =>
             {
                 StorageOptions storage = StorageOptions.From(app.Configuration);
-                if (!storage.IsMySql)
-                    return Results.Conflict("当前为 JSON 模式；请以 MySQL 模式启动 Server 后再执行迁移");
-                MySqlConnectionFactory factory = app.Services.GetService<MySqlConnectionFactory>();
-                if (factory == null)
-                    return Results.Conflict("MySQL 连接未初始化，无法执行迁移");
+                if (!storage.IsMongo)
+                    return Results.Conflict("当前为 JSON 模式；请以 Mongo 模式启动 Server 后再执行迁移");
+                MongoConnectionFactory mongoFactory = app.Services.GetService<MongoConnectionFactory>();
+                if (mongoFactory == null)
+                    return Results.Conflict("Mongo 连接未初始化，无法执行迁移");
                 if (!await migrateGate.WaitAsync(0, http.RequestAborted))
                     return Results.Conflict("已有一次迁移正在执行，请稍后再试");
                 try
                 {
                     var source = new JsonMemoryRepository();
-                    var target = new MySqlMemoryRepository(factory);
+                    var target = new MongoMemoryRepository(mongoFactory);
                     string gameId = app.Configuration["Storage:MigrationGameId"] ?? "default";
-                    MigrationResult result = await new JsonToMySqlMemoryMigrator(source, target)
-                        .RunAsync(gameId, http.RequestAborted);                    Console.WriteLine("JSON→MySQL memory migration (console): scanned=" + result.Scanned
+                    MigrationResult result = await new JsonToMemoryRepositoryMigrator(source, target)
+                        .RunAsync(gameId, http.RequestAborted);
+                    Console.WriteLine("JSON→Mongo memory migration (console): scanned=" + result.Scanned
                         + ", migrated=" + result.Migrated + ", skipped=" + result.Skipped);
                     return JsonNet(new JObject
                     {
@@ -478,6 +481,7 @@ namespace AIBot.Server
             app.MapGet("/api/games/{gid}/sessions", (string gid, string npcId, string playerId) =>
             {
                 if (!DataStore.IsValidId(gid)) return Results.BadRequest("非法 gameId");
+                npcId = OptionalNpcId(npcId);
                 if (npcId != null && !DataStore.IsValidId(npcId)) return Results.BadRequest("非法 npcId");
                 if (playerId != null && !DataStore.IsValidPlayerId(playerId)) return Results.BadRequest("非法 playerId");
                 var array = new JArray();
@@ -577,6 +581,7 @@ namespace AIBot.Server
                 string playerId, int? limit, int? offset, HttpContext http) =>
             {
                 if (!DataStore.IsValidId(gid)) return Results.BadRequest("非法 gameId");
+                npcId = OptionalNpcId(npcId);
                 if (npcId != null && !DataStore.IsValidId(npcId)) return Results.BadRequest("非法 npcId");
                 if (playerId != null && !DataStore.IsValidPlayerId(playerId)) return Results.BadRequest("非法 playerId");
                 MemoryListPage page = await playerMemories.ListAsync(gid, npcId, playerId,
@@ -812,6 +817,7 @@ namespace AIBot.Server
             app.MapGet("/api/games/{gid}/memory-migrations", (string gid, string npcId) =>
             {
                 if (!DataStore.IsValidId(gid)) return Results.BadRequest("非法 gameId");
+                npcId = OptionalNpcId(npcId);
                 if (npcId != null && !DataStore.IsValidId(npcId)) return Results.BadRequest("非法 npcId");
                 var candidates = SessionStore.ListByGame(gid, npcId)
                     .Where(s => string.IsNullOrEmpty(s.PlayerId)
@@ -865,6 +871,7 @@ namespace AIBot.Server
                 string playerId, string action, string date, int? limit, int? offset) =>
             {
                 if (!DataStore.IsValidId(gid)) return Results.BadRequest("非法 gameId");
+                npcId = OptionalNpcId(npcId);
                 if (npcId != null && !DataStore.IsValidId(npcId)) return Results.BadRequest("非法 npcId");
                 if (playerId != null && !DataStore.IsValidPlayerId(playerId)) return Results.BadRequest("非法 playerId");
                 if (action != null && action.Length > 128) return Results.BadRequest("action 过长");
@@ -940,6 +947,7 @@ namespace AIBot.Server
             app.MapGet("/api/games/{gid}/logs", (string gid, string date, string npcId, int? limit, int? offset) =>
             {
                 if (!DataStore.IsValidId(gid)) return Results.BadRequest("非法 gameId");
+                npcId = OptionalNpcId(npcId);
                 if (npcId != null && !DataStore.IsValidId(npcId)) return Results.BadRequest("非法 npcId");
                 return JsonNet(ChatLogService.Query(gid, date, npcId,
                     limit.HasValue && limit > 0 && limit <= 200 ? limit.Value : 50,
@@ -1105,6 +1113,13 @@ namespace AIBot.Server
                 && string.IsNullOrEmpty(submitted.memory.summaryModel.apiKey))
                 submitted.memory.summaryModel.apiKey = existing.memory?.summaryModel?.apiKey;
             return submitted;
+        }
+
+        /// <summary>可选 npcId 过滤参数：空串与缺省等价于"不过滤"。归一化为 null，
+        /// 服务层（ListByGame/ListAsync/Query）只认 null=不过滤，空串会被误当成过滤值。</summary>
+        private static string OptionalNpcId(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value;
         }
 
         private static MemorySettings RedactMemorySettings(MemorySettings source)

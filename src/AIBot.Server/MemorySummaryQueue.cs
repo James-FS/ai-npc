@@ -69,17 +69,17 @@ namespace AIBot.Server
         private readonly IConfiguration _configuration;
         private readonly MemoryAuditService _audit;
         private readonly ILogSink _log;
-        private readonly MySqlMemorySummaryJobPersistence _jobPersistence;
+        private readonly IMemorySummaryJobPersistence _jobPersistence;
         private long _failedJobs;
 
         public MemorySummaryQueue(PlayerMemoryService memoryService, IConfiguration configuration,
             MemoryAuditService audit, RuntimeLogService runtimeLogs = null,
-            MySqlConnectionFactory mysqlFactory = null)
+            IMemorySummaryJobPersistence jobPersistence = null)
         {
             _memoryService = memoryService;
             _configuration = configuration;
             _audit = audit;
-            _jobPersistence = mysqlFactory == null ? null : new MySqlMemorySummaryJobPersistence(mysqlFactory);
+            _jobPersistence = jobPersistence;
             _log = runtimeLogs == null ? (ILogSink)new ConsoleLogSink()
                 : new ServerLogSink(runtimeLogs, "SummaryQueue");
             int capacity = Math.Max(16, configuration.GetValue<int?>("Memory:SummaryQueueCapacity") ?? 256);
