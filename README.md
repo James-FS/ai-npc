@@ -2,10 +2,19 @@
 
 可插拔的游戏 NPC 智能Agent平台：纯 C# 核心 + Unity 包 + 独立 Server + Web 管理台，接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM）。
 
-- 方案文档：[AI-NPC-Agent-实施方案.md](./docs/architecture/AI-NPC-Agent-实施方案.md)（v3.1，含数据契约、四阶段记忆管理、摘要队列治理、运行加固、统一 Vue 调试工作台和附录A/B）
-- 记忆管理与 Vue 控制台设计：[docs/记忆管理与Vue控制台设计方案.md](./docs/记忆管理与Vue控制台设计方案.md)
-- Unity 插件快速接入：[Packages/com.aibot.npcagent/README.md](./Packages/com.aibot.npcagent/README.md)
-- 当前进度：M1、M4、M5 已完成，M2 基本完成，M6 基础链路已完成（详见主方案 §9）
+**核心特性**
+
+- **四层记忆**：Session 短期窗口 → 玩家×NPC 长期记忆（滚动摘要 + 可独立编辑的结构化事实），后台摘要队列自动压缩、失败重试、重启恢复。
+- **双运行模式**：`local`（Unity 直连模型，零依赖）与 `server`（集中配置、跨设备记忆、日志审计），游戏层 API 完全一致，切换只换配置。
+- **工具回传**：模型发起工具调用时 Server 挂起对话、由游戏侧真实执行后续跑；断线重放不会导致工具双执行。
+- **流式与幂等**：SSE 实时输出（token / reasoning / tool_call / reply），`requestId` 幂等去重与断线重放。
+- **可插拔存储**：JSON 文件（开发/单机默认）与 MongoDB（正式/在线）按配置切换，REST 契约不变。
+- **管理控制台**：Vue 3 实现的记忆治理、NPC/世界观配置、对话调试、日志与用量统计。
+
+| 文档 | 内容 |
+| --- | --- |
+| [Unity 插件接入](./Packages/com.aibot.npcagent/README.md) | 安装、NpcAgent 配置、两种模式接入与工具注册 |
+| [深入设计](./docs/architecture/AI-NPC-Agent-实施方案.md) | 架构决策、数据契约、记忆管理与运行设计 |
 
 ## 目录
 
@@ -13,7 +22,7 @@
 Packages/com.aibot.npcagent   Unity 包（Runtime/Core = 三端共享的 AIBot.Core 源码）
 src/AIBot.Server              ASP.NET Core 独立宿主 + 静态托管（根入口跳转 wwwroot/app）
 src/AIBot.Web                 Vue 3 + TypeScript 统一管理/调试控制台（可选后台）
-src/AIBot.Tests               xUnit 测试（107 项，Core/协议/请求幂等/工具边界/记忆仓储/摘要队列/运行日志与审计免网全链路）
+src/AIBot.Tests               xUnit 测试（Core/协议/请求幂等/工具边界/记忆仓储/存储与摘要队列全链路）
 data/games/{gameId}           NPC 配置/世界观/JSON 兼容存储（Mongo 模式下为迁移源/配置源）
 src/AIBot.Server/MongoInitializer.cs  MongoDB 集合/索引初始化与 TTL（AutoMigrate）
 docker.yml / start-server-mongo.ps1   本地 MongoDB 容器与 Server 启动脚本
@@ -196,7 +205,7 @@ curl -N -X POST http://localhost:5000/api/games/default/chat/stream \
   -d '{"requestId":"req-demo-001","npcId":"blacksmith_wang","sessionId":"s1","message":"hello"}'
 ```
 
-返回 SSE 事件流（主方案附录B）：`token` → `reasoning`（推理模型思考过程）→ `tool_call` → `reply` → `done`。
+返回 SSE 事件流：`token` → `reasoning`（推理模型思考过程）→ `tool_call` → `reply` → `done`。
 上游 OpenAI 兼容流必须正常收到 `[DONE]` 或带有 `finish_reason` 的结束 chunk；如果连接中途截断，Server/Unity 会将其视为模型传输失败并进入既定的重试或兜底流程。
 **没填 key 也能调通**：返回兜底台词（`"fallback":true`）。
 
