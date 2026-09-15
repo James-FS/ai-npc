@@ -72,8 +72,8 @@ onBeforeUnmount(() => window.clearTimeout(previewTimer))
 </template>
 
 <style scoped>
-.inherit-line { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; margin-bottom: 18px; border: 1px solid #cfe0ff; background: #f3f7ff; border-radius: 12px; }
+.inherit-line { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; margin-bottom: 18px; border: 1px solid var(--line); background: var(--surface-inset); border-radius: var(--radius-inset); }
 .inherit-line strong, .inherit-line span { display: block; }
 .inherit-line strong { font-size: 13px; }
-.inherit-line span { margin-top: 5px; color: #70809a; font-size: 11px; }
+.inherit-line span { margin-top: 5px; color: var(--graphite); font-size: 11px; }
 </style>

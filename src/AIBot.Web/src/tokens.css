@@ -1,0 +1,58 @@
+/* 设计令牌：唯一的取值来源。
+   P0：墨色阶、字体栈、焦点环、层级。
+   P1：装饰清理、图标体系、标题职责分离。
+   P2：--ramp-* 数据色阶启用，界面彩色收敛到数据层。
+   规则：彩色只属于数据，不属于界面。 */
+
+:root {
+  /* 表面 */
+  --field: #17233c;
+  --field-deep: #111a2d;
+  --paper: #eef2f7;
+  --card: #ffffff;
+  --line: #dfe6ef;
+
+  /* 墨色：--graphite 是浅底上唯一的次级文字色，实测 >=4.93:1 */
+  --ink: #17233c;
+  --graphite: #5c6981;
+  --graphite-on-field: #9aa7bf;
+  --muted: var(--graphite);
+
+  /* 品牌色已随 P2 收敛移除：彩色只属于数据，界面骨架走墨色。
+     主操作靠填充（实心 --ink 对描边）区分，不再依赖色相。 */
+
+  /* 数据色阶：单一色相，编码预算压力。只用于填充条，不做文字。
+     四档在浅色轨道上均 >=3:1（WCAG 非文字对比度），相邻档可辨识；
+     与 Element 警告色的差异随热度递增，避免“数据热”与“状态异常”混淆。 */
+  --ramp-cool: #ab7743;
+  --ramp-warm: #8e5122;
+  --ramp-hot: #6d3113;
+  --ramp-peak: #481d07;
+
+  /* 键盘焦点：浅底用深蓝，深底由 .sidebar 覆盖为亮蓝 */
+  --focus-ring: #1f5fd0;
+
+  /* 内层面板与凹陷轨道：全站各只有一个值。
+     此前内层底色散落 6 个近似冷灰（#f5f8fc/#f7f9fc/#f8fafc/#fbfcfe/#f2f4f7/#f0f2f6），
+     肉眼几乎无差别却让同一语义在不同页面呈现不同颜色；收敛后语义清晰。 */
+  --surface-inset: #f7f9fc;
+  --surface-track: #eef2f7;
+
+  /* 字体 */
+  --font-sans: system-ui, -apple-system, "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+
+  /* 圆角：四级标尺，按元件层级取用，不再出现 8/9/12px 这类无依据的中间值。
+     card  外层面板      panel / metric-card / budget-hero
+     inset 内层面板      表单段 / 状态卡 / 知识卡 / 提示框 / 聊天气泡
+     chip  小元件        计量条 / 进度轨 / 小标签底
+     pill  胶囊标签      tier-tag / source-tag */
+  --radius-card: 14px;
+  --radius-inset: 10px;
+  --radius-chip: 6px;
+  --radius-pill: 999px;
+
+  /* 层级 */
+  --z-sidebar: 10;
+  --z-topbar: 8;
+}

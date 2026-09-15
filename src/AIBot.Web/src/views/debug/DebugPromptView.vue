@@ -2,19 +2,39 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import LayerStack from '@/components/LayerStack.vue'
 import { debugApi } from '@/api/debug'
 import { useAppStore } from '@/stores/app'
+import { percentOf, rampClass, shareOf } from '@/utils/ramp'
 import type { PromptPreview, SimGameState } from '@/types/debug'
 
 const app = useAppStore()
 const playerId = ref(localStorage.getItem('aibot.debug.playerId') || 'player-local')
-const sessionId = ref(localStorage.getItem('aibot.debug.sessionId') || '')
+// 会话按 NPC 隔离，与流式对话页保持一致；旧的全局键已被对话页主动移除，
+// 因此这里不能再读取它，否则只要访问过对话页，本页 Session ID 就会永远为空。
+const npcId = computed(() => app.currentNpcId)
+function sessionKey() { return `aibot.debug.sessionId.${npcId.value || 'none'}` }
+const sessionId = ref(localStorage.getItem(sessionKey()) || '')
 const stage = ref(0)
 const favorability = ref(30)
 const preview = ref<PromptPreview | null>(null)
 const loading = ref(false)
-const npcId = computed(() => app.currentNpcId)
 const state = computed<SimGameState>(() => ({ stage: stage.value, favorability: favorability.value, extras: {}, items: {} }))
+
+/// 层条只关心「谁在吃这次的用量」，因此相对总量计算，不使用后端给的任意层色。
+const layers = computed(() => (preview.value?.layers ?? []).map(layer => ({
+  name: layer.name, tokens: layer.estTokens, text: layer.text,
+})))
+
+const budgetShare = computed(() => shareOf(preview.value?.totalEstTokens ?? 0, preview.value?.budget ?? 0))
+const budgetTone = computed(() => rampClass(budgetShare.value))
+const budgetWidth = computed(() => `${Math.min(100, budgetShare.value * 100)}%`)
+const budgetPercent = computed(() => percentOf(preview.value?.totalEstTokens ?? 0, preview.value?.budget ?? 0))
+
+function loadSessionId() {
+  sessionId.value = localStorage.getItem(sessionKey()) || ''
+}
+watch(() => npcId.value, loadSessionId)
 
 async function load() {
   if (!npcId.value) return
@@ -24,36 +44,74 @@ async function load() {
   finally { loading.value = false }
 }
 watch(() => [app.gameId, app.selectedNpcId], () => { preview.value = null })
-onMounted(load)
+onMounted(() => { loadSessionId(); load() })
 </script>
 
 <template>
-  <PageHeader title="Prompt 分层预览" description="查看当前 NPC、世界观、模拟状态和玩家记忆合并后的最终 System Prompt，并估算 token 使用量"><el-button type="primary" :loading="loading" :disabled="!npcId" @click="load">生成预览</el-button></PageHeader>
-  <div class="two-col prompt-grid">
-    <div class="layers-col">
-      <template v-if="preview">
-        <div v-for="layer in preview.layers" :key="layer.name" class="prompt-layer" :style="{ borderLeftColor: layer.color }"><div class="layer-head"><b>{{ layer.name }}</b><span>{{ layer.estTokens }} tokens</span></div><pre>{{ layer.text }}</pre></div>
-      </template>
-      <div v-else class="panel panel-body empty-state">点击“生成预览”查看分层 Prompt</div>
+  <PageHeader title="Prompt 分层预览" description="查看当前 NPC、世界观、模拟状态和玩家记忆合并后的最终 System Prompt，并估算 token 使用量">
+    <el-input v-model="playerId" class="ctrl ctrl-player" placeholder="Player ID" />
+    <el-input v-model="sessionId" class="ctrl ctrl-session" placeholder="Session ID（可选）" />
+    <el-input-number v-model="stage" class="ctrl ctrl-number" :min="0" controls-position="right" />
+    <el-input-number v-model="favorability" class="ctrl ctrl-number" :min="-100" :max="100" controls-position="right" />
+    <el-button type="primary" :loading="loading" :disabled="!npcId" @click="load">生成预览</el-button>
+  </PageHeader>
+
+  <template v-if="preview">
+    <div class="budget-hero">
+      <div class="budget-figure">
+        <strong>{{ preview.totalEstTokens }}</strong>
+        <span> / {{ preview.budget }} tokens</span>
+      </div>
+      <div class="budget-ruler"><i :class="budgetTone" :style="{ width: budgetWidth }"></i></div>
+      <div class="budget-percent">{{ budgetPercent }}</div>
     </div>
-    <div class="panel panel-body form-panel"><el-form label-position="top"><el-form-item label="Player ID"><el-input v-model="playerId" /></el-form-item><el-form-item label="Session ID"><el-input v-model="sessionId" placeholder="可选" /></el-form-item><el-form-item label="阶段"><el-input-number v-model="stage" :min="0" /></el-form-item><el-form-item label="好感"><el-input-number v-model="favorability" :min="-100" :max="100" /></el-form-item></el-form><div v-if="preview" class="meter"><i :style="{ width: `${Math.min(100, preview.totalEstTokens / preview.budget * 100)}%` }"></i></div><div v-if="preview" class="hint-box">预计 {{ preview.totalEstTokens }} tokens / 预算 {{ preview.budget }}</div></div>
-  </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h3>分层构成</h3>
+        <span class="panel-note">条长与色深表示该层占本次用量的份额，点击可展开原文</span>
+      </div>
+      <div class="panel-body">
+        <LayerStack :layers="layers" :total="preview.totalEstTokens" />
+      </div>
+    </div>
+  </template>
+  <div v-else class="panel panel-body empty-state">点击「生成预览」查看分层 Prompt</div>
 </template>
 
 <style scoped>
-/* 宽屏：分层 Prompt 占宽栏，参数表单收成右侧窄栏；窄屏折叠回上下堆叠（表单在上） */
-.two-col.prompt-grid { grid-template-columns: minmax(0, 1fr) 320px; }
-.prompt-grid .layers-col { grid-column: 1; grid-row: 1; min-width: 0; }
-.prompt-grid .form-panel { grid-column: 2; grid-row: 1; align-self: start; }
-@media (max-width: 1200px) {
-  .two-col.prompt-grid { grid-template-columns: 1fr; }
-  .prompt-grid .form-panel { grid-column: 1; grid-row: 1; }
-  .prompt-grid .layers-col { grid-column: 1; grid-row: 2; }
-}
-.meter { height: 10px; background: #e8edf4; border-radius: 6px; margin-top: 16px; overflow: hidden; }
-.meter i { display: block; height: 100%; background: linear-gradient(90deg, #3478f6, #13b8a6); }
-.prompt-layer { background: white; border-left: 5px solid; border-radius: 10px; padding: 14px 18px; margin-bottom: 12px; box-shadow: 0 6px 18px rgba(23,35,60,.04); }
-.layer-head { display: flex; justify-content: space-between; color: #6d7b90; font-size: 12px; margin-bottom: 8px; }
-.prompt-layer pre { margin: 0; white-space: pre-wrap; font-family: inherit; font-size: 13px; line-height: 1.6; }
-</style>
+.ctrl { flex: 0 0 auto; }
+.ctrl-player { width: 150px; }
+.ctrl-session { width: 200px; }
+.ctrl-number { width: 108px; }
 
+/* 预算量尺是这一页的论点：先回答「还剩多少」，再让下面的层回答「谁在吃」 */
+.budget-hero {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-bottom: 18px;
+  padding: 18px 22px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: 0 8px 28px rgba(23,35,60,.045);
+}
+.budget-figure { white-space: nowrap; }
+.budget-figure strong { font: 700 24px/1 var(--font-mono); letter-spacing: -1px; }
+.budget-figure span { font-size: 13px; color: var(--graphite); }
+.budget-ruler { flex: 1; height: 12px; border-radius: var(--radius-chip); background: var(--surface-track); overflow: hidden; }
+.budget-ruler i { display: block; height: 100%; min-width: 4px; border-radius: var(--radius-chip); transition: width .3s ease; }
+.budget-ruler i.ramp-cool { background: var(--ramp-cool); }
+.budget-ruler i.ramp-warm { background: var(--ramp-warm); }
+.budget-ruler i.ramp-hot { background: var(--ramp-hot); }
+.budget-ruler i.ramp-peak { background: var(--ramp-peak); }
+.budget-percent { min-width: 52px; text-align: right; font-size: 15px; font-weight: 700; }
+
+@media (max-width: 900px) {
+  .ctrl-player, .ctrl-session { width: 100%; }
+  .budget-hero { flex-wrap: wrap; gap: 12px; }
+  .budget-ruler { flex: 1 1 100%; order: 3; }
+  .budget-percent { margin-left: auto; }
+}
+</style>

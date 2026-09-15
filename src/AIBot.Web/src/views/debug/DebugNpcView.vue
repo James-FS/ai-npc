@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Connection } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { debugApi } from '@/api/debug'
 import { useAppStore } from '@/stores/app'
@@ -103,7 +104,7 @@ onMounted(load)
 
 <template>
   <PageHeader title="NPC 配置调试" description="迁移原调试台的人设、剧情块、模型、兜底台词和连接测试能力；记忆策略在 NPC 覆盖页面维护。">
-    <el-button @click="createNpc">＋ 新建 NPC</el-button><el-button type="danger" plain :disabled="!config" @click="deleteNpc">删除 NPC</el-button><el-button type="primary" :loading="saving" :disabled="!config" @click="save">保存配置</el-button>
+    <el-button :icon="Plus" @click="createNpc">新建 NPC</el-button><el-button type="danger" plain :disabled="!config" @click="deleteNpc">删除 NPC</el-button><el-button type="primary" :loading="saving" :disabled="!config" @click="save">保存配置</el-button>
   </PageHeader>
   <div v-loading="loading" class="panel" v-if="config">
     <div class="panel-body editor-grid">
@@ -119,12 +120,12 @@ onMounted(load)
       <div class="editor-column">
         <div class="section-title">模型设置</div>
         <el-form label-position="top"><el-form-item label="Base URL"><el-input v-model="config.model.baseUrl" /></el-form-item><el-form-item label="Model"><el-input v-model="config.model.model" /></el-form-item><el-form-item :label="config.hasApiKey ? 'API Key（已配置）' : 'API Key（未配置）'"><el-input type="password" show-password v-model="config.model.apiKey" :placeholder="config.hasApiKey ? '已配置，不会回显；输入新值可替换，留空保留' : '未配置；留空则使用全局 Key（系统设置）'" /><div v-if="config.hasApiKey" class="clear-key-hint">已配置独立 Key，输入新值可替换。<el-button link type="danger" :loading="clearingKey" @click="clearApiKey">清除独立 Key</el-button></div></el-form-item><el-form-item label="Temperature"><el-input-number v-model="config.model.temperature" :min="0" :max="2" :step="0.1" /></el-form-item><el-form-item label="Max Tokens"><el-input-number v-model="config.model.maxTokens" :min="1" :max="10000" /></el-form-item><el-form-item label="Timeout (ms)"><el-input-number v-model="config.model.timeoutMs" :min="1000" :max="120000" /></el-form-item></el-form>
-        <el-button :loading="testing" @click="testConnection">⚡ 测试连接</el-button>
+        <el-button :icon="Connection" :loading="testing" @click="testConnection">测试连接</el-button>
         <pre v-if="testResult" class="code-block result-block">{{ JSON.stringify(testResult, null, 2) }}</pre>
       </div>
     </div>
-    <div class="panel-body section-border"><div class="section-heading"><h3>剧情知识块</h3><el-button size="small" @click="addLore">＋ 添加</el-button></div><div v-for="(lore, index) in config.loreBlocks" :key="index" class="lore-card"><div class="lore-head"><el-input v-model="lore.title" placeholder="标题" /><el-input-number v-model="lore.unlockStage" :min="0" controls-position="right" /><el-switch v-model="lore.enabled" active-text="启用" /><el-switch v-model="lore.isSecret" active-text="秘密" /><el-button link type="danger" @click="removeLore(index)">删除</el-button></div><el-input v-model="lore.content" type="textarea" :rows="3" placeholder="知识内容" /></div><div v-if="!config.loreBlocks.length" class="empty-state">暂无剧情知识块</div></div>
-    <div class="panel-body section-border"><div class="section-heading"><h3>兜底台词</h3><el-button size="small" @click="addReply">＋ 添加</el-button></div><div v-for="(_, index) in config.fallbackReplies" :key="index" class="reply-row"><el-input v-model="config.fallbackReplies[index]" /><el-button link type="danger" @click="removeReply(index)">删除</el-button></div></div>
+    <div class="panel-body section-border"><div class="section-heading"><h3>剧情知识块</h3><el-button size="small" :icon="Plus" @click="addLore">添加</el-button></div><div v-for="(lore, index) in config.loreBlocks" :key="index" class="lore-card"><div class="lore-head"><el-input v-model="lore.title" placeholder="标题" /><el-input-number v-model="lore.unlockStage" :min="0" controls-position="right" /><el-switch v-model="lore.enabled" active-text="启用" /><el-switch v-model="lore.isSecret" active-text="秘密" /><el-button link type="danger" @click="removeLore(index)">删除</el-button></div><el-input v-model="lore.content" type="textarea" :rows="3" placeholder="知识内容" /></div><div v-if="!config.loreBlocks.length" class="empty-state">暂无剧情知识块</div></div>
+    <div class="panel-body section-border"><div class="section-heading"><h3>兜底台词</h3><el-button size="small" :icon="Plus" @click="addReply">添加</el-button></div><div v-for="(_, index) in config.fallbackReplies" :key="index" class="reply-row"><el-input v-model="config.fallbackReplies[index]" /><el-button link type="danger" @click="removeReply(index)">删除</el-button></div></div>
     <div class="panel-body section-border"><div class="section-heading"><h3>输出枚举</h3></div><div class="tag-section"><b>情绪</b><el-tag v-for="(tag, index) in config.output.emotions" :key="index" closable @close="removeTag('emotions', index)">{{ tag }}</el-tag><el-button size="small" @click="addTag('emotions')">添加</el-button></div><div class="tag-section"><b>动作</b><el-tag v-for="(tag, index) in config.output.actions" :key="index" closable @close="removeTag('actions', index)">{{ tag }}</el-tag><el-button size="small" @click="addTag('actions')">添加</el-button></div></div>
   </div>
   <div v-else class="panel empty-state">当前 Game 没有可编辑的 NPC，请先创建或刷新 NPC 列表。</div>
@@ -135,15 +136,15 @@ onMounted(load)
 .section-border { border-top: 1px solid #edf0f5; }
 .section-title, .section-heading h3 { font-size: 15px; font-weight: 700; margin: 0 0 14px; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; }
-.lore-card { padding: 12px; background: #f7f9fc; border: 1px solid #e6ebf2; border-radius: 10px; margin-bottom: 10px; }
+.lore-card { padding: 12px; background: var(--surface-inset); border: 1px solid #e6ebf2; border-radius: var(--radius-inset); margin-bottom: 10px; }
 .lore-head { display: grid; grid-template-columns: 1fr 120px auto auto auto; gap: 8px; align-items: center; margin-bottom: 8px; }
 .lore-head :deep(.el-input-number) { width: 100%; }
 .reply-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .reply-row .el-input { flex: 1; }
 .tag-section { display: flex; align-items: center; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
-.tag-section b { width: 40px; color: #65738a; font-size: 13px; }
+.tag-section b { width: 40px; color: var(--graphite); font-size: 13px; }
 .result-block { margin-top: 14px; max-height: 220px; }
-.clear-key-hint { margin-top: 6px; font-size: 12px; color: #909399; line-height: 1.6; }
+.clear-key-hint { margin-top: 6px; font-size: 12px; color: var(--graphite); line-height: 1.6; }
 @media (max-width: 1100px) { .editor-grid { grid-template-columns: 1fr; } .lore-head { grid-template-columns: 1fr 100px auto auto auto; } }
 </style>
 

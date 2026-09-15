@@ -227,10 +227,10 @@ watch(() => props.modelValue.extensions, value => {
 
 <style scoped>
 .policy-form { display: grid; gap: 18px; }
-.form-section { border: 1px solid #e4eaf2; border-radius: 12px; overflow: hidden; }
-.form-section-title { padding: 16px 18px; background: #f8fafc; border-bottom: 1px solid #e9edf3; }
+.form-section { border: 1px solid #e4eaf2; border-radius: var(--radius-inset); overflow: hidden; }
+.form-section-title { padding: 16px 18px; background: var(--surface-inset); border-bottom: 1px solid #e9edf3; }
 .form-section-title h4 { margin: 0; font-size: 14px; }
-.form-section-title p { margin: 5px 0 0; color: #7a879b; font-size: 11px; }
+.form-section-title p { margin: 5px 0 0; color: var(--graphite); font-size: 11px; }
 .policy-row { min-height: 68px; padding: 12px 16px; display: grid; grid-template-columns: minmax(0, 1fr) 86px minmax(150px, 210px) 66px; align-items: center; gap: 12px; border-bottom: 1px solid #edf0f5; position: relative; isolation: isolate; }
 .policy-row > * { min-width: 0; }
 .policy-form--game .policy-row.compact-row { grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) 58px; }
@@ -242,7 +242,7 @@ watch(() => props.modelValue.extensions, value => {
 .policy-row:last-child { border-bottom: 0; }
 .field-copy strong, .field-copy span { display: block; }
 .field-copy strong { font-size: 13px; }
-.field-copy span { color: #8792a5; font-size: 11px; margin-top: 5px; line-height: 1.45; }
+.field-copy span { color: var(--graphite); font-size: 11px; margin-top: 5px; line-height: 1.45; }
 .model-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; padding: 18px; border-top: 1px solid #edf0f5; }
 .extension-toggle { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding: 12px 16px 0; }
 .form-section > .el-textarea { padding: 14px 16px 16px; }

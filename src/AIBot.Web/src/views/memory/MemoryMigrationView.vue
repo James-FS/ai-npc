@@ -65,5 +65,5 @@ onMounted(load)
 
 <style scoped>
 .migration-warning { padding: 16px 18px; }
-.count { margin-left: auto; color: #7d899c; font-size: 12px; }
+.count { margin-left: auto; color: var(--graphite); font-size: 12px; }
 </style>

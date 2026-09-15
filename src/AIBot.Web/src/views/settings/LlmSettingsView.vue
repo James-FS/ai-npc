@@ -86,12 +86,12 @@ onMounted(load)
 
 <style scoped>
 .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 18px; }
-.status-card { padding: 16px; border: 1px solid #e6ebf2; border-radius: 10px; background: #f7f9fc; }
-.status-card.active { border-color: #b7d7ff; background: #f0f7ff; }
-.status-label { font-size: 13px; font-weight: 600; color: #65738a; }
+.status-card { padding: 16px; border: 1px solid #e6ebf2; border-radius: var(--radius-inset); background: var(--surface-inset); }
+.status-card.active { border-color: #8b95a8; }
+.status-label { font-size: 13px; font-weight: 600; color: var(--graphite); }
 .status-value { font-size: 20px; font-weight: 700; margin: 6px 0 4px; }
-.status-value.muted { color: #98a2b3; }
-.status-note { font-size: 12px; color: #98a2b3; }
+.status-value.muted { color: var(--graphite); }
+.status-note { font-size: 12px; color: var(--graphite); }
 .priority-tip { margin-bottom: 18px; }
 .key-form { max-width: 520px; }
 .key-actions { display: flex; gap: 10px; }

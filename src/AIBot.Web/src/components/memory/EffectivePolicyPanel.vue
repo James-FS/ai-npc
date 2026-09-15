@@ -44,6 +44,6 @@ function display(value: unknown) {
 .effective-list { display: grid; gap: 1px; }
 .effective-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; min-height: 38px; border-bottom: 1px solid #f0f2f6; font-size: 12px; }
 .effective-row:last-child { border-bottom: 0; }
-.effective-row > span:first-child { color: #66748b; }
+.effective-row > span:first-child { color: var(--graphite); }
 .effective-row strong { font-size: 12px; }
 </style>

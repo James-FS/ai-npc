@@ -96,13 +96,13 @@ onMounted(load)
 </template>
 
 <style scoped>
-.metric-value small { font-size: 13px; letter-spacing: 0; color: #738099; }
+.metric-value small { font-size: 13px; letter-spacing: 0; color: var(--graphite); }
 .settings-list { display: grid; }
 .settings-list > div { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid #edf0f5; font-size: 13px; }
 .settings-list > div:last-child { border-bottom: 0; }
-.settings-list > div > span:first-child { color: #66748b; }
+.settings-list > div > span:first-child { color: var(--graphite); }
 .tag-gap { margin-left: 6px; }
-.muted-hint { color: #8c98aa; font-size: 12px; }
+.muted-hint { color: var(--graphite); font-size: 12px; }
 .danger { color: #c8414b; }
 </style>
 

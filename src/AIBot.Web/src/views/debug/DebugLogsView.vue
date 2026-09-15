@@ -98,7 +98,6 @@ onMounted(() => load())
 </template>
 
 <style scoped>
-.panel-note { color: #8994a7; font-size: 12px; }
 .flag { margin-left: 6px; }
 .pager { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px; border-top: 1px solid #edf0f5; }
 .log-detail { max-height: 300px; margin: 8px 0; }
