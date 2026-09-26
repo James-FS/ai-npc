@@ -428,10 +428,14 @@ namespace AIBot.Unity
             }
             else
             {
-                _backend = new UnityWebRequestBackend(_config.model);
+                // 直连模式下同样按会话派生上游会话标识，让路由与 prompt 缓存能跨轮命中
+                string localSessionId = useConnectionProfile ? connectionProfile.sessionId : sessionId;
+                string upstreamSession = AIBot.Core.Llm.LlmRequestSession.For("local",
+                    resolvedGameId, resolvedNpcId, localSessionId);
+                _backend = new UnityWebRequestBackend(_config.model, upstreamSession);
                 _serverBackend = null;
                 _loop = new AgentLoop(_backend, UnityLogSink.Instance,
-                    backendFactory: settings => new UnityWebRequestBackend(settings));
+                    backendFactory: settings => new UnityWebRequestBackend(settings, upstreamSession));
             }
         }
 

@@ -33,6 +33,7 @@ namespace AIBot.Core.Llm
     {
         private static readonly HttpClient SharedClient = CreateClient();
         private readonly ModelSettings _settings;
+        private readonly string _sessionId;
 
         /// <summary>代理支持：AIBot_HTTP_PROXY / HTTPS_PROXY 环境变量（如 http://127.0.0.1:7890）。用于访问 opencode.ai 等直连不通的端点。</summary>
         private static HttpClient CreateClient()
@@ -52,9 +53,12 @@ namespace AIBot.Core.Llm
             return new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         }
 
-        public HttpLlmBackend(ModelSettings settings)
+        /// <param name="settings">模型配置。</param>
+        /// <param name="sessionId">会话标识（见 <see cref="LlmRequestSession"/>）；为空时用进程级兜底值。</param>
+        public HttpLlmBackend(ModelSettings settings, string sessionId = null)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            _sessionId = string.IsNullOrWhiteSpace(sessionId) ? LlmRequestSession.Default : sessionId;
         }
 
         public async Task ChatStreamAsync(LlmRequest request, ILlmStreamSink sink, CancellationToken ct)
@@ -136,6 +140,7 @@ namespace AIBot.Core.Llm
                         JsonConvert.SerializeObject(request), Encoding.UTF8, "application/json");
                     if (!string.IsNullOrWhiteSpace(_settings.apiKey))
                         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _settings.apiKey);
+                    httpRequest.Headers.TryAddWithoutValidation(LlmRequestSession.HeaderName, _sessionId);
 
                     using (HttpResponseMessage resp = await SharedClient.SendAsync(
                         httpRequest, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token))

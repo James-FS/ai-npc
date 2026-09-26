@@ -347,7 +347,9 @@ namespace AIBot.Server
                         job.NpcId, job.PlayerId, ct);
                     JToken before = JToken.FromObject(existing);
                     ModelSettings settings = ResolveSummarySettings(policy.summaryModel, cfg.model);
-                    var backend = new HttpLlmBackend(settings);
+                    // 摘要按玩家范围独立成一会话标识：避免与聊天共用缓存前缀而互相污染
+                    var backend = new HttpLlmBackend(settings, LlmRequestSession.For("summarize",
+                        job.GameId, job.NpcId, job.PlayerId));
                     PlayerMemorySummaryResult summarized = await MemorySummarizer.RunStructuredAsync(
                         backend, settings, existing, snapshot, policy.maxFacts, job.SessionId, _log, ct,
                         policy);

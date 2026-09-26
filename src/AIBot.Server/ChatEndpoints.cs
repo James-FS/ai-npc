@@ -377,7 +377,10 @@ namespace AIBot.Server
                 if (useSimulatedTools)
                     new AIBot.Core.Tools.SimulatedToolHost(session.SimState).RegisterAll(toolRegistry);
 
-                var backend = new HttpLlmBackend(cfg.model);
+                // 会话标识供上游做路由与 prompt 缓存：同一会话每轮稳定，跨会话与摘要模型调用区分开
+                string upstreamSession = LlmRequestSession.For("chat", gid, body.NpcId, body.PlayerId,
+                    body.SessionId);
+                var backend = new HttpLlmBackend(cfg.model, upstreamSession);
                 var loop = new AgentLoop(backend, new ServerLogSink(runtimeLogs, "Agent",
                     new RuntimeLogContext
                     {
@@ -387,7 +390,7 @@ namespace AIBot.Server
                         PlayerId = body.PlayerId,
                         SessionId = body.SessionId
                     }),
-                    backendFactory: settings => new HttpLlmBackend(settings));
+                    backendFactory: settings => new HttpLlmBackend(settings, upstreamSession));
                 var input = new AgentRunInput
                 {
                     Config = cfg,

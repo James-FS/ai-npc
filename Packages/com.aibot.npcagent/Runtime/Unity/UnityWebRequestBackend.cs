@@ -17,10 +17,14 @@ namespace AIBot.Unity
     public sealed class UnityWebRequestBackend : ILlmBackend
     {
         private readonly ModelSettings _settings;
+        private readonly string _sessionId;
 
-        public UnityWebRequestBackend(ModelSettings settings)
+        /// <param name="settings">模型配置。</param>
+        /// <param name="sessionId">会话标识（见 <see cref="LlmRequestSession"/>）；为空时用进程级兜底值。</param>
+        public UnityWebRequestBackend(ModelSettings settings, string sessionId = null)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            _sessionId = string.IsNullOrWhiteSpace(sessionId) ? LlmRequestSession.Default : sessionId;
         }
 
         public async Task ChatStreamAsync(LlmRequest request, ILlmStreamSink sink, CancellationToken ct)
@@ -78,6 +82,7 @@ namespace AIBot.Unity
                 req.SetRequestHeader("Content-Type", "application/json");
                 if (!string.IsNullOrWhiteSpace(_settings.apiKey))
                     req.SetRequestHeader("Authorization", "Bearer " + _settings.apiKey);
+                req.SetRequestHeader(LlmRequestSession.HeaderName, _sessionId);
                 req.timeout = Math.Max(1, _settings.timeoutMs / 1000);
 
                 AsyncOperation op = req.SendWebRequest();
