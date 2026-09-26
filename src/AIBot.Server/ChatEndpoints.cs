@@ -572,14 +572,19 @@ namespace AIBot.Server
                     ["usage"] = usage,
                     ["elapsedMs"] = result.ElapsedMs
                 };
-                if (result.UsedFallback && sse.LastModelError != null)
+                // 兜底必须始终带诊断：传输故障有 LastModelError（更精确的上游状态），
+                // 解析失败等无传输异常的路径则由 FallbackReason 补齐，避免客户端只见「兜底」不知原因。
+                ModelErrorInfo diagnostic = result.UsedFallback
+                    ? (sse.LastModelError ?? ModelErrorContract.FromFallbackReason(result.FallbackReason))
+                    : null;
+                if (diagnostic != null)
                 {
                     replyEvent["diagnostic"] = new JObject
                     {
-                        ["code"] = sse.LastModelError.Code,
-                        ["status"] = sse.LastModelError.Status,
-                        ["message"] = sse.LastModelError.Message,
-                        ["retryable"] = sse.LastModelError.Retryable
+                        ["code"] = diagnostic.Code,
+                        ["status"] = diagnostic.Status,
+                        ["message"] = diagnostic.Message,
+                        ["retryable"] = diagnostic.Retryable
                     };
                 }
                 sse.Write(replyEvent);

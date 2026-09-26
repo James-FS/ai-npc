@@ -213,5 +213,35 @@ namespace AIBot.Tests
             Assert.Equal("user", backend.Requests[0].Messages[1].Role);
             Assert.Contains("新问题", backend.Requests[0].Messages[1].Content);
         }
+
+        [Fact]
+        public async Task UnparseableReply_ReportsStructuredReplyInvalidReason()
+        {
+            // 模型正常返回，但内容不是约定的结构化 JSON：宿主应能据此给出准确诊断
+            var backend = new MockLlmBackend(Sse.Round(Sse.Token("好的，我这就去办。")));
+            var loop = new AgentLoop(backend);
+            var memory = new ShortTermMemory(12);
+
+            AgentLoopResult result = await loop.RunAsync(
+                Input(Config(false), null, memory, "帮我个忙"), new RecordingSink(), CancellationToken.None);
+
+            Assert.True(result.UsedFallback);
+            Assert.Equal(FallbackReasons.StructuredReplyInvalid, result.FallbackReason);
+            Assert.Equal("好的，我这就去办。", result.RawText);   // 原文保留，便于排查
+            Assert.Equal(2, memory.Messages.Count);              // 兜底轮同样入账
+        }
+
+        [Fact]
+        public async Task TransportFailure_ReportsModelRequestFailedReason()
+        {
+            var loop = new AgentLoop(new MockLlmBackend());       // 无脚本 → 立即失败
+            var memory = new ShortTermMemory(12);
+
+            AgentLoopResult result = await loop.RunAsync(
+                Input(Config(false), null, memory, "你好"), new RecordingSink(), CancellationToken.None);
+
+            Assert.True(result.UsedFallback);
+            Assert.Equal(FallbackReasons.ModelRequestFailed, result.FallbackReason);
+        }
     }
 }

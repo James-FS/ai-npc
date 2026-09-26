@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using AIBot.Core;
 using AIBot.Core.Llm;
 
 namespace AIBot.Server
@@ -14,6 +15,27 @@ namespace AIBot.Server
 
     public static class ModelErrorContract
     {
+        /// <summary>
+        /// 没有传输层异常时的兜底诊断（典型是结构化解析失败：模型正常返回，但内容不是
+        /// 约定 JSON）。直接沿用 Core 的 <c>AgentLoopResult.FallbackReason</c> 作为 code，
+        /// 使 Server 模式与 local 模式向游戏层暴露同一套失败标识。
+        /// </summary>
+        public static ModelErrorInfo FromFallbackReason(string reason)
+        {
+            switch (reason)
+            {
+                case FallbackReasons.StructuredReplyInvalid:
+                    return Info(FallbackReasons.StructuredReplyInvalid, 502,
+                        "模型返回内容无法解析为约定的结构化回复", false);
+                case FallbackReasons.ModelRequestFailed:
+                    return Info(FallbackReasons.ModelRequestFailed, 502, "模型请求失败", true);
+                case FallbackReasons.AgentFailed:
+                    return Info(FallbackReasons.AgentFailed, 502, "Agent 处理本轮对话失败", false);
+                default:
+                    return Info("model_error", 502, "模型请求失败", false);
+            }
+        }
+
         public static ModelErrorInfo Classify(Exception error)
         {
             int status = ExtractStatus(error);

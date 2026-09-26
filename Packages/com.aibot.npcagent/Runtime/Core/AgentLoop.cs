@@ -45,6 +45,20 @@ namespace AIBot.Core
         void OnToolExecuted(ToolExecution execution);
     }
 
+    /// <summary>
+    /// <see cref="AgentLoopResult.FallbackReason"/> 的稳定取值。宿主据此分支或转成诊断码，
+    /// 不得依赖字符串字面量。三端共享，保证 local 与 server 模式暴露同一套标识。
+    /// </summary>
+    public static class FallbackReasons
+    {
+        /// <summary>模型请求失败（传输层异常，如网络、限流、鉴权）。</summary>
+        public const string ModelRequestFailed = "model_request_failed";
+        /// <summary>模型正常返回，但内容无法解析为约定的结构化回复。</summary>
+        public const string StructuredReplyInvalid = "structured_reply_invalid";
+        /// <summary>AgentLoop 内部的非模型故障。</summary>
+        public const string AgentFailed = "agent_failed";
+    }
+
     public sealed class AgentLoopResult
     {
         public StructuredReply Reply;
@@ -134,7 +148,7 @@ namespace AIBot.Core
                 AgentLoopResult fallback = BuildFallback(cfg, started);
                 // 只向游戏层暴露稳定诊断码，避免把上游响应正文或其他敏感信息带进 UI。
                 fallback.FallbackReason = ex is LlmFallbackException
-                    ? "model_request_failed" : "agent_failed";
+                    ? FallbackReasons.ModelRequestFailed : FallbackReasons.AgentFailed;
                 fallback.FlaggedInjection = sanitized.Flagged;
                 Remember(input, ResolveEntryUserMessage(input, sanitized), SerializeReply(fallback.Reply));
                 if (input.NotifyReplyBeforeSummary)
@@ -280,7 +294,7 @@ namespace AIBot.Core
                 fallback.ToolExecutions = executions;
                 fallback.Usage = totalUsage;
                 fallback.RawText = finalText;
-                fallback.FallbackReason = "structured_reply_invalid";
+                fallback.FallbackReason = FallbackReasons.StructuredReplyInvalid;
                 fallback.FlaggedInjection = sanitized.Flagged;
                 Remember(input, userMessage, SerializeReply(fallback.Reply));
                 return fallback;
