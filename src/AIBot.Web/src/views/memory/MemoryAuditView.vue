@@ -105,14 +105,14 @@ onMounted(() => load(true))
 </template>
 
 <style scoped>
-.audit-count { margin-left: auto; color: #7d899c; font-size: 12px; }
+.audit-count { margin-left: auto; color: var(--graphite); font-size: 12px; }
 .pagination { display: flex; justify-content: flex-end; padding: 16px 18px; border-top: 1px solid #edf0f5; }
 .diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 4px 22px 16px; }
-.diff-grid h4 { margin: 0 0 8px; color: #526078; }
+.diff-grid h4 { margin: 0 0 8px; color: var(--graphite); }
 .metadata { padding: 0 22px 18px; }
 .metadata > b { display: block; margin-bottom: 8px; }
 .cleanup-form { margin-top: 20px; }
-.retention-note { margin-left: 12px; color: #8994a7; font-size: 11px; }
+.retention-note { margin-left: 12px; color: var(--graphite); font-size: 11px; }
 .cleanup-result { max-height: 300px; }
 .cleanup-more { margin-top: 12px; }
 </style>

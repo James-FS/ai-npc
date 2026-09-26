@@ -57,7 +57,7 @@ onMounted(load)
 .debug-sessions { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr); gap: 20px; }
 .detail-panel { min-height: 300px; }
 .time-cell { white-space: nowrap; }
-.panel-head small { color: #8995a8; font-weight: normal; margin-left: 8px; }
+.panel-head small { color: var(--graphite); font-weight: normal; margin-left: 8px; }
 .message-line { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid #edf0f5; white-space: pre-wrap; line-height: 1.55; }
 @media (max-width: 1200px) { .debug-sessions { grid-template-columns: 1fr; } }
 </style>

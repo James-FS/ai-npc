@@ -2,6 +2,7 @@
 import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Refresh } from '@element-plus/icons-vue'
 import { memoryApi } from '@/api/memory'
 import { useAppStore } from '@/stores/app'
 
@@ -11,7 +12,7 @@ const router = useRouter()
 const npcMemoryRoute = computed(() => `/npc/${encodeURIComponent(app.currentNpcId || 'none')}/memory`)
 
 async function refreshNpcs() {
-  try { await Promise.all([app.loadNpcs(), app.loadGames()]) } catch (error) { ElMessage.error(error instanceof Error ? error.message : 'NPC 列表加载失败') }
+  try { await Promise.all([app.loadNpcs(), app.loadGames(), app.loadReadiness()]) } catch (error) { ElMessage.error(error instanceof Error ? error.message : 'NPC 列表加载失败') }
 }
 
 async function createGame() {
@@ -57,46 +58,50 @@ onMounted(() => { app.loadStorage(); refreshNpcs() })
       </div>
       <nav class="nav-list">
         <div class="nav-divider">记忆治理</div>
-        <RouterLink to="/settings/memory"><span>01</span>系统边界</RouterLink>
-        <RouterLink to="/game/memory-policy"><span>02</span>Game 策略</RouterLink>
-        <RouterLink :to="npcMemoryRoute"><span>03</span>NPC 覆盖</RouterLink>
-        <RouterLink to="/memories"><span>04</span>记忆检查器</RouterLink>
-        <RouterLink to="/memory-migrations"><span>05</span>旧记忆迁移</RouterLink>
-        <RouterLink to="/memory-audit"><span>06</span>审计记录</RouterLink>
+        <RouterLink to="/settings/memory">系统边界</RouterLink>
+        <RouterLink to="/game/memory-policy">Game 策略</RouterLink>
+        <RouterLink :to="npcMemoryRoute">NPC 覆盖</RouterLink>
+        <RouterLink to="/memories">记忆检查器</RouterLink>
+        <RouterLink to="/memory-migrations">旧记忆迁移</RouterLink>
+        <RouterLink to="/memory-audit">审计记录</RouterLink>
         <div class="nav-divider">调试工作台</div>
-        <RouterLink to="/debug/chat"><span>07</span>流式对话</RouterLink>
-        <RouterLink to="/debug/npc"><span>08</span>NPC 配置</RouterLink>
-        <RouterLink to="/debug/world"><span>09</span>世界观</RouterLink>
-        <RouterLink to="/debug/prompt"><span>10</span>Prompt 预览</RouterLink>
-        <RouterLink to="/debug/sessions"><span>11</span>会话调试</RouterLink>
-        <RouterLink to="/debug/logs"><span>12</span>请求日志</RouterLink>
-        <RouterLink to="/debug/stats"><span>13</span>用量统计</RouterLink>
+        <RouterLink to="/debug/chat">流式对话</RouterLink>
+        <RouterLink to="/debug/npc">NPC 配置</RouterLink>
+        <RouterLink to="/debug/world">世界观</RouterLink>
+        <RouterLink to="/debug/prompt">Prompt 预览</RouterLink>
+        <RouterLink to="/debug/sessions">会话调试</RouterLink>
+        <RouterLink to="/debug/logs">请求日志</RouterLink>
+        <RouterLink to="/debug/stats">用量统计</RouterLink>
         <div class="nav-divider">系统设置</div>
-        <RouterLink to="/settings/llm"><span>14</span>模型 Key 管理</RouterLink>
+        <RouterLink to="/settings/llm">模型 Key 管理</RouterLink>
       </nav>
       <div class="sidebar-foot">
-        <span class="status-dot"></span>
-        <div><strong>AIBot.Server</strong><small>管理 API · v0.3<template v-if="app.storageLabel"> · {{ app.storageLabel }}</template></small></div>
+        <span class="status-dot" :class="`is-${app.health}`" :title="app.healthLabel"></span>
+        <div>
+          <strong>AIBot.Server</strong>
+          <small>管理 API · v0.3<template v-if="app.storageLabel"> · {{ app.storageLabel }}</template></small>
+          <small class="health-line">{{ app.healthLabel }}</small>
+        </div>
       </div>
     </aside>
 
     <main class="main-shell">
       <header class="topbar">
-        <div>
-          <div class="eyebrow">AIBot.Server · {{ route.meta.title }}</div>
-          <h1>统一管理台</h1>
+        <div class="topbar-brand">
+          <span class="eyebrow">AIBot.Server</span>
+          <strong>统一管理台</strong>
         </div>
         <div class="context-bar">
           <label>Game</label>
           <el-select v-model="app.gameId" class="compact-input" filterable allow-create default-first-option title="选择或输入 Game ID">
             <el-option v-for="id in app.gameIds" :key="id" :label="id" :value="id" />
           </el-select>
-          <el-button circle title="新建 Game" @click="createGame">＋</el-button>
+          <el-button circle title="新建 Game" @click="createGame"><el-icon><Plus /></el-icon></el-button>
           <label>NPC</label>
           <el-select v-model="app.selectedNpcId" class="npc-select" :loading="app.loadingNpcs">
             <el-option v-for="id in app.npcIds" :key="id" :label="id" :value="id" />
           </el-select>
-          <el-button circle title="刷新 NPC" @click="refreshNpcs">↻</el-button>
+          <el-button circle title="刷新 NPC" @click="refreshNpcs"><el-icon><Refresh /></el-icon></el-button>
         </div>
       </header>
       <section class="workspace"><RouterView /></section>

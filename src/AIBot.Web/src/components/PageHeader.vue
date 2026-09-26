@@ -5,7 +5,7 @@ defineProps<{ title: string; description: string }>()
 <template>
   <div class="page-head">
     <div class="page-head-text">
-      <h2>{{ title }}</h2>
+      <h1>{{ title }}</h1>
       <p>{{ description }}</p>
     </div>
     <div class="page-actions"><slot /></div>

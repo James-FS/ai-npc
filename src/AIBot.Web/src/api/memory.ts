@@ -1,4 +1,4 @@
-import { download, request } from './http'
+import { download, request, ApiError } from './http'
 import type {
   EffectiveMemoryPolicy, MemoryAuditEntry, MemoryFact, MemoryListPage,
   MemoryPolicy, MemoryPolicyLimits, MemorySettings, MigrationCandidate,
@@ -9,8 +9,32 @@ import type {
 const enc = encodeURIComponent
 const gamePath = (gameId: string, path: string) => `/api/games/${enc(gameId)}${path}`
 
+export interface ReadinessCheck { ok: boolean; [key: string]: unknown }
+export interface Readiness {
+  ready: boolean
+  status: string
+  checks?: {
+    storage?: ReadinessCheck
+    llm?: ReadinessCheck
+    npc?: ReadinessCheck
+    summaryQueue?: ReadinessCheck
+  }
+}
+
 export const memoryApi = {
   limits: () => request<MemoryPolicyLimits>('/api/admin/memory-limits'),
+  /// <summary>探测就绪状态。/api/ready 未就绪时返回 503，属正常结果而非错误，
+  /// 因此在这里取回响应体一并返回，避免调用方（store）为此依赖 ApiError 与 http 层。</summary>
+  readiness: async (): Promise<{ reachable: boolean; data: Readiness | null }> => {
+    try {
+      return { reachable: true, data: await request<Readiness>('/api/ready') }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 503) {
+        return { reachable: true, data: (error.payload as Readiness | null) ?? null }
+      }
+      return { reachable: false, data: null }
+    }
+  },
   storage: () => request<StorageInfo>('/api/admin/storage'),
   migrateJsonToMongo: () => request<JsonMigrationResult>('/api/admin/storage/migrate-json', { method: 'POST' }),
   games: () => request<{ games: string[] }>('/api/games'),

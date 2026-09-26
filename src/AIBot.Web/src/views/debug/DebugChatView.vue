@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Switch } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { debugApi, streamChat } from '@/api/debug'
 import { ApiError } from '@/api/http'
@@ -192,7 +193,7 @@ onMounted(() => { persist(); void restoreSession() })
     </div>
     <div class="debug-side">
       <div class="panel panel-body"><h3>本次会话</h3><el-form label-position="top"><el-form-item label="Player ID"><el-input v-model="playerId" @change="onSessionIdentityChange" /></el-form-item><el-form-item label="Session ID"><el-input v-model="sessionId" @change="onSessionIdentityChange" /></el-form-item><el-form-item label="剧情阶段"><el-input-number v-model="stage" :min="0" :max="999" /></el-form-item><el-form-item label="好感度"><el-input-number v-model="favorability" :min="-100" :max="100" /></el-form-item><el-form-item label="推理内容"><el-switch v-model="showReasoning" inline-prompt active-text="显示" inactive-text="隐藏" @change="persistReasoningPreference" /><div class="field-hint">仅控制调试台显示，不影响模型请求。</div></el-form-item></el-form></div>
-      <div class="panel panel-body"><h3>A/B 模型对比</h3><p class="hint">当前输入会分别请求默认模型和覆盖模型，不写入主会话。</p><el-input v-model="compareModel" placeholder="覆盖模型，例如 deepseek-chat" /><el-button class="compare-button" :loading="streaming" :disabled="!message.trim() || !compareModel.trim()" @click="compare">⚔ 开始对比</el-button><div v-if="compareResult" class="compare-result"><div><b>默认模型</b><p>{{ compareResult.default || '无回复' }}</p></div><div><b>覆盖模型</b><p>{{ compareResult.override || '无回复' }}</p></div></div></div>
+      <div class="panel panel-body"><h3>A/B 模型对比</h3><p class="hint">当前输入会分别请求默认模型和覆盖模型，不写入主会话。</p><el-input v-model="compareModel" placeholder="覆盖模型，例如 deepseek-chat" /><el-button class="compare-button" :icon="Switch" :loading="streaming" :disabled="!message.trim() || !compareModel.trim()" @click="compare">开始对比</el-button><div v-if="compareResult" class="compare-result"><div><b>默认模型</b><p>{{ compareResult.default || '无回复' }}</p></div><div><b>覆盖模型</b><p>{{ compareResult.override || '无回复' }}</p></div></div></div>
     </div>
   </div>
 </template>
@@ -201,22 +202,22 @@ onMounted(() => { persist(); void restoreSession() })
 .debug-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, .65fr); gap: 20px; min-height: 640px; }
 .chat-panel { display: flex; flex-direction: column; min-height: 640px; padding: 18px; }
 .chat-log { flex: 1; min-height: 420px; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 6px; }
-.chat-message { max-width: 80%; padding: 11px 14px; border-radius: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-.chat-message.user { align-self: flex-end; color: white; background: #3478f6; }
-.chat-message.assistant { align-self: flex-start; background: #f1f5fa; }
+.chat-message { max-width: 80%; padding: 11px 14px; border-radius: var(--radius-inset); line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.chat-message.user { align-self: flex-end; color: white; background: var(--ink); }
+.chat-message.assistant { align-self: flex-start; background: var(--surface-inset); }
 .message-role { font-size: 11px; opacity: .72; margin-bottom: 4px; font-weight: 700; }
-.reasoning { color: #75839b; border-left: 2px solid #aebbd0; padding-left: 8px; margin-bottom: 7px; font-size: 12px; }
+.reasoning { color: var(--graphite); border-left: 2px solid var(--line); padding-left: 8px; margin-bottom: 7px; font-size: 12px; }
 .message-tag { margin: 7px 6px 0 0; }
-.inject-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 12px 0 8px; color: #7b879b; font-size: 12px; }
+.inject-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 12px 0 8px; color: var(--graphite); font-size: 12px; }
 .chat-input { display: flex; gap: 8px; }
 .chat-input .el-input { flex: 1; }
 .debug-side { display: grid; gap: 20px; align-content: start; }
 .panel-body h3 { margin: 0 0 16px; font-size: 15px; }
-.field-hint { margin-top: 6px; color: #7b879b; font-size: 12px; line-height: 1.5; }
-.hint { color: #7b879b; font-size: 12px; line-height: 1.6; }
+.field-hint { margin-top: 6px; color: var(--graphite); font-size: 12px; line-height: 1.5; }
+.hint { color: var(--graphite); font-size: 12px; line-height: 1.6; }
 .compare-button { width: 100%; margin-top: 12px; }
 .compare-result { display: grid; gap: 10px; margin-top: 16px; }
-.compare-result > div { padding: 10px; background: #f5f8fc; border-radius: 9px; font-size: 12px; }
+.compare-result > div { padding: 10px; background: var(--surface-inset); border-radius: var(--radius-inset); font-size: 12px; }
 .compare-result p { margin: 5px 0 0; white-space: pre-wrap; line-height: 1.5; }
 @media (max-width: 1200px) { .debug-grid { grid-template-columns: 1fr; } }
 </style>

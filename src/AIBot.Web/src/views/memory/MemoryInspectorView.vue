@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
+import RampMeter from '@/components/RampMeter.vue'
 import { ApiError } from '@/api/http'
 import { memoryApi } from '@/api/memory'
 import { useAppStore } from '@/stores/app'
@@ -191,15 +192,15 @@ onMounted(async () => { await search(true); await refreshQueue() })
     <div v-if="store.detail" class="detail-stack" v-loading="store.loading">
       <div class="detail-toolbar"><el-tag effect="plain">{{ store.detail.gameId }}</el-tag><span>最近摘要：{{ formatDate(store.detail.lastSummarizedUtc) }}</span><span class="toolbar-spacer"></span><el-button @click="exportMemory">导出 JSON</el-button><el-button type="danger" plain @click="deleteMemory">清空记忆</el-button></div>
 
-      <div class="panel"><div class="panel-head"><h3>长期摘要</h3><el-button type="primary" :disabled="summaryDraft === (store.detail.summary || '')" @click="saveSummary">保存摘要</el-button></div><div class="panel-body"><el-input v-model="summaryDraft" type="textarea" :rows="7" maxlength="4000" show-word-limit placeholder="该玩家与 NPC 的滚动关系摘要" /></div></div>
+      <div class="panel"><div class="panel-head"><h3>长期摘要</h3><span class="tier-tag">蒸馏 · 长期</span><el-button type="primary" :disabled="summaryDraft === (store.detail.summary || '')" @click="saveSummary">保存摘要</el-button></div><div class="panel-body"><el-input v-model="summaryDraft" type="textarea" :rows="7" maxlength="4000" show-word-limit placeholder="该玩家与 NPC 的滚动关系摘要" /></div></div>
 
-      <div class="panel"><div class="panel-head"><h3>结构化事实（{{ store.detail.facts.length }}）</h3><el-button type="primary" @click="newFact">新增事实</el-button></div>
+      <div class="panel"><div class="panel-head"><h3>结构化事实（{{ store.detail.facts.length }}）</h3><span class="tier-tag">结构化 · 长期</span><el-button type="primary" @click="newFact">新增事实</el-button></div>
         <el-table :data="store.detail.facts">
           <el-table-column label="固定" width="70" align="center"><template #default="scope"><el-switch :model-value="scope.row.pinned" @change="togglePinned(scope.row as MemoryFact, Boolean($event))" /></template></el-table-column>
           <el-table-column prop="category" label="类别" width="130" />
           <el-table-column prop="key" label="Key" min-width="150" />
           <el-table-column label="内容" min-width="300"><template #default="scope"><div class="fact-value">{{ scope.row.value }}</div></template></el-table-column>
-          <el-table-column label="可信度" width="100"><template #default="scope">{{ Math.round(scope.row.confidence * 100) }}%</template></el-table-column>
+          <el-table-column label="可信度" width="130"><template #default="scope"><RampMeter :value="scope.row.confidence" :max="1" tone="neutral" :label="`${Math.round(scope.row.confidence * 100)}%`" /></template></el-table-column>
           <el-table-column prop="source" label="来源" width="110" />
           <el-table-column label="更新时间" min-width="170"><template #default="scope">{{ formatDate(scope.row.updatedUtc) }}</template></el-table-column>
           <el-table-column label="操作" width="120" fixed="right"><template #default="scope"><el-button link type="primary" @click="editFact(scope.row as MemoryFact)">编辑</el-button><el-button link type="danger" @click="removeFact(scope.row as MemoryFact)">删除</el-button></template></el-table-column>
@@ -207,7 +208,7 @@ onMounted(async () => { await search(true); await refreshQueue() })
         </el-table>
       </div>
 
-      <div class="panel"><div class="panel-head"><h3>相关短期会话</h3><span class="panel-note">只有存在待摘要消息的会话才能手动摘要</span></div>
+      <div class="panel"><div class="panel-head"><h3>相关短期会话</h3><span class="tier-tag">原始 · 短期</span><span class="panel-note">只有存在待摘要消息的会话才能手动摘要</span></div>
         <el-table :data="store.sessions">
           <el-table-column prop="sessionId" label="Session ID" min-width="220" />
           <el-table-column prop="messageCount" label="窗口消息" width="100" align="center" />
@@ -233,14 +234,13 @@ onMounted(async () => { await search(true); await refreshQueue() })
 </template>
 
 <style scoped>
-.filter-count { margin-left: auto; color: #7b879a; font-size: 12px; }
-.queue-strip { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 11px 14px; border: 1px solid #e8edf5; border-radius: 8px; background: #fbfcfe; color: #66748b; font-size: 12px; }
+.filter-count { margin-left: auto; color: var(--graphite); font-size: 12px; }
+.queue-strip { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 11px 14px; border: 1px solid #e8edf5; border-radius: var(--radius-inset); background: var(--surface-inset); color: var(--graphite); font-size: 12px; }
 .queue-label { color: #35445d; font-weight: 600; }
-.queue-note { margin-left: auto; color: #8994a7; }
+.queue-note { margin-left: auto; color: var(--graphite); }
 .pagination { display: flex; justify-content: flex-end; padding: 16px 18px; border-top: 1px solid #edf0f5; }
 .detail-stack { display: grid; gap: 18px; }
-.detail-toolbar { display: flex; align-items: center; gap: 12px; color: #748096; font-size: 12px; }
+.detail-toolbar { display: flex; align-items: center; gap: 12px; color: var(--graphite); font-size: 12px; }
 .toolbar-spacer { flex: 1; }
-.panel-note { color: #8994a7; font-size: 11px; }
 .dialog-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 </style>
