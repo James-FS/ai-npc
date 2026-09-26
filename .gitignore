@@ -44,6 +44,9 @@ data/system-settings.json
 # 运行时会话数据（端到端测试产物，不入库）
 data/games/*/sessions/
 
+# 运行时玩家记忆（与 sessions 同类，属运行数据）
+data/games/*/memories/
+
 # Server runtime state
 data/.last-storage-mode
 

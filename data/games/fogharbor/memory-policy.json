@@ -1,0 +1,14 @@
+{
+  "shortTermTurns": 12,
+  "summaryThreshold": 20,
+  "summaryTrigger": "message_count",
+  "memoryScope": "player_npc",
+  "maxFacts": 8,
+  "rememberPlayerProfile": true,
+  "rememberPromises": true,
+  "rememberQuestEvents": true,
+  "rememberCasualChat": false,
+  "backgroundSummarization": true,
+  "summaryModel": null,
+  "extensions": {}
+}
