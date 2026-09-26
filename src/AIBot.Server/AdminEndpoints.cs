@@ -1068,11 +1068,21 @@ namespace AIBot.Server
             return clone;
         }
 
-        /// <summary>只暴露末 4 位供人工核对是哪把 key；短 key 一律 ***。</summary>
-        private static string MaskKeyTail(string key)
+        private const int MaskPrefixLength = 7;
+        private const int MaskTailLength = 4;
+        private const string MaskStars = "*****";
+        /// <summary>短于此长度时前后缀合计占比过大，等于把 key 还原出来，直接整体遮蔽。</summary>
+        private const int MaskMinKeyLength = 16;
+
+        /// <summary>
+        /// 脱敏展示：前 7 位 + 固定 5 星号 + 末 4 位（如 sk-ca1a2*****bd31），够人工辨认是哪把 key。
+        /// 星号数量写死不随原串长度变化，顺带不泄露密钥长度；短 key 一律 ***。
+        /// </summary>
+        private static string MaskKey(string key)
         {
             if (string.IsNullOrEmpty(key)) return null;
-            return key.Length <= 8 ? "***" : "…" + key.Substring(key.Length - 4);
+            if (key.Length < MaskMinKeyLength) return "***";
+            return key.Substring(0, MaskPrefixLength) + MaskStars + key.Substring(key.Length - MaskTailLength);
         }
 
         /// <summary>
@@ -1082,12 +1092,13 @@ namespace AIBot.Server
         private static JObject LlmSettingsStatus(bool includeOk)
         {
             string key = SystemSettingsStore.LoadLlmApiKey();
+            string envKey = Environment.GetEnvironmentVariable(ApiKeyResolver.EnvVarName);
             JObject status = new JObject
             {
                 ["hasConsoleKey"] = !string.IsNullOrEmpty(key),
-                ["maskedTail"] = MaskKeyTail(key),
-                ["envConfigured"] = !string.IsNullOrWhiteSpace(
-                    Environment.GetEnvironmentVariable(ApiKeyResolver.EnvVarName)),
+                ["maskedKey"] = MaskKey(key),
+                ["envConfigured"] = !string.IsNullOrWhiteSpace(envKey),
+                ["envMaskedKey"] = string.IsNullOrWhiteSpace(envKey) ? null : MaskKey(envKey),
                 ["priority"] = "npc > console > env > appsettings"
             };
             if (includeOk) status["ok"] = true;

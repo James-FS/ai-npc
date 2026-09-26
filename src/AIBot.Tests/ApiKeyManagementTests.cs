@@ -299,8 +299,31 @@ namespace AIBot.Tests
             Assert.Contains("\"hasConsoleKey\":true", json);
             Assert.Contains("\"envConfigured\":true", json);
             Assert.Contains("\"priority\":\"npc > console > env > appsettings\"", json);
-            Assert.DoesNotContain("sk-new-key-0123456789", json); // 明文永不回显
-            Assert.Contains("…6789", json);                        // 仅尾 4 位
+            Assert.Contains("\"maskedKey\":\"sk-new-*****6789\"", json);      // 前 7 位 + 末 4 位
+            Assert.Contains("\"envMaskedKey\":\"env-key*****6789\"", json);   // 环境变量同样脱敏回显
+            Assert.DoesNotContain("sk-new-key-0123456789", json);             // 明文永不回显
+            Assert.DoesNotContain("env-key-0123456789", json);
+        }
+
+        [Theory]
+        [InlineData("sk-ca1a2QWERTYUIOPbd31", "sk-ca1a*****bd31")]  // 常规长度：前 7 位 + 末 4 位
+        [InlineData("0123456789abcdef", "0123456*****cdef")]        // 16 位边界：仍按格式脱敏
+        [InlineData("sk-short1234567", "***")]                      // 15 位：前后缀占比过高，整体遮蔽
+        [InlineData("sk-abcd", "***")]
+        [InlineData(null, null)]
+        public void MaskKey_ShowsPrefixAndTail_AndHidesShortKeys(string key, string expected)
+        {
+            Assert.Equal(expected, (string)InvokeMaskKey(key));
+        }
+
+        [Fact]
+        public void MaskKey_StarCountIsFixed_SoLengthIsNotLeaked()
+        {
+            string shorter = (string)InvokeMaskKey("sk-" + new string('a', 20) + "tail");
+            string longer = (string)InvokeMaskKey("sk-" + new string('b', 80) + "tail");
+
+            Assert.Equal(5, shorter.Split('*').Length - 1);
+            Assert.Equal(5, longer.Split('*').Length - 1);
         }
 
         private static object InvokeLlmStatus(bool includeOk)
@@ -309,6 +332,14 @@ namespace AIBot.Tests
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             Assert.NotNull(method);
             return method.Invoke(null, new object[] { includeOk });
+        }
+
+        private static object InvokeMaskKey(string key)
+        {
+            var method = typeof(AdminEndpoints).GetMethod("MaskKey",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(method);
+            return method.Invoke(null, new object[] { key });
         }
     }
 }

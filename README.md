@@ -239,7 +239,7 @@ docker exec -i ai-npc-mongo mongorestore --username aibot --password <密码> --
 侧栏按「记忆治理（01-06）/ 调试工作台（07-13）/ 系统设置（14）」分组。管理台顶部可切换 Game（支持下拉选择与输入新 ID）与 NPC，底部常驻存储模式与 Server 启动时间徽标。
 
 - **Game / NPC 管理**：「02 Game 策略」页右上角可应用策略预设；Game 旁的「＋」按钮可直接创建新 Game（生成 world 与 memory-policy 骨架）；「08 NPC 配置」页弹窗式新建 NPC（内置模板兜底，无需先准备模板文件）。
-- **模型 Key 管理**：「14 模型 Key 管理」页集中保存全局 LLM API Key（写入 `data/system-settings.json`，已入 .gitignore），对所有未单独配置 Key 的 NPC 生效；密钥保存后永不回显明文，页面只显示尾 4 位。NPC 配置页的 API Key 输入框可给单个 NPC 设独立 Key（留空保留原值，旁边标注已配置/未配置）。公共部署务必设置 `AIBOT_ADMIN_TOKEN` 保护管理 API。
+- **模型 Key 管理**：「14 模型 Key 管理」页集中保存全局 LLM API Key（写入 `data/system-settings.json`，已入 .gitignore），对所有未单独配置 Key 的 NPC 生效；密钥保存后永不回显明文，页面以「前 7 位 + `*****` + 末 4 位」脱敏显示（如 `sk-ca1a*****bd31`，星号数量固定不暴露密钥长度，过短的 Key 显示 `***`），控制台 Key 与环境变量 `AIBOT_LLM_KEY` 均给出脱敏串；支持随时添加、替换与删除全局 Key。NPC 配置页的 API Key 输入框可给单个 NPC 设独立 Key（留空保留原值，旁边标注已配置/未配置）。公共部署务必设置 `AIBOT_ADMIN_TOKEN` 保护管理 API。
 - **存储模式指示**：「01 系统边界」页显示当前存储模式（Json/Mongo）、Mongo 目标（host/库名）与自动创建集合/索引状态；检测到本次与上次运行模式不同时，会显示提醒横幅（两种模式数据互不可见）。
 - **JSON→Mongo 迁移按钮**：Mongo 模式下「01 系统边界」页可一键把 JSON 侧的玩家长期记忆迁入 Mongo（幂等，与 `--migrate-json` 等效）。
 - **会话按 NPC 隔离**：调试对话页为每个 NPC 记住独立会话，切换 NPC 自动切换会话，不再串扰。

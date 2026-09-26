@@ -2,8 +2,11 @@ import { request } from './http'
 
 export interface LlmKeyStatus {
   hasConsoleKey: boolean
-  maskedTail?: string | null
+  /** 脱敏串，形如 sk-ca1a2*****bd31（前 7 位 + 末 4 位）；短 key 为 ***，未配置为 null */
+  maskedKey?: string | null
   envConfigured: boolean
+  /** 环境变量 key 的脱敏串，规则同上；未配置为 null */
+  envMaskedKey?: string | null
   priority: string
 }
 
