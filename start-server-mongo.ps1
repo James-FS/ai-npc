@@ -81,11 +81,6 @@ $user = Get-RequiredValue -Values $settings -Name "AIBOT_MONGO_USER"
 $password = Get-RequiredValue -Values $settings -Name "AIBOT_MONGO_PASSWORD"
 $portText = Get-RequiredValue -Values $settings -Name "AIBOT_MONGO_PORT"
 
-# 可选：从根目录 .env 注入模型 API Key。NPC 配置中的非空 apiKey 仍具有更高优先级。
-if ($settings.ContainsKey("AIBOT_LLM_KEY") -and -not [string]::IsNullOrWhiteSpace([string]$settings["AIBOT_LLM_KEY"])) {
-    $env:AIBOT_LLM_KEY = [string]$settings["AIBOT_LLM_KEY"]
-}
-
 $port = 0
 if (-not [int]::TryParse($portText, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
     throw "AIBOT_MONGO_PORT must be a valid TCP port: $portText"

@@ -157,16 +157,15 @@ Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包�
 项目提供一个统一入口（根路径兼容跳转）：
 
 - `http://localhost:5000/`：自动跳转到 Vue 流式对话调试页。
-- `http://localhost:5000/app/`：Vue 统一管理台，包含记忆治理六页、模型 Key 管理设置页，以及对话、NPC、世界观、Prompt、Session、日志和统计调试页（能力速览见下文「管理控制台」）。
+- `http://localhost:5000/app/`：Vue 统一管理台，包含记忆治理六页、模型连接管理设置页，以及对话、NPC、世界观、Prompt、Session、日志和统计调试页（能力速览见下文「管理控制台」）。
 
 ```bash
 # 1) 跑单元测试（不需要网络和 key）
 cd src/AIBot.Tests && dotnet test
 
-# 2) 填 API key（优先级：NPC配置 > 控制台全局 Key > 环境变量 AIBOT_LLM_KEY > appsettings）
-#    推荐在管理台「14 模型 Key 管理」页保存全局 Key（存 data/system-settings.json，不入 Git）；
-#    单个 NPC 需要独立 Key 时，在「08 NPC 配置」页的 API Key 输入框填写（留空保留原值）。
-#    也可以继续用环境变量：.env 的 AIBOT_LLM_KEY。已验证的三种模型接法：
+# 2) 在管理台「14 模型连接管理」新增连接，填写 Base URL、模型 ID 和 API Key，
+#    然后选择控制台默认连接；需要例外的 NPC 再单独选择连接。
+#    已验证的三种 OpenAI 兼容模型接法：
 #    - OpenCode Go（国内免梯子）: baseUrl=https://opencode.ai/zen/go/v1, model=ox-alpha-free
 #    - DeepSeek:                 baseUrl=https://api.deepseek.com,              model=deepseek-chat
 #    - 智谱GLM 免费档:            baseUrl=https://open.bigmodel.cn/api/paas/v4, model=glm-4-flash
@@ -236,10 +235,14 @@ docker exec -i ai-npc-mongo mongorestore --username aibot --password <密码> --
 
 ### 管理控制台
 
+「14 模型连接管理」页统一创建完整连接，并分配给控制台默认模型、特定 NPC、Game 摘要或 NPC 摘要。页面同时脱敏展示旧控制台 Key 和环境变量的兼容回退来源。公共部署须设置 `AIBOT_ADMIN_TOKEN`。
+
+同页还可建立 Server 模式的「模型连接配置」：填写名称、Base URL（接口前缀）、API Key 和模型 ID；连接 ID 由系统自动生成，API 格式固定为 `OpenAI 兼容 Chat Completions`。API Key 在新建时必填，编辑时留空可保留原值。连接可分配给控制台默认模型、NPC 主模型、NPC 摘要模型或 Game 摘要模型。NPC 主模型连接优先于控制台默认连接；未分配时才继续使用旧 NPC 设置及四级 Key 回退。绑定后地址、模型和 Key 整套生效。连接配置保存在不入 Git 的 `data/model-connections.json`，已有 Key 仅脱敏回显。Unity `local` 模式仍按 Unity 本地配置运行；此处连接配置只影响 Server 模式。
+
 侧栏按「记忆治理（01-06）/ 调试工作台（07-13）/ 系统设置（14）」分组。管理台顶部可切换 Game（支持下拉选择与输入新 ID）与 NPC，底部常驻存储模式与 Server 启动时间徽标。
 
 - **Game / NPC 管理**：「02 Game 策略」页右上角可应用策略预设；Game 旁的「＋」按钮可直接创建新 Game（生成 world 与 memory-policy 骨架）；「08 NPC 配置」页弹窗式新建 NPC（内置模板兜底，无需先准备模板文件）。
-- **模型 Key 管理**：「14 模型 Key 管理」页集中保存全局 LLM API Key（写入 `data/system-settings.json`，已入 .gitignore），对所有未单独配置 Key 的 NPC 生效；密钥保存后永不回显明文，页面以「前 7 位 + `*****` + 末 4 位」脱敏显示（如 `sk-ca1a*****bd31`，星号数量固定不暴露密钥长度，过短的 Key 显示 `***`），控制台 Key 与环境变量 `AIBOT_LLM_KEY` 均给出脱敏串；支持随时添加、替换与删除全局 Key。NPC 配置页的 API Key 输入框可给单个 NPC 设独立 Key（留空保留原值，旁边标注已配置/未配置）。公共部署务必设置 `AIBOT_ADMIN_TOKEN` 保护管理 API。
+- **模型连接管理**：「14 模型连接管理」页集中保存模型地址、模型 ID 和 API Key；选择控制台默认连接后，未单独分配的 NPC 使用这条连接。已有 Key 只显示脱敏值，旧 Key 来源仅作兼容回退。NPC 配置页只保留温度、最大输出量和超时等生成参数。公共部署务必设置 `AIBOT_ADMIN_TOKEN` 保护管理 API。
 - **存储模式指示**：「01 系统边界」页显示当前存储模式（Json/Mongo）、Mongo 目标（host/库名）与自动创建集合/索引状态；检测到本次与上次运行模式不同时，会显示提醒横幅（两种模式数据互不可见）。
 - **JSON→Mongo 迁移按钮**：Mongo 模式下「01 系统边界」页可一键把 JSON 侧的玩家长期记忆迁入 Mongo（幂等，与 `--migrate-json` 等效）。
 - **会话按 NPC 隔离**：调试对话页为每个 NPC 记住独立会话，切换 NPC 自动切换会话，不再串扰。
@@ -251,7 +254,7 @@ docker exec -i ai-npc-mongo mongorestore --username aibot --password <密码> --
 `"com.aibot.npcagent": "file:D:/Code/aibot/Packages/com.aibot.npcagent"`，
 菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。
 
-API key 永不入库：`.gitignore` 已忽略全部 NPC 真实配置（`data/games/*/npcs/*.json`，模板 `new_npc.template.json` 除外）与控制台全局 Key（`data/system-settings.json`）。也可以完全不落 NPC 配置文件，统一改用管理台「14 模型 Key 管理」页或 `.env` 的 `AIBOT_LLM_KEY`（Server 模式）。
+API key 永不入库：`.gitignore` 已忽略全部 NPC 真实配置（`data/games/*/npcs/*.json`，模板 `new_npc.template.json` 除外）与模型连接配置（`data/model-connections.json`）。Server 模式在管理台「14 模型连接管理」统一配置。
 
 运行模式由 NPC 配置的 `runtimeMode` 控制：
 

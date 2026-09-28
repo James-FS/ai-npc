@@ -29,6 +29,7 @@ MemoryCaptures/
 
 # Secrets —— key 永不入库
 appsettings.*.local.json
+appsettings.local.json
 *.apikey
 .env
 .env.*
@@ -40,6 +41,7 @@ data/games/*/npcs/*.json
 
 # 系统设置（控制台集中管理的全局 LLM Key）
 data/system-settings.json
+data/model-connections.json
 
 # 运行时会话数据（端到端测试产物，不入库）
 data/games/*/sessions/
