@@ -11,7 +11,6 @@ const app = useAppStore()
 const config = ref<DebugAgentConfig | null>(null)
 const loading = ref(false)
 const saving = ref(false)
-const clearingKey = ref(false)
 const testResult = ref<Record<string, unknown> | null>(null)
 const testing = ref(false)
 const npcId = computed(() => app.currentNpcId)
@@ -45,7 +44,7 @@ async function createNpc() {
   let id = ''
   try {
     const { value } = await ElMessageBox.prompt(
-      '将按内置模板创建 NPC 配置，创建后可在当前页完善人设与模型设置。',
+      '将按内置模板创建 NPC 配置，创建后可在当前页完善人设；模型连接在模型连接管理页分配。',
       '新建 NPC',
       {
         inputPattern: /^[a-zA-Z0-9_.:-]{1,64}$/,
@@ -72,21 +71,10 @@ async function deleteNpc() {
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : 'NPC 删除失败') }
 }
 
-async function clearApiKey() {
-  if (!config.value || !npcId.value) return
-  try {
-    await ElMessageBox.confirm('确认清除该 NPC 的独立 API Key？清除后主模型与摘要模型将回退使用系统设置的全局 Key（或环境变量）。', '清除独立 Key', { type: 'warning', confirmButtonText: '确认清除' })
-  } catch { return }
-  clearingKey.value = true
-  try { await debugApi.clearNpcApiKey(app.gameId, npcId.value); ElMessage.success('已清除独立 Key，回退到全局配置'); await load() }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : '清除独立 Key 失败') }
-  finally { clearingKey.value = false }
-}
-
 async function testConnection() {
   if (!config.value || !npcId.value) return
   testing.value = true
-  try { testResult.value = await debugApi.testConnection(app.gameId, npcId.value, { baseUrl: config.value.model.baseUrl, model: config.value.model.model, apiKey: config.value.model.apiKey?.trim() || undefined }); ElMessage.success(testResult.value.ok ? '连接测试成功' : '连接测试完成，请查看诊断') }
+  try { testResult.value = await debugApi.testConnection(app.gameId, npcId.value, {}); ElMessage.success(testResult.value.ok ? '连接测试成功' : '连接测试完成，请查看诊断') }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '连接测试失败') }
   finally { testing.value = false }
 }
@@ -103,7 +91,7 @@ onMounted(load)
 </script>
 
 <template>
-  <PageHeader title="NPC 配置调试" description="迁移原调试台的人设、剧情块、模型、兜底台词和连接测试能力；记忆策略在 NPC 覆盖页面维护。">
+  <PageHeader title="NPC 配置调试" description="维护人设、剧情块与兜底台词；模型连接在模型连接管理页统一分配。">
     <el-button :icon="Plus" @click="createNpc">新建 NPC</el-button><el-button type="danger" plain :disabled="!config" @click="deleteNpc">删除 NPC</el-button><el-button type="primary" :loading="saving" :disabled="!config" @click="save">保存配置</el-button>
   </PageHeader>
   <div v-loading="loading" class="panel" v-if="config">
@@ -119,7 +107,8 @@ onMounted(load)
       </div>
       <div class="editor-column">
         <div class="section-title">模型设置</div>
-        <el-form label-position="top"><el-form-item label="Base URL"><el-input v-model="config.model.baseUrl" /></el-form-item><el-form-item label="Model"><el-input v-model="config.model.model" /></el-form-item><el-form-item :label="config.hasApiKey ? 'API Key（已配置）' : 'API Key（未配置）'"><el-input type="password" show-password v-model="config.model.apiKey" :placeholder="config.hasApiKey ? '已配置，不会回显；输入新值可替换，留空保留' : '未配置；留空则使用全局 Key（系统设置）'" /><div v-if="config.hasApiKey" class="clear-key-hint">已配置独立 Key，输入新值可替换。<el-button link type="danger" :loading="clearingKey" @click="clearApiKey">清除独立 Key</el-button></div></el-form-item><el-form-item label="Temperature"><el-input-number v-model="config.model.temperature" :min="0" :max="2" :step="0.1" /></el-form-item><el-form-item label="Max Tokens"><el-input-number v-model="config.model.maxTokens" :min="1" :max="10000" /></el-form-item><el-form-item label="Timeout (ms)"><el-input-number v-model="config.model.timeoutMs" :min="1000" :max="120000" /></el-form-item></el-form>
+        <p class="model-note">Base URL、模型 ID 和 API Key 在 <router-link to="/settings/llm">模型连接管理</router-link>中统一配置。这里保留每个 NPC 的生成参数。</p>
+        <el-form label-position="top"><el-form-item label="Temperature"><el-input-number v-model="config.model.temperature" :min="0" :max="2" :step="0.1" /></el-form-item><el-form-item label="Max Tokens"><el-input-number v-model="config.model.maxTokens" :min="1" :max="10000" /></el-form-item><el-form-item label="Timeout (ms)"><el-input-number v-model="config.model.timeoutMs" :min="1000" :max="120000" /></el-form-item></el-form>
         <el-button :icon="Connection" :loading="testing" @click="testConnection">测试连接</el-button>
         <pre v-if="testResult" class="code-block result-block">{{ JSON.stringify(testResult, null, 2) }}</pre>
       </div>
@@ -135,6 +124,7 @@ onMounted(load)
 .editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
 .section-border { border-top: 1px solid #edf0f5; }
 .section-title, .section-heading h3 { font-size: 15px; font-weight: 700; margin: 0 0 14px; }
+.model-note { color: var(--graphite); font-size: 13px; line-height: 1.5; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; }
 .lore-card { padding: 12px; background: var(--surface-inset); border: 1px solid #e6ebf2; border-radius: var(--radius-inset); margin-bottom: 10px; }
 .lore-head { display: grid; grid-template-columns: 1fr 120px auto auto auto; gap: 8px; align-items: center; margin-bottom: 8px; }

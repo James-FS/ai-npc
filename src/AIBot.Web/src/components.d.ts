@@ -39,6 +39,7 @@ declare module 'vue' {
     ElTooltip: typeof import('element-plus/es')['ElTooltip']
     LayerStack: typeof import('./components/LayerStack.vue')['default']
     MemoryPolicyForm: typeof import('./components/memory/MemoryPolicyForm.vue')['default']
+    ModelConnectionsPanel: typeof import('./components/ModelConnectionsPanel.vue')['default']
     PageHeader: typeof import('./components/PageHeader.vue')['default']
     RampMeter: typeof import('./components/RampMeter.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']

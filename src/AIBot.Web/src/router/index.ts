@@ -20,7 +20,7 @@ export default createRouter({
   routes: [
     { path: '/', redirect: '/settings/memory' },
     { path: '/settings/memory', component: MemorySettingsView, meta: { title: '系统记忆边界' } },
-    { path: '/settings/llm', component: LlmSettingsView, meta: { title: '模型 Key 管理' } },
+    { path: '/settings/llm', component: LlmSettingsView, meta: { title: '模型连接管理' } },
     { path: '/game/memory-policy', component: GameMemoryPolicyView, meta: { title: 'Game 记忆策略' } },
     { path: '/npc/:id/memory', component: NpcMemoryPolicyView, meta: { title: 'NPC 记忆覆盖' } },
     { path: '/memories', component: MemoryInspectorView, meta: { title: '玩家记忆检查器' } },

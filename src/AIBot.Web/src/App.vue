@@ -73,7 +73,7 @@ onMounted(() => { app.loadStorage(); refreshNpcs() })
         <RouterLink to="/debug/logs">请求日志</RouterLink>
         <RouterLink to="/debug/stats">用量统计</RouterLink>
         <div class="nav-divider">系统设置</div>
-        <RouterLink to="/settings/llm">模型 Key 管理</RouterLink>
+        <RouterLink to="/settings/llm">模型连接管理</RouterLink>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot" :class="`is-${app.health}`" :title="app.healthLabel"></span>
