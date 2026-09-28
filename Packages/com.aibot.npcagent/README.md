@@ -121,7 +121,7 @@ agent.Tools.Register(new GiveItemTool());
 
 - 不要把真实 API Key 写入公共仓库。
 - 不要把含 Key 的 `AgentConfigAsset` 提交到 Git。
-- Server 模式优先将模型 Key 放在服务端环境变量 `AIBOT_LLM_KEY`。
+- Server 模式在管理台的模型连接管理页配置模型地址、名称和 API Key。
 - `playerId` 和 `sessionId` 应由游戏稳定生成并持久化，避免会话串线。
 
 ## 常见问题

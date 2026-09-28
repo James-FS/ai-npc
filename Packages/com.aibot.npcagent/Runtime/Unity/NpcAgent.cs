@@ -53,7 +53,7 @@ namespace AIBot.Unity
         [Tooltip("可选：挂载一个实现 AIBot.Core.Context.IGameContext 的游戏状态组件；留空则使用内置 GameContextRelay。")]
         public MonoBehaviour gameContextProvider;
 
-        [Tooltip("仅开发期使用。留空时依次使用配置 JSON 与环境变量 AIBOT_LLM_KEY；正式发布应走服务端中转。")]
+        [Tooltip("仅开发期使用。留空时使用配置 JSON 中的 API Key；正式发布应走服务端中转。")]
         public string apiKeyOverride;
 
         public GameContextRelay gameContext;
@@ -374,8 +374,6 @@ namespace AIBot.Unity
             if (!useConnectionProfile)
             {
                 if (!string.IsNullOrEmpty(apiKeyOverride)) _config.model.apiKey = apiKeyOverride;
-                if (string.IsNullOrEmpty(_config.model.apiKey))
-                    _config.model.apiKey = Environment.GetEnvironmentVariable("AIBOT_LLM_KEY");
                 if (configAsset != null)
                 {
                     // 使用 Unity Asset 时完全脱离外部 data/ 目录；Game 策略和世界观均可选。
