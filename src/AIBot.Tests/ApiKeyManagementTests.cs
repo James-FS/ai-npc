@@ -9,120 +9,63 @@ using Xunit;
 
 namespace AIBot.Tests
 {
-    /// <summary>API Key 集中管理：解析优先级、系统设置存储、管理响应脱敏。</summary>
+    /// <summary>模型连接与旧 NPC 配置的脱敏响应和就绪状态。</summary>
     public class ApiKeyManagementTests : IDisposable
     {
         private readonly string _tempDir;
-        private readonly string _originalEnv;
 
         public ApiKeyManagementTests()
         {
             _tempDir = Path.Combine(Path.GetTempPath(), "aibot-tests-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_tempDir);
-            _originalEnv = Environment.GetEnvironmentVariable(ApiKeyResolver.EnvVarName);
-            SystemSettingsStore.OverridePath = Path.Combine(_tempDir, "system-settings.json");
         }
 
         public void Dispose()
         {
-            SystemSettingsStore.OverridePath = null;
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, _originalEnv);
             try { Directory.Delete(_tempDir, true); } catch { /* 临时目录清理失败可忽略 */ }
         }
 
-        private static IConfiguration ConfigWith(string appsettingsKey)
-        {
-            return new ConfigurationBuilder().AddInMemoryCollection(
-                new Dictionary<string, string> { ["Llm:ApiKey"] = appsettingsKey }).Build();
-        }
+        private static IConfiguration ConfigWith() => new ConfigurationBuilder().Build();
 
         [Fact]
-        public void Resolve_NpcKeyWinsOverAllFallbacks()
+        public void KeyInventory_MasksMainAndSummaryKeys_AndReportsTheirSources()
         {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, "env-key-0123456789");
-            SystemSettingsStore.SaveLlmApiKey("console-key-0123456789");
+            string originalDataRoot = Environment.GetEnvironmentVariable("AIBOT_DATA_ROOT");
+            var cachedRoot = typeof(DataStore).GetField("_cachedRoot",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            string originalCache = (string)cachedRoot.GetValue(null);
+            string dataRoot = Path.Combine(_tempDir, "data");
+            Directory.CreateDirectory(Path.Combine(dataRoot, "games"));
+            try
+            {
+                Environment.SetEnvironmentVariable("AIBOT_DATA_ROOT", dataRoot);
+                cachedRoot.SetValue(null, null);
+                var gamePolicy = AIBot.Core.Memory.MemoryPolicy.Defaults();
+                gamePolicy.summaryModel = new ModelSettings { apiKey = "game-summary-key-0123456789" };
+                Assert.True(DataStore.SaveMemoryPolicy("demo", gamePolicy));
+                var npc = new AgentConfigDto { npcId = "tester" };
+                npc.model.apiKey = "npc-main-key-0123456789";
+                npc.memory.inheritGameDefaults = true;
+                Assert.True(DataStore.SaveNpc("demo", npc));
 
-            string resolved = ApiKeyResolver.Resolve("npc-key-0123456789", ConfigWith("appsettings-key"));
-
-            Assert.Equal("npc-key-0123456789", resolved);
-        }
-
-        [Fact]
-        public void Resolve_ConsoleSettingsBeatEnvAndAppsettings()
-        {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, "env-key-0123456789");
-            SystemSettingsStore.SaveLlmApiKey("console-key-0123456789");
-
-            string resolved = ApiKeyResolver.Resolve(null, ConfigWith("appsettings-key"));
-
-            Assert.Equal("console-key-0123456789", resolved);
-        }
-
-        [Fact]
-        public void Resolve_EnvBeatsAppsettings_AndAppsettingsIsFinalFallback()
-        {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, "env-key-0123456789");
-            Assert.Equal("env-key-0123456789", ApiKeyResolver.Resolve(null, ConfigWith("appsettings-key")));
-
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
-            Assert.Equal("appsettings-key", ApiKeyResolver.Resolve(null, ConfigWith("appsettings-key")));
-        }
-
-        [Fact]
-        public void Resolve_BlankInputsAreSkipped()
-        {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, "  ");
-            SystemSettingsStore.SaveLlmApiKey(null);
-
-            Assert.Equal("appsettings-key", ApiKeyResolver.Resolve("   ", ConfigWith("appsettings-key")));
-            Assert.Null(ApiKeyResolver.Resolve(null, ConfigWith("")));
-        }
-
-        [Fact]
-        public void SourceOf_ReportsWinningLayer()
-        {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, "env-key-0123456789");
-            SystemSettingsStore.SaveLlmApiKey("console-key-0123456789");
-            Assert.Equal("npc", ApiKeyResolver.SourceOf("npc-key", ConfigWith(null)));
-            Assert.Equal("console", ApiKeyResolver.SourceOf(null, ConfigWith(null)));
-
-            SystemSettingsStore.SaveLlmApiKey(null);
-            Assert.Equal("env", ApiKeyResolver.SourceOf(null, ConfigWith(null)));
-
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
-            Assert.Equal("appsettings", ApiKeyResolver.SourceOf(null, ConfigWith("appsettings-key")));
-            Assert.Equal("none", ApiKeyResolver.SourceOf(null, ConfigWith("")));
-        }
-
-        [Fact]
-        public void SystemSettingsStore_RoundTripsTrimsAndClears()
-        {
-            string path = SystemSettingsStore.SettingsPath;
-            Assert.False(File.Exists(path));
-
-            Assert.True(SystemSettingsStore.SaveLlmApiKey("  sk-console-key-001  "));
-            Assert.True(File.Exists(path));
-            Assert.Equal("sk-console-key-001", SystemSettingsStore.LoadLlmApiKey());
-
-            Assert.True(SystemSettingsStore.SaveLlmApiKey(null));
-            Assert.Null(SystemSettingsStore.LoadLlmApiKey());
-        }
-
-        [Fact]
-        public void SystemSettingsStore_ClearWhenMissing_IsIdempotentSuccess()
-        {
-            Assert.False(File.Exists(SystemSettingsStore.SettingsPath));
-            Assert.True(SystemSettingsStore.SaveLlmApiKey(null));
-            Assert.False(File.Exists(SystemSettingsStore.SettingsPath));   // 不应凭空创建文件
-            Assert.Null(SystemSettingsStore.LoadLlmApiKey());
-        }
-
-        [Fact]
-        public void SystemSettingsStore_InvalidJsonYieldsNullNotThrow()
-        {
-            File.WriteAllText(SystemSettingsStore.SettingsPath, "{ not valid json !!");
-
-            Assert.Null(SystemSettingsStore.LoadLlmApiKey());
+                var method = typeof(AdminEndpoints).GetMethod("LlmKeyInventory",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                var snapshot = (Newtonsoft.Json.Linq.JObject)method.Invoke(null,
+                    new object[] { ConfigWith(), false });
+                string json = snapshot.ToString(Newtonsoft.Json.Formatting.None);
+                Assert.DoesNotContain("npc-main-key-0123456789", json);
+                Assert.DoesNotContain("game-summary-key-0123456789", json);
+                var row = (Newtonsoft.Json.Linq.JObject)snapshot["npcs"][0];
+                Assert.Equal("npc", (string)row["mainSource"]);
+                Assert.Equal("game", (string)row["summarySource"]);
+                Assert.Equal("npc-mai*****6789", (string)row["mainMaskedKey"]);
+                Assert.Equal("game-su*****6789", (string)row["summaryMaskedKey"]);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("AIBOT_DATA_ROOT", originalDataRoot);
+                cachedRoot.SetValue(null, originalCache);
+            }
         }
 
         [Fact]
@@ -225,14 +168,14 @@ namespace AIBot.Tests
             return (AgentConfigDto)method.Invoke(null, new object[] { source });
         }
 
-        // ---- Readiness 探针与解析链一致（控制台全局 key 计入就绪判定）----
+        // ---- Readiness 探针只检查分配的连接或旧 NPC Key ----
 
         private static async Task<(bool Ready, object Body)> CheckReadiness(string tempRoot, Func<bool> anyNpcKey = null)
         {
             ReadinessService.HasAnyNpcKeyOverride = anyNpcKey;
             try
             {
-                var config = ConfigWith(null);
+                var config = ConfigWith();
                 var repository = new JsonMemoryRepository(() => tempRoot);
                 var queue = new MemorySummaryQueue(new PlayerMemoryService(repository), config,
                     new MemoryAuditService(new JsonMemoryAuditStore(() => tempRoot)));
@@ -246,25 +189,8 @@ namespace AIBot.Tests
         }
 
         [Fact]
-        public async Task Readiness_ConsoleManagedKeyAlone_CountsAsReady()
-        {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
-            SystemSettingsStore.SaveLlmApiKey("sk-console-only-0123456789");
-
-            (bool ready, object body) = await CheckReadiness(_tempDir, anyNpcKey: () => false);
-
-            Assert.True(ready);
-            object checks = body.GetType().GetProperty("checks").GetValue(body);
-            object llm = checks.GetType().GetProperty("llm").GetValue(checks);
-            Assert.True((bool)llm.GetType().GetProperty("ok").GetValue(llm));
-        }
-
-        [Fact]
         public async Task Readiness_OnlyPerNpcKey_StillCountsAsReady()
         {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
-            SystemSettingsStore.SaveLlmApiKey(null);
-
             (bool ready, _) = await CheckReadiness(_tempDir, anyNpcKey: () => true);
 
             Assert.True(ready);
@@ -273,36 +199,12 @@ namespace AIBot.Tests
         [Fact]
         public async Task Readiness_NoKeyAnywhere_ReportsNotReady()
         {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, null);
-            SystemSettingsStore.SaveLlmApiKey(null);
-
             (bool ready, object body) = await CheckReadiness(_tempDir, anyNpcKey: () => false);
 
             Assert.False(ready);
             object checks = body.GetType().GetProperty("checks").GetValue(body);
             object llm = checks.GetType().GetProperty("llm").GetValue(checks);
             Assert.False((bool)llm.GetType().GetProperty("ok").GetValue(llm));
-        }
-
-        [Fact]
-        public void SettingsLlm_StatusCarriesAllFields_EnvCardDoesNotStaleAfterSave()
-        {
-            Environment.SetEnvironmentVariable(ApiKeyResolver.EnvVarName, "env-key-0123456789");
-            SystemSettingsStore.SaveLlmApiKey("sk-new-key-0123456789");
-
-            // 直接反射 GET/PUT 共用的 LlmSettingsStatus：若端点漏掉 envConfigured/priority，
-            // 前端把 PUT 响应赋给状态后，环境变量卡片会误显「未配置」直到手动刷新。
-            var status = (Newtonsoft.Json.Linq.JObject)InvokeLlmStatus(includeOk: true);
-            string json = status.ToString(Newtonsoft.Json.Formatting.None);
-
-            Assert.Contains("\"ok\":true", json);
-            Assert.Contains("\"hasConsoleKey\":true", json);
-            Assert.Contains("\"envConfigured\":true", json);
-            Assert.Contains("\"priority\":\"npc > console > env > appsettings\"", json);
-            Assert.Contains("\"maskedKey\":\"sk-new-*****6789\"", json);      // 前 7 位 + 末 4 位
-            Assert.Contains("\"envMaskedKey\":\"env-key*****6789\"", json);   // 环境变量同样脱敏回显
-            Assert.DoesNotContain("sk-new-key-0123456789", json);             // 明文永不回显
-            Assert.DoesNotContain("env-key-0123456789", json);
         }
 
         [Theory]
@@ -324,14 +226,6 @@ namespace AIBot.Tests
 
             Assert.Equal(5, shorter.Split('*').Length - 1);
             Assert.Equal(5, longer.Split('*').Length - 1);
-        }
-
-        private static object InvokeLlmStatus(bool includeOk)
-        {
-            var method = typeof(AdminEndpoints).GetMethod("LlmSettingsStatus",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-            Assert.NotNull(method);
-            return method.Invoke(null, new object[] { includeOk });
         }
 
         private static object InvokeMaskKey(string key)

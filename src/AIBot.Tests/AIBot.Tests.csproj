@@ -33,9 +33,8 @@
     <Compile Include="..\AIBot.Server\IMemorySummaryJobPersistence.cs" Link="Server\IMemorySummaryJobPersistence.cs" />
     <Compile Include="..\AIBot.Server\MemorySummaryJobRecord.cs" Link="Server\MemorySummaryJobRecord.cs" />
     <Compile Include="..\AIBot.Server\ModelErrorContract.cs" Link="Server\ModelErrorContract.cs" />
-    <Compile Include="..\AIBot.Server\SystemSettingsStore.cs" Link="Server\SystemSettingsStore.cs" />
     <Compile Include="..\AIBot.Server\ReadinessService.cs" Link="Server\ReadinessService.cs" />
-    <Compile Include="..\AIBot.Server\ApiKeyResolver.cs" Link="Server\ApiKeyResolver.cs" />
+    <Compile Include="..\AIBot.Server\ModelConnectionStore.cs" Link="Server\ModelConnectionStore.cs" />
     <Compile Include="..\AIBot.Server\AdminEndpoints.cs" Link="Server\AdminEndpoints.cs" />
     <Compile Include="..\AIBot.Server\StartupDiagnostics.cs" Link="Server\StartupDiagnostics.cs" />
     <Compile Include="..\AIBot.Server\ModelDiagnostics.cs" Link="Server\ModelDiagnostics.cs" />
@@ -57,4 +56,3 @@
   </ItemGroup>
 
 </Project>
-
