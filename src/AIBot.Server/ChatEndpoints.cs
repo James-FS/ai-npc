@@ -182,8 +182,7 @@ namespace AIBot.Server
                 cfg.model = cfg.model ?? new ModelSettings();
                 cfg.memory = cfg.memory ?? new MemorySettings();
 
-                // key 优先级统一走 ApiKeyResolver：NPC 配置 > 控制台全局设置 > 环境变量 > appsettings
-                cfg.model.apiKey = ApiKeyResolver.Resolve(cfg.model.apiKey, config);
+                cfg.model = ModelConnectionStore.ResolveMain(gid, body.NpcId, cfg.model);
                 if (body.Override != null)
                 {
                     if (!string.IsNullOrEmpty(body.Override.Model)) cfg.model.model = body.Override.Model;
@@ -206,6 +205,8 @@ namespace AIBot.Server
 
                 EffectiveMemoryPolicy effectiveMemory = MemoryPolicyService.Resolve(
                     gid, cfg, body.MemoryOverride, config);
+                ModelConnectionStore.ApplySummary(gid, body.NpcId, cfg.memory, effectiveMemory.policy,
+                    body.MemoryOverride);
 
                 bool requestedPlayerScope = effectiveMemory.policy.memoryScope == MemoryPolicyValues.ScopePlayerNpc;
                 bool playerScoped = requestedPlayerScope && !string.IsNullOrEmpty(body.PlayerId);

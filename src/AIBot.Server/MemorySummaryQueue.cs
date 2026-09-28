@@ -309,10 +309,11 @@ namespace AIBot.Server
             if (cfg == null) return;
             cfg.model = cfg.model ?? new ModelSettings();
             cfg.memory = cfg.memory ?? new MemorySettings();
-            cfg.model.apiKey = ApiKeyResolver.Resolve(cfg.model.apiKey, _configuration);
+            cfg.model = ModelConnectionStore.ResolveMain(job.GameId, job.NpcId, cfg.model);
 
             EffectiveMemoryPolicy effective = MemoryPolicyService.Resolve(job.GameId, cfg, null, _configuration);
             MemoryPolicy policy = effective.policy;
+            bool summaryConnection = ModelConnectionStore.ApplySummary(job.GameId, job.NpcId, cfg.memory, policy);
             if (policy.memoryScope != MemoryPolicyValues.ScopePlayerNpc
                 || (!policy.backgroundSummarization && !job.Force)) return;
 
@@ -346,7 +347,7 @@ namespace AIBot.Server
                     PlayerLongTermMemory existing = await _memoryService.LoadAsync(job.GameId,
                         job.NpcId, job.PlayerId, ct);
                     JToken before = JToken.FromObject(existing);
-                    ModelSettings settings = ResolveSummarySettings(policy.summaryModel, cfg.model);
+                    ModelSettings settings = ResolveSummarySettings(policy.summaryModel, cfg.model, summaryConnection);
                     // 摘要按玩家范围独立成一会话标识：避免与聊天共用缓存前缀而互相污染
                     var backend = new HttpLlmBackend(settings, LlmRequestSession.For("summarize",
                         job.GameId, job.NpcId, job.PlayerId));
@@ -409,13 +410,14 @@ namespace AIBot.Server
             }
         }
 
-        private static ModelSettings ResolveSummarySettings(ModelSettings summary, ModelSettings fallback)
+        private static ModelSettings ResolveSummarySettings(ModelSettings summary, ModelSettings fallback,
+            bool ownConnection = false)
         {
             ModelSettings source = summary ?? fallback ?? new ModelSettings();
             return new ModelSettings
             {
                 baseUrl = string.IsNullOrEmpty(source.baseUrl) ? fallback?.baseUrl : source.baseUrl,
-                apiKey = string.IsNullOrEmpty(source.apiKey) ? fallback?.apiKey : source.apiKey,
+                apiKey = !ownConnection && string.IsNullOrEmpty(source.apiKey) ? fallback?.apiKey : source.apiKey,
                 model = string.IsNullOrEmpty(source.model) ? fallback?.model : source.model,
                 temperature = source.temperature,
                 maxTokens = source.maxTokens,

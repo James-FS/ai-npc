@@ -50,18 +50,22 @@ namespace AIBot.Server
                 + string.Join(",", limits.supportedSummaryTriggers)
                 + "; scopes=" + string.Join(",", limits.supportedMemoryScopes));
 
-            string configuredKey = ApiKeyResolver.Resolve(null, configuration);
-            if (string.IsNullOrWhiteSpace(configuredKey))
-            {
-                Console.WriteLine("[startup][warning] 未配置全局 LLM API Key（控制台设置 / AIBOT_LLM_KEY / appsettings 均为空）；"
-                    + "如果 NPC 配置未提供独立 key，对话和摘要请求会失败");
-            }
-            else
-            {
-                Console.WriteLine("[startup] global LLM API key: configured (source=" + ApiKeyResolver.SourceOf(null, configuration) + ")");
-            }
-
             List<string> npcIds = DataStore.ListNpcIds("default");
+            bool hasConnection = false;
+            try
+            {
+                ModelConnectionDocument doc = ModelConnectionStore.Snapshot();
+                hasConnection = npcIds.Any(id =>
+                {
+                    string assigned = doc.npcMain.TryGetValue("default/" + id, out string profileId)
+                        ? profileId : doc.globalMain;
+                    return doc.connections.Any(x => x.id == assigned && !string.IsNullOrWhiteSpace(x.apiKey));
+                });
+            }
+            catch { }
+            if (!hasConnection && !npcIds.Any(id =>
+                !string.IsNullOrWhiteSpace(DataStore.LoadNpc("default", id)?.model?.apiKey)))
+                Console.WriteLine("[startup][warning] 未分配模型连接且 NPC 旧配置没有 Key；对话请求会失败");
             if (npcIds.Count == 0)
                 Console.WriteLine("[startup][warning] default Game 未发现可用 NPC 配置");
             else

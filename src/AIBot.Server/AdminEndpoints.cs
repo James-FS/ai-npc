@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using AIBot.Core.Config;
 using AIBot.Core.Context;
+using AIBot.Core.Llm;
 using AIBot.Core.Memory;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -200,27 +201,147 @@ namespace AIBot.Server
                 clearsRelatedSessions = true
             }));
 
-            // ---- 系统设置：全局 LLM Key（控制台集中管理；响应永不回显明文）----
-            app.MapGet("/api/admin/settings/llm", () => JsonNet(LlmSettingsStatus(includeOk: false)));
-            app.MapPut("/api/admin/settings/llm", (UpdateLlmKeyRequest body, HttpContext http) =>
+            // ---- 模型连接与旧配置的脱敏状态 ----
+            app.MapGet("/api/admin/settings/llm", () => JsonNet(LlmKeyInventory(app.Configuration, includeOk: false)));
+            app.MapPut("/api/admin/settings/llm/npcs/{gid}/{id}/key",
+                (string gid, string id, UpdateLlmKeyRequest body) =>
             {
-                if (body == null || (string.IsNullOrWhiteSpace(body.ApiKey) && !body.Clear))
-                    return Results.BadRequest(new { error = "apiKey 必填；如需清除请显式传 clear=true" });
-                if (SystemSettingsStore.SettingsPath == null)
-                    return Results.Problem("未找到 data/ 根目录（可设置 AIBOT_DATA_ROOT），无法持久化系统设置");
-                string newKey = body.Clear ? null : body.ApiKey.Trim();
-                if (newKey != null)
+                if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(id)) return Results.BadRequest("非法 ID");
+                string error = ValidateKeyUpdate(body);
+                if (error != null) return Results.UnprocessableEntity(new { error });
+                AgentConfigDto npc = DataStore.LoadNpc(gid, id);
+                if (npc == null) return Results.NotFound("npc not found");
+                npc.model ??= new ModelSettings();
+                npc.model.apiKey = body.Clear ? null : body.ApiKey.Trim();
+                if (!DataStore.SaveNpc(gid, npc)) return Results.Problem("NPC Key 保存失败");
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "llm_key.npc.update",
+                    "NPC 主模型 Key 已" + (body.Clear ? "清除" : "更新") + "（值不落日志）: " + gid + "/" + id);
+                return JsonNet(LlmKeyInventory(app.Configuration, includeOk: true));
+            });
+
+            app.MapPut("/api/admin/settings/llm/games/{gid}/summary-key",
+                (string gid, UpdateLlmKeyRequest body) =>
+            {
+                if (!DataStore.IsValidId(gid)) return Results.BadRequest("非法 gameId");
+                string error = ValidateKeyUpdate(body);
+                if (error != null) return Results.UnprocessableEntity(new { error });
+                MemoryPolicy policy = DataStore.LoadMemoryPolicy(gid);
+                if (policy == null) return Results.NotFound("Game 记忆策略不存在");
+                if (policy.summaryModel == null) return Results.UnprocessableEntity(new { error = "请先在 Game 记忆策略中启用独立摘要模型" });
+                policy.summaryModel.apiKey = body.Clear ? null : body.ApiKey.Trim();
+                if (!DataStore.SaveMemoryPolicy(gid, policy)) return Results.Problem("Game 摘要 Key 保存失败");
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "llm_key.game_summary.update",
+                    "Game 摘要 Key 已" + (body.Clear ? "清除" : "更新") + "（值不落日志）: " + gid);
+                return JsonNet(LlmKeyInventory(app.Configuration, includeOk: true));
+            });
+
+            app.MapPut("/api/admin/settings/llm/npcs/{gid}/{id}/summary-key",
+                (string gid, string id, UpdateLlmKeyRequest body) =>
+            {
+                if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(id)) return Results.BadRequest("非法 ID");
+                string error = ValidateKeyUpdate(body);
+                if (error != null) return Results.UnprocessableEntity(new { error });
+                AgentConfigDto npc = DataStore.LoadNpc(gid, id);
+                if (npc == null) return Results.NotFound("npc not found");
+                if (npc.memory?.summaryModel == null)
+                    return Results.UnprocessableEntity(new { error = "请先在 NPC 记忆策略中启用独立摘要模型；继承的 Game 摘要 Key 可在 Game 行修改" });
+                npc.memory.summaryModel.apiKey = body.Clear ? null : body.ApiKey.Trim();
+                if (!DataStore.SaveNpc(gid, npc)) return Results.Problem("NPC 摘要 Key 保存失败");
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "llm_key.npc_summary.update",
+                    "NPC 摘要 Key 已" + (body.Clear ? "清除" : "更新") + "（值不落日志）: " + gid + "/" + id);
+                return JsonNet(LlmKeyInventory(app.Configuration, includeOk: true));
+            });
+
+            // ---- Server 模式模型连接配置：一条配置绑定地址、协议、Key 与模型 ----
+            app.MapGet("/api/admin/model-connections", () => JsonNet(ModelConnectionStore.RedactedSnapshot()));
+            app.MapPost("/api/admin/model-connections", (ModelConnectionSaveRequest body) =>
+            {
+                if (body?.connection != null)
+                    body.connection.id = "conn_" + Guid.NewGuid().ToString("N");
+                if (body?.clearApiKey == true)
+                    return Results.UnprocessableEntity(new { error = "API Key 必填，不能清除" });
+                string error = ModelConnectionStore.Validate(body?.connection, requireKey: true);
+                if (error != null) return Results.UnprocessableEntity(new { error });
+                if (!ModelConnectionStore.Save(body.connection, body.clearApiKey, create: true))
+                    return Results.Conflict(new { error = "连接 ID 已存在" });
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "model_connection.create",
+                    "模型连接已创建（Key 不落日志）: " + body.connection.id);
+                return JsonNet(ModelConnectionStore.RedactedSnapshot());
+            });
+            app.MapPut("/api/admin/model-connections/{id}", (string id, ModelConnectionSaveRequest body) =>
+            {
+                if (body?.connection == null || body.connection.id != id) return Results.BadRequest("连接 ID 不一致");
+                if (body.clearApiKey) return Results.UnprocessableEntity(new { error = "API Key 必填，不能清除" });
+                string error = ModelConnectionStore.Validate(body.connection);
+                if (error != null) return Results.UnprocessableEntity(new { error });
+                if (string.IsNullOrWhiteSpace(body.connection.apiKey)
+                    && !ModelConnectionStore.HasApiKey(id))
+                    return Results.UnprocessableEntity(new { error = "API Key 必填" });
+                if (!ModelConnectionStore.Save(body.connection, body.clearApiKey, create: false))
+                    return Results.NotFound("连接不存在");
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "model_connection.update",
+                    "模型连接已更新（Key 不落日志）: " + id);
+                return JsonNet(ModelConnectionStore.RedactedSnapshot());
+            });
+            app.MapDelete("/api/admin/model-connections/{id}", (string id) =>
+            {
+                if (!DataStore.IsValidId(id)) return Results.BadRequest("连接 ID 不合法");
+                if (!ModelConnectionStore.Delete(id))
+                    return Results.Conflict(new { error = "连接不存在或仍被 Game/NPC 使用，请先解除分配" });
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "model_connection.delete",
+                    "模型连接已删除: " + id);
+                return JsonNet(ModelConnectionStore.RedactedSnapshot());
+            });
+            app.MapPut("/api/admin/model-connections/binding", (ModelConnectionBindingRequest body) =>
+            {
+                if (body == null
+                    || (body.scope != "global_main" && body.scope != "npc_main"
+                        && body.scope != "npc_summary" && body.scope != "game_summary")
+                    || (body.scope != "global_main" && !DataStore.IsValidId(body.gameId))
+                    || ((body.scope == "npc_main" || body.scope == "npc_summary")
+                        && !DataStore.IsValidId(body.npcId))
+                    || (!string.IsNullOrEmpty(body.connectionId) && !DataStore.IsValidId(body.connectionId)))
+                    return Results.BadRequest("分配参数不合法");
+                if (body.scope != "global_main" && !DataStore.ListGameIds().Contains(body.gameId))
+                    return Results.NotFound("Game 不存在");
+                if ((body.scope == "npc_main" || body.scope == "npc_summary")
+                    && DataStore.LoadNpc(body.gameId, body.npcId) == null)
+                    return Results.NotFound("NPC 不存在");
+                if (!ModelConnectionStore.SetBinding(body))
+                    return Results.UnprocessableEntity(new { error = "模型连接不存在或未填写 API Key" });
+                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "model_connection.bind",
+                    "模型连接分配已更新: " + body.scope + " " + body.gameId + "/" + body.npcId);
+                return JsonNet(ModelConnectionStore.RedactedSnapshot());
+            });
+            app.MapPost("/api/admin/model-connections/{id}/test", async (string id, HttpContext http) =>
+            {
+                ModelConnection connection = ModelConnectionStore.Snapshot().connections
+                    .FirstOrDefault(x => x.id == id);
+                if (connection == null) return Results.NotFound("连接不存在");
+                var settings = new ModelSettings
                 {
-                    if (newKey.Length < 8 || newKey.Length > 4096)
-                        return Results.UnprocessableEntity(new { error = "apiKey 长度需在 8~4096 之间" });
-                    if (newKey.Any(char.IsControl))
-                        return Results.UnprocessableEntity(new { error = "apiKey 含非法控制字符" });
+                    baseUrl = connection.baseUrl, model = connection.model, apiKey = connection.apiKey,
+                    temperature = 0f, maxTokens = 8, timeoutMs = 15000
+                };
+                var request = new LlmRequest
+                {
+                    Model = settings.model,
+                    Messages = new List<LlmMessage> { LlmMessage.System("连通性测试"), LlmMessage.User("reply: ok") },
+                    Temperature = 0f, MaxTokens = 8
+                };
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    await new HttpLlmBackend(settings).ChatStreamAsync(request, new NullSink(), http.RequestAborted);
+                    sw.Stop();
+                    return JsonNet(new { ok = true, latencyMs = sw.ElapsedMilliseconds, model = settings.model });
                 }
-                if (!SystemSettingsStore.SaveLlmApiKey(newKey))
-                    return Results.Problem("系统设置写入失败，请检查 data/ 目录权限");
-                runtimeLogs.Write(AIBot.Core.Logging.LogLevel.Info, "settings", "llm_key.update",
-                    body.Clear ? "全局 LLM API Key 已清除" : "全局 LLM API Key 已更新（值不落日志）");
-                return JsonNet(LlmSettingsStatus(includeOk: true));
+                catch (Exception ex)
+                {
+                    ModelErrorInfo info = ModelErrorContract.Classify(ex);
+                    return JsonNet(new { ok = false, code = info.Code, status = info.Status,
+                        diagnosis = ModelDiagnostics.Diagnose(ex), latencyMs = sw.ElapsedMilliseconds });
+                }
             });
 
             // ---- Game 列表与创建 ----
@@ -353,9 +474,9 @@ namespace AIBot.Server
             app.MapDelete("/api/games/{gid}/npcs/{id}", (string gid, string id) =>
             {
                 if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(id)) return Results.BadRequest("非法 ID");
-                return DataStore.DeleteNpc(gid, id)
-                    ? Results.Json(new { ok = true })
-                    : Results.NotFound("npc not found: " + id);
+                if (!DataStore.DeleteNpc(gid, id)) return Results.NotFound("npc not found: " + id);
+                ModelConnectionStore.ClearNpcBindings(gid, id);
+                return Results.Json(new { ok = true });
             });
 
             // ---- NPC 记忆覆盖与最终策略 ----
@@ -885,15 +1006,13 @@ namespace AIBot.Server
                 if (!DataStore.IsValidId(gid) || !DataStore.IsValidId(id)) return Results.BadRequest("非法 ID");
                 AgentConfigDto cfg = DataStore.LoadNpc(gid, id);
                 if (cfg == null) return Results.NotFound("npc not found: " + id);
-                cfg.model = cfg.model ?? new AIBot.Core.Config.ModelSettings();
+                cfg.model = ModelConnectionStore.ResolveMain(gid, id, cfg.model);
 
                 var settings = new AIBot.Core.Config.ModelSettings
                 {
                     baseUrl = string.IsNullOrEmpty(body?.BaseUrl) ? cfg.model.baseUrl : body.BaseUrl,
                     model = string.IsNullOrEmpty(body?.Model) ? cfg.model.model : body.Model,
-                    apiKey = string.IsNullOrEmpty(body?.ApiKey)
-                        ? ApiKeyResolver.Resolve(cfg.model.apiKey, app.Configuration)
-                        : body.ApiKey,
+                    apiKey = string.IsNullOrEmpty(body?.ApiKey) ? cfg.model.apiKey : body.ApiKey,
                     temperature = 0f,
                     maxTokens = 8,
                     timeoutMs = 15000
@@ -1085,23 +1204,95 @@ namespace AIBot.Server
             return key.Substring(0, MaskPrefixLength) + MaskStars + key.Substring(key.Length - MaskTailLength);
         }
 
-        /// <summary>
-        /// GET/PUT /settings/llm 共用响应。includeOk 供 PUT 附带确认位；
-        /// 字段完整性由 ApiKeyManagementTests 反射钉住，前端 saveKey/clearKey 直接以此刷新状态。
-        /// </summary>
-        private static JObject LlmSettingsStatus(bool includeOk)
+        private static string ValidateKeyUpdate(UpdateLlmKeyRequest body)
         {
-            string key = SystemSettingsStore.LoadLlmApiKey();
-            string envKey = Environment.GetEnvironmentVariable(ApiKeyResolver.EnvVarName);
-            JObject status = new JObject
-            {
-                ["hasConsoleKey"] = !string.IsNullOrEmpty(key),
-                ["maskedKey"] = MaskKey(key),
-                ["envConfigured"] = !string.IsNullOrWhiteSpace(envKey),
-                ["envMaskedKey"] = string.IsNullOrWhiteSpace(envKey) ? null : MaskKey(envKey),
-                ["priority"] = "npc > console > env > appsettings"
-            };
+            if (body == null || (!body.Clear && string.IsNullOrWhiteSpace(body.ApiKey)))
+                return "apiKey 必填；如需清除请显式传 clear=true";
+            if (body.Clear) return null;
+            string key = body.ApiKey.Trim();
+            if (key.Length < 8 || key.Length > 4096) return "apiKey 长度需在 8~4096 之间";
+            if (key.Any(char.IsControl)) return "apiKey 含非法控制字符";
+            return null;
+        }
+
+        /// <summary>统一管理页的脱敏快照。只读取配置，不将任何 Key 明文序列化。</summary>
+        private static JObject LlmKeyInventory(IConfiguration config, bool includeOk)
+        {
+            JObject status = new JObject();
             if (includeOk) status["ok"] = true;
+            ModelConnectionDocument connectionDoc = ModelConnectionStore.Snapshot();
+            ModelConnection globalConnection = connectionDoc.connections
+                .FirstOrDefault(x => x.id == connectionDoc.globalMain);
+            status["globalConnectionName"] = globalConnection?.name;
+            status["globalConnectionMaskedKey"] = MaskKey(globalConnection?.apiKey);
+            var games = new JArray();
+            var npcs = new JArray();
+            foreach (string gid in DataStore.ListGameIds())
+            {
+                MemoryPolicy gamePolicy = DataStore.LoadMemoryPolicy(gid);
+                string gameSummaryKey = gamePolicy?.summaryModel?.apiKey;
+                connectionDoc.gameSummary.TryGetValue(gid, out string gameConnectionId);
+                ModelConnection gameConnection = connectionDoc.connections
+                    .FirstOrDefault(x => x.id == gameConnectionId);
+                games.Add(new JObject
+                {
+                    ["gameId"] = gid,
+                    ["hasSummaryModel"] = gamePolicy?.summaryModel != null,
+                    ["summaryKeyConfigured"] = !string.IsNullOrWhiteSpace(gameSummaryKey),
+                    ["summaryMaskedKey"] = MaskKey(gameSummaryKey),
+                    ["connectionName"] = gameConnection?.name,
+                    ["connectionMaskedKey"] = MaskKey(gameConnection?.apiKey)
+                });
+                foreach (string id in DataStore.ListNpcIds(gid))
+                {
+                    AgentConfigDto npc = DataStore.LoadNpc(gid, id);
+                    if (npc == null) continue;
+                    string mainKey = npc.model?.apiKey;
+                    string pair = gid + "/" + id;
+                    connectionDoc.npcMain.TryGetValue(pair, out string mainConnectionId);
+                    ModelConnection mainConnection = connectionDoc.connections.FirstOrDefault(x => x.id == mainConnectionId)
+                        ?? globalConnection;
+                    string mainSource = mainConnection != null
+                        ? mainConnection.id == mainConnectionId ? "connection" : "global_connection"
+                        : string.IsNullOrWhiteSpace(mainKey) ? "none" : "npc";
+                    string effectiveMainKey = mainConnection?.apiKey ?? mainKey;
+                    string ownSummaryKey = npc.memory?.summaryModel?.apiKey;
+                    EffectiveMemoryPolicy effective = MemoryPolicyService.Resolve(gid, npc, null, config);
+                    string effectiveSummaryKey = effective.policy.summaryModel?.apiKey;
+                    connectionDoc.npcSummary.TryGetValue(pair, out string summaryConnectionId);
+                    if (summaryConnectionId == null && npc.memory?.useMainSummaryModel != true
+                        && npc.memory?.summaryModel == null && npc.memory?.inheritGameDefaults == true)
+                        connectionDoc.gameSummary.TryGetValue(gid, out summaryConnectionId);
+                    ModelConnection summaryConnection = connectionDoc.connections.FirstOrDefault(x => x.id == summaryConnectionId);
+                    string policySource = effective.sources.TryGetValue("summaryModel", out string source)
+                        ? source : "core";
+                    bool hasDedicatedSummaryKey = !string.IsNullOrWhiteSpace(effectiveSummaryKey);
+                    npcs.Add(new JObject
+                    {
+                        ["gameId"] = gid,
+                        ["npcId"] = id,
+                        ["displayName"] = npc.displayName ?? id,
+                        ["mainKeyConfigured"] = !string.IsNullOrWhiteSpace(mainKey),
+                        ["mainMaskedKey"] = MaskKey(mainKey),
+                        ["mainSource"] = mainSource,
+                        ["mainConnectionName"] = mainConnection?.name,
+                        ["mainEffectiveMaskedKey"] = MaskKey(effectiveMainKey),
+                        ["npcSummaryModel"] = npc.memory?.summaryModel != null,
+                        ["npcSummaryKeyConfigured"] = !string.IsNullOrWhiteSpace(ownSummaryKey),
+                        ["npcSummaryMaskedKey"] = MaskKey(ownSummaryKey),
+                        ["summarySource"] = summaryConnection != null ? "connection"
+                            : hasDedicatedSummaryKey ? policySource : "main",
+                        ["summaryConnectionName"] = summaryConnection?.name,
+                        ["summaryConnectionScope"] = summaryConnection == null ? null
+                            : connectionDoc.npcSummary.ContainsKey(pair) ? "npc" : "game",
+                        ["summaryMainSource"] = summaryConnection != null || hasDedicatedSummaryKey ? null : mainSource,
+                        ["summaryMaskedKey"] = MaskKey(summaryConnection != null ? summaryConnection.apiKey
+                            : hasDedicatedSummaryKey ? effectiveSummaryKey : effectiveMainKey)
+                    });
+                }
+            }
+            status["games"] = games;
+            status["npcs"] = npcs;
             return status;
         }
 

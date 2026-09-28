@@ -50,10 +50,25 @@ namespace AIBot.Server
                 }
             }
 
-            // 与控制台「模型 Key 管理」同一条解析链：NPC > 控制台全局 > 环境变量 > appsettings；
-            // 单个 NPC 自带 key 仍按原有语义兜底（不同 NPC 可各自配 key）。
+            // NPC 专用连接优先于控制台默认连接；旧 NPC 文件里的 Key 仍可兼容读取。
             List<string> npcIds = DataStore.ListNpcIds("default");
-            bool hasLlmKey = !string.IsNullOrWhiteSpace(ApiKeyResolver.Resolve(null, config)) || HasAnyNpcKey(npcIds);
+            bool hasConnection = false;
+            if (HasAnyNpcKeyOverride == null && DataStore.FindDataRoot() != null)
+            {
+                try
+                {
+                    ModelConnectionDocument connections = ModelConnectionStore.Snapshot();
+                    hasConnection = npcIds.Any(id =>
+                    {
+                        string profileId = connections.npcMain.TryGetValue("default/" + id, out string assigned)
+                            ? assigned : connections.globalMain;
+                        return connections.connections.Any(profile => profile.id == profileId
+                            && !string.IsNullOrWhiteSpace(profile.apiKey));
+                    });
+                }
+                catch { hasConnection = false; }
+            }
+            bool hasLlmKey = hasConnection || HasAnyNpcKey(npcIds);
             int npcCount = npcIds.Count;
             bool queueReady = queue != null;
             bool ready = storageReady && hasLlmKey && npcCount > 0 && queueReady;
