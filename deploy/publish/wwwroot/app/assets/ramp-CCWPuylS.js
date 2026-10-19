@@ -1,0 +1,1 @@
+function t(r,n){return n>0?r/n:0}function a(r){return r>=.5?"ramp-peak":r>=.3?"ramp-hot":r>=.15?"ramp-warm":"ramp-cool"}function u(r,n){return`${Math.round(t(r,n)*100)}%`}export{u as p,a as r,t as s};
