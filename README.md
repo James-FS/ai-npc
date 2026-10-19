@@ -1,6 +1,6 @@
 # AI NPC Agent
 
-可插拔的游戏 NPC 智能Agent平台：纯 C# 核心 + Unity 包 + 独立 Server + Web 管理台，接入 OpenAI 兼容 API（OpenCode Zen / DeepSeek / GLM）。
+面向 Unity 游戏的 NPC Agent：共享 C# 核心、Unity 插件、可选 ASP.NET Core Server 与 Vue 管理台。模型端使用 OpenAI Chat Completions 兼容接口；可接入提供此接口的模型服务。
 
 **核心特性**
 
@@ -8,24 +8,24 @@
 - **双运行模式**：`local`（Unity 直连模型，零依赖）与 `server`（集中配置、跨设备记忆、日志审计），游戏层 API 完全一致，切换只换配置。
 - **工具回传**：模型发起工具调用时 Server 挂起对话、由游戏侧真实执行后续跑；断线重放不会导致工具双执行。
 - **流式与幂等**：SSE 实时输出（token / reasoning / tool_call / reply），`requestId` 幂等去重与断线重放。
-- **可插拔存储**：JSON 文件（开发/单机默认）与 MongoDB（正式/在线）按配置切换，REST 契约不变。
+- **可选持久化**：JSON 文件适合开发与单实例部署；MongoDB 适合需要共享存储或多实例的 Server 部署。
 - **管理控制台**：Vue 3 实现的记忆治理、NPC/世界观配置、对话调试、日志与用量统计。
 
 | 文档 | 内容 |
 | --- | --- |
 | [Unity 插件接入](./Packages/com.aibot.npcagent/README.md) | 安装、NpcAgent 配置、两种模式接入与工具注册 |
-| [深入设计](./docs/architecture/AI-NPC-Agent-实施方案.md) | 架构决策、数据契约、记忆管理与运行设计 |
 
 ## 目录
 
 ```
-Packages/com.aibot.npcagent   Unity 包（Runtime/Core = 三端共享的 AIBot.Core 源码）
-src/AIBot.Server              ASP.NET Core 独立宿主 + 静态托管（根入口跳转 wwwroot/app）
-src/AIBot.Web                 Vue 3 + TypeScript 统一管理/调试控制台（可选后台）
-src/AIBot.Tests               xUnit 测试（Core/协议/请求幂等/工具边界/记忆仓储/存储与摘要队列全链路）
-data/games/{gameId}           NPC 配置/世界观/JSON 兼容存储（Mongo 模式下为迁移源/配置源）
-src/AIBot.Server/MongoInitializer.cs  MongoDB 集合/索引初始化与 TTL（AutoMigrate）
-docker.yml / start-server-mongo.ps1   本地 MongoDB 容器与 Server 启动脚本
+Packages/com.aibot.npcagent   Unity 2022.3 插件与 Server 共用的 AIBot.Core 源码
+src/AIBot.Server              .NET 8 ASP.NET Core 宿主、API 与 Vue 静态文件
+src/AIBot.Web                 Vue 3 + TypeScript 管理与调试控制台
+src/AIBot.Tests               xUnit 自动化测试
+data/games/{gameId}           NPC、世界观和记忆策略配置；JSON 模式下也保存运行数据
+docker.yml                    MongoDB 容器配置（只启动数据库）
+start-server-mongo.ps1        Windows PowerShell：启动 MongoDB 并以 Mongo 模式运行 Server
+deploy/                       发布目录和 Dockerfile（本地发布产物目录）
 ```
 
 ## 架构概览
@@ -50,7 +50,7 @@ docker.yml / start-server-mongo.ps1   本地 MongoDB 容器与 Server 启动脚�
 └───────────────┬───────────────────────┬──────────────┘
                 │ Mongo Driver           │ OpenAI 兼容 HTTP
         ┌───────▼────────┐       ┌─────▼────────────────┐
-        │ MongoDB（正式） │       │ OpenCode/DeepSeek/GLM │
+        │ MongoDB（正式） │       │ OpenAI 兼容模型服务   │
         │ 记忆/Session/日志│       │ 主模型与摘要模型      │
         └────────────────┘       └──────────────────────┘
 
@@ -159,49 +159,53 @@ Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包�
 - `http://localhost:5000/`：自动跳转到 Vue 流式对话调试页。
 - `http://localhost:5000/app/`：Vue 统一管理台，包含记忆治理六页、模型连接管理设置页，以及对话、NPC、世界观、Prompt、Session、日志和统计调试页（能力速览见下文「管理控制台」）。
 
-```bash
-# 1) 跑单元测试（不需要网络和 key）
-cd src/AIBot.Tests && dotnet test
+运行 Server 需要 .NET 8 SDK。Server 默认使用 JSON 存储，无需 MongoDB。开发 Vue 管理台需要 Node.js/npm；MongoDB 模式需要 Docker Compose 或可访问的 MongoDB 实例。
 
-# 2) 在管理台「14 模型连接管理」新增连接，填写 Base URL、模型 ID 和 API Key，
-#    然后选择控制台默认连接；需要例外的 NPC 再单独选择连接。
-#    已验证的三种 OpenAI 兼容模型接法：
-#    - OpenCode Go（国内免梯子）: baseUrl=https://opencode.ai/zen/go/v1, model=ox-alpha-free
-#    - DeepSeek:                 baseUrl=https://api.deepseek.com,              model=deepseek-chat
-#    - 智谱GLM 免费档:            baseUrl=https://open.bigmodel.cn/api/paas/v4, model=glm-4-flash
+```powershell
+# Windows 也可双击 start-server.bat。启用鉴权时先设置令牌，再运行 Server。
+# $env:AIBOT_ADMIN_TOKEN = "请换成长随机值"
+# $env:AIBOT_CLIENT_TOKEN = "请换成另一组长随机值"
+dotnet run --project .\src\AIBot.Server\AIBot.Server.csproj
+```
 
-# 3) 启动（Windows 双击 start-server.bat 同效）
-cd src/AIBot.Server && dotnet run        # → 浏览器打开 http://localhost:5000
+打开 `http://localhost:5000/` 进入管理台。在「模型连接管理」添加兼容 OpenAI Chat Completions 的连接，填写 Base URL、模型 ID 和 API Key 并设为默认；然后选择或新建 Game 和 NPC，再到调试对话页发送消息。
 
-# 可选：使用 Docker MongoDB 启动 Server（自动读取根目录 .env）
-Copy-Item .env.example .env       # 首次使用时执行；可修改密码和端口
-.\start-server-mongo.ps1          # 自动起 mongo 容器、按 AIBOT_MONGO_AUTOMIGRATE 创建集合与索引、以 Mongo 模式运行
-# 如果 PowerShell 阻止脚本，可仅对当前窗口放行：
-# Set-ExecutionPolicy -Scope Process Bypass
+可选：运行自动化测试。
 
-# 可选：把现有 JSON 玩家长期记忆迁移到 Mongo（幂等，目标已有记录会跳过）；
-# Mongo 模式下也可以在控制台「01 系统边界」页点击「从 JSON 迁移到 Mongo」按钮完成同样的事
-dotnet run -- --migrate-json --exit-after-migrate
+```powershell
+dotnet test .\src\AIBot.Tests\AIBot.Tests.csproj
+```
 
-# 也可以只启动数据库
-docker compose -f docker.yml up -d mongo
-docker compose -f docker.yml ps
+可选：使用 Docker MongoDB 启动 Server（Windows PowerShell）。首次运行时复制并编辑 `.env`，设置数据库用户、强密码、端口和库名。该文件由 Docker Compose 和启动脚本读取；Server 鉴权令牌需设在进程环境中。
 
-# 修改 Vue 控制台后重新类型检查并部署到 Server/wwwroot/app
-cd ../AIBot.Web
-npm install
-npx vue-tsc -b --force
-npm run build
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# 编辑 .env 后，在启动 Server 前设置令牌：
+$env:AIBOT_ADMIN_TOKEN = "请换成长随机值"
+$env:AIBOT_CLIENT_TOKEN = "请换成另一组长随机值"
+.\start-server-mongo.ps1
+```
 
-# 可选（PowerShell）：部署管理台时启用管理 API 鉴权（管理台顶部填写同一 token）
-$env:AIBOT_ADMIN_TOKEN="请换成长随机值"
-$env:AIBOT_CLIENT_TOKEN="请换成另一组长随机值"
+脚本会启动 MongoDB、等待健康检查、创建集合与索引，再启动 Server。JSON → Mongo 迁移仅导入玩家长期记忆，不包含 Session、对话日志或审计记录；Mongo 模式启动后可在管理台「系统记忆边界」页面执行迁移。
 
-# 4) curl 调试对话（中文请存 UTF-8 文件后 --data-binary @chat.json）
-curl -N -X POST http://localhost:5000/api/games/default/chat/stream \
-  -H "Content-Type: application/json" \
-  -H "X-Request-Id: req-demo-001" \
-  -d '{"requestId":"req-demo-001","npcId":"blacksmith_wang","sessionId":"s1","message":"hello"}'
+`docker.yml` 只启动 MongoDB。若只需启动数据库，可运行：
+
+```powershell
+docker compose --env-file .env -f docker.yml up -d mongo
+docker compose --env-file .env -f docker.yml ps
+```
+
+开发 Vue 管理台时，在 `src/AIBot.Web` 运行 `npm ci` 和 `npm run dev`；Vite 默认监听 `http://localhost:5173`，并将 `/api` 代理到本机 5000 端口。运行 `npm run build` 会先执行类型检查，再把生产文件写入 `src/AIBot.Server/wwwroot/app`。
+
+调试 SSE 对话时，每次请求使用唯一的 `requestId`。若已设置 `AIBOT_CLIENT_TOKEN`，需在请求中添加 `Authorization: Bearer <token>`。
+
+```powershell
+$body = @{ requestId = "req-demo-001"; npcId = "blacksmith_wang"; sessionId = "s1"; message = "hello" } | ConvertTo-Json -Compress
+curl.exe -N -X POST http://localhost:5000/api/games/default/chat/stream `
+  -H "Content-Type: application/json" `
+  -H "Authorization: Bearer $env:AIBOT_CLIENT_TOKEN" `
+  -H "X-Request-Id: req-demo-001" `
+  --data-binary $body
 ```
 
 返回 SSE 事件流：`token` → `reasoning`（推理模型思考过程）→ `tool_call` → `reply` → `done`。
@@ -220,7 +224,7 @@ Mongo 模式会把摘要任务状态持久化到 `memory_summary_jobs` 集合，
 
 注意存储模式跟随启动方式：纯 `dotnet run` 回到 JSON 模式（数据仍保留在 MongoDB，但该进程按 JSON 读写而不可见），固定使用 Mongo 请始终通过 `start-server-mongo.ps1` 启动。两种模式切换时控制台「01 系统边界」页会显示提醒横幅，避免"数据丢失"的误解。
 
-Docker MongoDB 首次启动即由 Server 的 `MongoInitializer` 创建所需集合与索引（无外部 schema 脚本），数据保存在 `ai_npc_mongo_data` volume。`docker.yml` 默认映射宿主机 `27017`；如果该端口已被其他 MongoDB 服务占用，可在根目录 `.env` 中设置 `AIBOT_MONGO_PORT=27018`（本机可自行调整），此时宿主机运行 Server 要连接 `127.0.0.1:27018`。以后若把 Server 也容器化，连接地址改为 `mongo:27017`。停止容器使用 `docker compose -f docker.yml down`，不要随意使用 `down -v`，否则会删除数据库卷。
+Docker MongoDB 首次启动即由 Server 的 `MongoInitializer` 创建所需集合与索引（无外部 schema 脚本），数据保存在 `ai_npc_mongo_data` volume。`docker.yml` 默认映射宿主机 `27017`；如果该端口已被其他 MongoDB 服务占用，可在根目录 `.env` 中设置 `AIBOT_MONGO_PORT=27018`，此时宿主机运行 Server 要连接 `127.0.0.1:27018`。停止容器使用 `docker compose -f docker.yml down`；`down -v` 会删除数据库卷。
 
 **Mongo 数据备份**：`ai_npc_mongo_data` volume 是 Mongo 模式下全部业务数据（长期记忆、Session、日志、审计、摘要任务）的唯一载体，请定期备份。容器在运行时可直接导出：
 
@@ -232,6 +236,32 @@ docker exec -i ai-npc-mongo mongorestore --username aibot --password <密码> --
 ```
 
 也可以直接快照 Docker volume（`docker run --rm -v aibot_ai_npc_mongo_data:/data -v <宿主机目录>:/backup alpine tar czf /backup/mongo-data.tgz /data`）。注意 `docker compose -f docker.yml down -v` 会删除该卷，等同于删除全部业务数据。
+
+### 发布 Server
+
+仓库提供 `deploy/Dockerfile`，用于将 .NET 发布目录打包为 Linux 容器镜像。构建命令：
+
+```powershell
+dotnet publish .\src\AIBot.Server\AIBot.Server.csproj -c Release -o .\deploy\publish
+Push-Location .\deploy
+docker build -t aibot-server:latest .
+Pop-Location
+```
+
+镜像在容器内监听 8080 端口。部署时需把持久化的数据目录挂载到 `/app/data`，并设置 `AIBOT_DATA_ROOT=/app/data`。挂载目录至少要有 `games/` 子目录；在管理台创建或导入 NPC 后才能通过就绪探针。模型连接和相关配置也保存在该目录中。Server 容器连接同一 Docker 网络里的 MongoDB 时，连接串中的主机名应使用 Mongo 服务名，不能使用 `127.0.0.1`。
+
+下面的例子将宿主机 `D:\aibot-data` 挂载为 Server 数据目录。部署前先准备该目录并放入 Game/NPC 配置；首次启动后也可通过管理台创建配置。
+
+```powershell
+docker run -d --name aibot-server -p 8080:8080 `
+  -e AIBOT_DATA_ROOT=/app/data `
+  -e AIBOT_ADMIN_TOKEN="替换为长随机管理令牌" `
+  -e AIBOT_CLIENT_TOKEN="替换为另一组长随机客户端令牌" `
+  -v D:\aibot-data:/app/data `
+  aibot-server:latest
+```
+
+对外提供服务前设置 `AIBOT_ADMIN_TOKEN` 和 `AIBOT_CLIENT_TOKEN` 两个不同的长随机值，并在 Unity Connection Profile 中设置对应客户端令牌。Mongo 模式还需设置 `AIBOT_STORAGE_PROVIDER=Mongo`、`AIBOT_MONGO_CONNECTION_STRING`、`AIBOT_MONGO_DATABASE` 和 `AIBOT_MONGO_AUTOMIGRATE=true`。当前 `docker.yml` 只启动 MongoDB；Server 镜像需单独运行或由部署平台编排。正式环境还应通过 HTTPS 提供访问，并限制管理 API 和管理台的访问范围。
 
 ### 管理控制台
 
@@ -250,9 +280,17 @@ docker exec -i ai-npc-mongo mongorestore --username aibot --password <密码> --
 
 ## Unity 接入
 
-游戏工程 `Packages/manifest.json` 添加
-`"com.aibot.npcagent": "file:D:/Code/aibot/Packages/com.aibot.npcagent"`，
-菜单 **AIBot → Demo → Create Demo Scene** 一键生成示例场景。
+Unity 2022.3 游戏工程可在 `Packages/manifest.json` 中添加本地包依赖；将路径替换为仓库所在位置：
+
+```json
+{
+  "dependencies": {
+    "com.aibot.npcagent": "file:<仓库路径>/Packages/com.aibot.npcagent"
+  }
+}
+```
+
+菜单 **AIBot → Demo → Create Demo Scene** 可生成示例场景。包依赖和代码调用详见 [Unity 插件说明](./Packages/com.aibot.npcagent/README.md)。
 
 API key 永不入库：`.gitignore` 已忽略全部 NPC 真实配置（`data/games/*/npcs/*.json`，模板 `new_npc.template.json` 除外）与模型连接配置（`data/model-connections.json`）。Server 模式在管理台「14 模型连接管理」统一配置。
 
