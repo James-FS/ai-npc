@@ -8,7 +8,7 @@
 - **双运行模式**：`local`（Unity 直连模型，零依赖）与 `server`（集中配置、跨设备记忆、日志审计），游戏层 API 完全一致，切换只换配置。
 - **工具回传**：模型发起工具调用时 Server 挂起对话、由游戏侧真实执行后续跑；断线重放不会导致工具双执行。
 - **流式与幂等**：SSE 实时输出（token / reasoning / tool_call / reply），`requestId` 幂等去重与断线重放。
-- **可选持久化**：JSON 文件适合开发与单实例部署；MongoDB 适合需要共享存储或多实例的 Server 部署。
+- **可选持久化**：JSON 文件适合开发与单实例部署；MongoDB 提供集中持久化；当前版本强制单活 Server，不支持多个实例同时写入。
 - **管理控制台**：Vue 3 实现的记忆治理、NPC/世界观配置、对话调试、日志与用量统计。
 
 | 文档 | 内容 |
@@ -27,6 +27,8 @@ docker.yml                    MongoDB 容器配置（只启动数据库）
 start-server-mongo.ps1        Windows PowerShell：启动 MongoDB 并以 Mongo 模式运行 Server
 deploy/                       发布目录和 Dockerfile（本地发布产物目录）
 ```
+
+Server 的管理 API 按职责放在 `AdminEndpoints.cs`（入口与配置）、`AdminMemoryEndpoints.cs`（记忆策略、事实、迁移、审计）和 `AdminOperationsEndpoints.cs`（存储、队列、会话、日志、统计）中。聊天由 `ChatEndpoints.cs` 注册路由，`ChatRequestHandler.cs` 编排校验、幂等、工具续跑和记忆持久化，`ChatSseWriter.cs` 负责流式输出与终态重放。各文件直接使用现有服务，接口地址与请求契约不变。
 
 ## 架构概览
 
@@ -103,7 +105,7 @@ NpcAgent → AIBot.Core/AgentLoop → UnityWebRequestBackend → OpenAI 兼容�
 3. 可选创建 `AI NPC → World Config`（`WorldConfigAsset`），拖到 `NpcAgent.worldConfigAsset`。
 4. 将 `NpcAgent` 挂到 NPC GameObject，调用 `Chat()` 或 `ChatAsync()`。
 
-Local 模式的配置也可以继续从 `data/games/{gameId}` 下的 JSON 加载；使用 Asset 时不需要复制 `data/` 目录。
+`NpcAgent` 的 Local 运行配置使用 `AgentConfigAsset`，Server 运行配置使用 `AIBotConnectionProfile`。旧版 `data/games/{gameId}/npcs/*.json` 可在 Unity 菜单 **AIBot → Import Legacy NPC JSON as Local Asset...** 导入为本地 Asset；相邻 `world.json` 与 `memory-policy.json` 会一并导入，完整保留 Local 世界观和记忆策略。已有 AgentConfigAsset 的记忆字段也会随导入保留。旧 Server JSON 可用 **Import Legacy NPC JSON as Server Profile...** 导入地址、Game/NPC 标识和工具 ID。导入不会删除源文件，也不会将模型 Key 复制到 Server Profile。已有声明 Server 模式的旧 AgentConfigAsset，可在 Hierarchy 选中其 NpcAgent 后执行 **AIBot → Convert Selected Legacy Server NpcAgent to Connection Profile...**。
 
 Local 模式的特点：
 
@@ -148,7 +150,7 @@ Server 模式的当前工具边界需要特别注意：
 多个 NPC、多人游戏、长期记忆、统一配置管理 → Server
 ```
 
-两种模式对游戏层保持相同的 `NpcAgent.ChatAsync()`、流式事件和结构化回复接口。切换模式主要是更换配置来源：Local 使用 `AgentConfigAsset`，Server 使用 `AIBotConnectionProfile`；旧的 `runtimeMode=local/server` 配置方式仍然兼容。Unity 侧模型故障但仍交付兜底台词时会触发 `onFallback`，请求取消时触发 `onCancelled`；两者都不替代正常的 `onReply`/终止错误语义。
+两种模式对游戏层保持相同的 `NpcAgent.ChatAsync()`、流式事件和结构化回复接口。切换模式时将 `AgentConfigAsset` 或 `AIBotConnectionProfile` 指派给 NpcAgent；Unity 侧模型故障但仍交付兜底台词时会触发 `onFallback`，请求取消时触发 `onCancelled`；两者都不替代正常的 `onReply`/终止错误语义。
 
 Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包含 Vue、ASP.NET Core 或 MongoDB 驱动。开发/单机使用 `UnityWebRequestBackend` 直连模型；Server 使用 `UnityServerBackend` 连接 `AIBot.Server`。Unity 与 Vue 都不直接连接数据库；Server 默认使用 JSON，启用 Mongo 时通过 MongoDB.Driver 访问数据库，两种存储可通过配置切换。Server 配置 `AIBOT_CLIENT_TOKEN` 后会强制聊天客户端携带令牌；未配置时仅适合本机开发，正式部署还应配合 HTTPS、网关认证和访问控制。
 
@@ -157,7 +159,7 @@ Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包�
 项目提供一个统一入口（根路径兼容跳转）：
 
 - `http://localhost:5000/`：自动跳转到 Vue 流式对话调试页。
-- `http://localhost:5000/app/`：Vue 统一管理台，包含记忆治理六页、模型连接管理设置页，以及对话、NPC、世界观、Prompt、Session、日志和统计调试页（能力速览见下文「管理控制台」）。
+- `http://localhost:5000/app/`：Vue 统一管理台，侧栏提供调试、内容、记忆、模型、运维五个入口；每个入口内以子导航切换已有功能页。
 
 运行 Server 需要 .NET 8 SDK。Server 默认使用 JSON 存储，无需 MongoDB。开发 Vue 管理台需要 Node.js/npm；MongoDB 模式需要 Docker Compose 或可访问的 MongoDB 实例。
 
@@ -168,7 +170,7 @@ Unity 游戏包只包含 `AIBot.Core`、`AIBot.Unity` 和后端实现，不包�
 dotnet run --project .\src\AIBot.Server\AIBot.Server.csproj
 ```
 
-打开 `http://localhost:5000/` 进入管理台。在「模型连接管理」添加兼容 OpenAI Chat Completions 的连接，填写 Base URL、模型 ID 和 API Key 并设为默认；然后选择或新建 Game 和 NPC，再到调试对话页发送消息。
+打开 `http://localhost:5000/` 进入管理台。在「模型」入口添加兼容 OpenAI Chat Completions 的连接，填写 Base URL、模型 ID 和 API Key 并分配给默认模型、Game 或 NPC，再到「调试」发送消息。Server 首次启动会将旧 NPC/Game 内嵌连接中带 Key 的配置迁移到 `data/model-connections.json`，保存连接和绑定后才清除旧字段；重复启动可安全续跑。新文件由 Git 忽略，API Key 不会写入仓库。
 
 可选：运行自动化测试。
 
@@ -220,7 +222,7 @@ curl.exe -N -X POST http://localhost:5000/api/games/default/chat/stream `
 
 JSON 存储会由维护任务清理长期不活跃的 Session 文件；`Sessions:MemoryIdleHours` 同时控制内存会话和文件的闲置清理。JSON 模式适合单 Server 实例，多个进程不要同时写入同一 data 目录。聊天请求中的模型覆盖参数仅允许管理端调试请求使用，并会被 Server 限制在安全范围内。
 
-Mongo 模式会把摘要任务状态持久化到 `memory_summary_jobs` 集合，Server 重启后自动恢复 pending/processing 任务；集合与索引由 `MongoInitializer` 初始化，初始化与 TTL 状态记录在 `_meta` 集合。本地开发可设置 `AIBOT_MONGO_AUTOMIGRATE=true`（`.env` 配置后由启动脚本透传，Mongo 模式必需）让 Server 启动时自动创建集合与索引。`GET /api/ready` 可用于启动探针，未连接数据库、缺少集合、未配置模型或没有默认 NPC 时返回 503。模型故障若已由 AgentLoop 降级为兜底回复，会在 SSE `reply.diagnostic` 中提供稳定的 `code/status/retryable` 字段；只有无法返回任何有效回复的终止故障才使用 `error` 事件。连接测试接口继续返回同一套错误码契约。
+Mongo 模式会把摘要任务状态持久化到 `memory_summary_jobs` 集合，Server 重启后自动恢复 pending/processing 任务；集合与索引由 `MongoInitializer` 初始化，初始化与 TTL 状态记录在 `_meta` 集合。本地开发可设置 `AIBOT_MONGO_AUTOMIGRATE=true`（`.env` 配置后由启动脚本透传，Mongo 模式必需）让 Server 启动时自动创建集合与索引。`GET /api/ready` 可用于启动探针，未连接数据库、缺少集合、所有 NPC 均未配置可用模型连接/Key 或所有 Game 均没有可用 NPC 时返回 503。模型故障若已由 AgentLoop 降级为兜底回复，会在 SSE `reply.diagnostic` 中提供稳定的 `code/status/retryable` 字段；只有无法返回任何有效回复的终止故障才使用 `error` 事件。连接测试接口继续返回同一套错误码契约。
 
 注意存储模式跟随启动方式：纯 `dotnet run` 回到 JSON 模式（数据仍保留在 MongoDB，但该进程按 JSON 读写而不可见），固定使用 Mongo 请始终通过 `start-server-mongo.ps1` 启动。两种模式切换时控制台「01 系统边界」页会显示提醒横幅，避免"数据丢失"的误解。
 
@@ -239,10 +241,12 @@ docker exec -i ai-npc-mongo mongorestore --username aibot --password <密码> --
 
 ### 发布 Server
 
+`publish-server.ps1` 会安装前端锁定依赖、运行前端回归测试、重建管理台，再发布 Server，避免把过期的静态页面打入发布包。`deploy/publish/` 和镜像 tar 是本地产物，不再纳入 Git；CI 会运行包含 MongoDB 的后端测试并上传发布包。
+
 仓库提供 `deploy/Dockerfile`，用于将 .NET 发布目录打包为 Linux 容器镜像。构建命令：
 
 ```powershell
-dotnet publish .\src\AIBot.Server\AIBot.Server.csproj -c Release -o .\deploy\publish
+.\publish-server.ps1
 Push-Location .\deploy
 docker build -t aibot-server:latest .
 Pop-Location
@@ -265,16 +269,11 @@ docker run -d --name aibot-server -p 8080:8080 `
 
 ### 管理控制台
 
-「14 模型连接管理」页统一创建完整连接，并分配给控制台默认模型、特定 NPC、Game 摘要或 NPC 摘要。页面同时脱敏展示旧控制台 Key 和环境变量的兼容回退来源。公共部署须设置 `AIBOT_ADMIN_TOKEN`。
+管理台采用五个主入口：调试（对话、Prompt、会话）、内容（NPC、世界观）、记忆（记忆检查、Game 策略、NPC 覆盖、系统边界、审计）、模型（模型连接）和运维（日志、统计、高级操作）。旧地址继续可用；低频记忆迁移位于运维的高级操作子页。顶部可切换 Game/NPC，底部显示存储模式与 Server 状态。
 
-同页还可建立 Server 模式的「模型连接配置」：填写名称、Base URL（接口前缀）、API Key 和模型 ID；连接 ID 由系统自动生成，API 格式固定为 `OpenAI 兼容 Chat Completions`。API Key 在新建时必填，编辑时留空可保留原值。连接可分配给控制台默认模型、NPC 主模型、NPC 摘要模型或 Game 摘要模型。NPC 主模型连接优先于控制台默认连接；未分配时才继续使用旧 NPC 设置及四级 Key 回退。绑定后地址、模型和 Key 整套生效。连接配置保存在不入 Git 的 `data/model-connections.json`，已有 Key 仅脱敏回显。Unity `local` 模式仍按 Unity 本地配置运行；此处连接配置只影响 Server 模式。
+**模型连接**页统一创建 Server 模型连接并分配给控制台默认、NPC 主模型、Game 摘要或 NPC 摘要。NPC 主模型使用专用连接或控制台默认连接；未分配时 Server 返回明确的配置错误，不从 NPC 文件回退。连接地址、模型 ID 和 Key 保存在不入 Git 的 `data/model-connections.json`，Key 仅脱敏回显。旧 NPC/Game 内嵌连接在 Server 启动时幂等迁入；NPC 配置页和记忆策略页只编辑生成参数。Unity `local` 模式仍由本地 Asset 配置。
 
-侧栏按「记忆治理（01-06）/ 调试工作台（07-13）/ 系统设置（14）」分组。管理台顶部可切换 Game（支持下拉选择与输入新 ID）与 NPC，底部常驻存储模式与 Server 启动时间徽标。
-
-- **Game / NPC 管理**：「02 Game 策略」页右上角可应用策略预设；Game 旁的「＋」按钮可直接创建新 Game（生成 world 与 memory-policy 骨架）；「08 NPC 配置」页弹窗式新建 NPC（内置模板兜底，无需先准备模板文件）。
-- **模型连接管理**：「14 模型连接管理」页集中保存模型地址、模型 ID 和 API Key；选择控制台默认连接后，未单独分配的 NPC 使用这条连接。已有 Key 只显示脱敏值，旧 Key 来源仅作兼容回退。NPC 配置页只保留温度、最大输出量和超时等生成参数。公共部署务必设置 `AIBOT_ADMIN_TOKEN` 保护管理 API。
-- **存储模式指示**：「01 系统边界」页显示当前存储模式（Json/Mongo）、Mongo 目标（host/库名）与自动创建集合/索引状态；检测到本次与上次运行模式不同时，会显示提醒横幅（两种模式数据互不可见）。
-- **JSON→Mongo 迁移按钮**：Mongo 模式下「01 系统边界」页可一键把 JSON 侧的玩家长期记忆迁入 Mongo（幂等，与 `--migrate-json` 等效）。
+**Game / NPC 管理**：Game 入口可应用记忆策略预设并创建 Game；内容入口可创建、编辑 NPC 与世界观。**记忆**入口提供策略、检查、审计和系统边界功能；Mongo 模式的 JSON→Mongo 迁移位于运维入口的高级操作中（幂等，与 `--migrate-json` 等效）。公共部署务必设置 `AIBOT_ADMIN_TOKEN` 保护管理 API。
 - **会话按 NPC 隔离**：调试对话页为每个 NPC 记住独立会话，切换 NPC 自动切换会话，不再串扰。
 - **时间显示**：会话与日志页的时间统一转换为本地时区显示，原始 UTC 值可在日志行展开或悬浮提示中查看。
 
@@ -292,18 +291,9 @@ Unity 2022.3 游戏工程可在 `Packages/manifest.json` 中添加本地包依�
 
 菜单 **AIBot → Demo → Create Demo Scene** 可生成示例场景。包依赖和代码调用详见 [Unity 插件说明](./Packages/com.aibot.npcagent/README.md)。
 
-API key 永不入库：`.gitignore` 已忽略全部 NPC 真实配置（`data/games/*/npcs/*.json`，模板 `new_npc.template.json` 除外）与模型连接配置（`data/model-connections.json`）。Server 模式在管理台「14 模型连接管理」统一配置。
+API key 不应提交到仓库：`.gitignore` 已忽略全部 NPC 真实配置（`data/games/*/npcs/*.json`，模板 `new_npc.template.json` 除外）与模型连接配置（`data/model-connections.json`）。Server 模式在管理台「模型」入口统一配置。
 
-运行模式由 NPC 配置的 `runtimeMode` 控制：
-
-```json
-{
-  "runtimeMode": "server",
-  "serverBaseUrl": "http://127.0.0.1:5000"
-}
-```
-
-`local` 模式由 Unity 直连模型；`server` 模式由 Unity 调用
+Unity 运行模式由 NpcAgent 上指定的配置资源决定：`AgentConfigAsset` 表示 Local，`AIBotConnectionProfile` 表示 Server；旧 JSON 可使用 Unity Editor 导入菜单迁移，不再由 NpcAgent 在运行时搜索目录。`local` 模式由 Unity 直连模型；`server` 模式由 Unity 调用
 `/api/games/{gameId}/chat/stream`，长期记忆、摘要、工具和日志由 Server 处理。
 `NpcAgent` 上的 `playerId` 可选，填写后启用玩家范围长期记忆；`sessionId` 用于复用短期会话。
 
@@ -317,8 +307,18 @@ Server 模式的工具边界按 `toolMode` 分为三种：
 
 - `none`（默认）：不注册任何工具，纯对话。
 - `simulated`（仅调试）：Vue 调试台或 Unity Profile 显式选择后启用 `SimulatedToolHost`（背包、好感度和剧情阶段只写入会话模拟状态，不触碰正式游戏）。
-- `game`（工具回传）：Server 遇到模型工具调用时不执行，挂起对话并下发 `tool_pending` 终态事件；Unity 在本地用 `NpcAgent.Tools` 真实执行（QuestSystem/背包等游戏代码负责"能不能做"），随后携带 `roundToken` 与结果发起续跑请求，Server 从挂起态恢复对话。使用条件：Connection Profile 勾选 `enableGameTools`（与 `enableSimulatedTools` 互斥）、NpcAgent 已注册本地工具、NPC 配置的 `enabledToolIds` 包含对应工具。工具执行结果都会通过 Unity `onToolExecuted` 统一通知；同一 `roundToken` 只会执行一次（断线重放不会导致工具双执行），游戏工具仍应保持幂等。
+- `game`（工具回传）：Server 遇到模型工具调用时不执行，挂起对话并下发 `tool_pending` 终态事件；Unity 在本地用 `NpcAgent.Tools` 真实执行（QuestSystem/背包等游戏代码负责"能不能做"），随后携带 `roundToken` 与结果发起续跑请求，Server 从挂起态恢复对话。使用条件：Connection Profile 勾选 `enableGameTools`（与 `enableSimulatedTools` 互斥）、NpcAgent 已注册本地工具、NPC 配置的 `enabledToolIds` 包含对应工具。工具执行结果都会通过 Unity `onToolExecuted` 统一通知；工具调用意图与结果写入 Unity 持久化执行记录，重放复用已保存结果；执行中崩溃会阻止自动重做，游戏工具仍应以业务幂等键保护副作用。
 
 Server 模式可调用 `await agent.CheckServerAsync()` 主动检查后台连接、就绪状态和当前 NPC 是否存在；结果会通过 `onServerStatus` 事件通知，不会给每次聊天额外增加检查请求。
 `UnityServerBackend` 会自动为每轮生成 `requestId` 并最多恢复重试两次，同时消除重放 token、reasoning 和工具事件。需要显式恢复时可读取 `agent.LastServerRequestId`，再调用 `RetryServerRequestAsync(message, requestId)`。
+
+## 可靠性与运行边界
+
+- 管理台使用 `AIBOT_ADMIN_TOKEN`，它可访问聊天接口以及模拟工具/模型覆盖；游戏客户端使用独立的 `AIBOT_CLIENT_TOKEN`，不能访问管理写入和调试覆盖。
+- JSON 模式通过 data 目录文件锁阻止并发 Server。Mongo 模式还通过 `_meta` 中的数据库时间租约阻止同库多写者；续期失败时停止服务。正常退出释放租约，异常退出后替代实例最多等待两分钟。当前不支持多个活跃 Server 并行服务同一数据库，CLI 迁移也应在原 Server 停止后执行。
+- 每个 Session 保留最近 20 个请求的完整终态重放。更旧的 ID 保留去重标记，再次提交返回 `409 request_replay_expired`，不会重新执行。删除或过期清理 Session 后该范围失效；不要复用历史请求 ID。会话读取失败时拒绝执行，不会从空白状态覆盖历史。
+- Unity game 模式把工具执行记录保存在 `Application.persistentDataPath/AIBot/tool-rounds`。应随游戏存档一起保留；删除这些记录会丢失客户端防重保证。重启或续跑失败后调用 `ResumeServerToolsAsync()`，它会复用已记录的结果和续跑 requestId。若工具执行中崩溃，必须先查询游戏权威数据，再调用 `ConfirmServerToolResult(roundToken, callId, success, message)` 确认结果后恢复。`PendingServerToolRoundToken` 可读取待恢复令牌。
+- 用量统计从当前存储保留期内的日志重建，包含工具挂起轮、同步和后台摘要，不再重启清零；只计入模型返回的 usage，不等同供应商账单。
+
+回归测试：`dotnet test src/AIBot.Tests/AIBot.Tests.csproj`；前端在 `src/AIBot.Web` 运行 `npm test`。设置 `AIBOT_MONGO_TEST_CONNECTION` 后启用 Mongo 集成测试；CI 默认运行这些测试。HTTP 测试会启动独立的临时 Server 和本地模拟模型，不使用真实模型 Key。
 

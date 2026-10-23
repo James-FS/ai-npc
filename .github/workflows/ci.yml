@@ -1,0 +1,38 @@
+name: Build and regression tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      AIBOT_MONGO_TEST_CONNECTION: mongodb://127.0.0.1:27017
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: src/AIBot.Web/package-lock.json
+      - run: npm ci && npm test && npm run build
+        working-directory: src/AIBot.Web
+      - run: dotnet test src/AIBot.Tests/AIBot.Tests.csproj -c Release --nologo
+      - run: dotnet publish src/AIBot.Server/AIBot.Server.csproj -c Release -o deploy/publish --nologo
+      - run: docker build -t aibot-server:ci deploy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aibot-server
+          path: deploy/publish/

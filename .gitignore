@@ -1,6 +1,10 @@
 # .NET
 bin/
 obj/
+.artifacts/
+deploy/publish/
+deploy/*.tar
+data/.server.lock
 *.user
 
 # Node / Vue (M5)
