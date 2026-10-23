@@ -82,8 +82,6 @@ function source(key: string) {
 
 function newSummaryModel(): ModelSettings {
   return {
-    baseUrl: 'https://api.deepseek.com',
-    model: 'deepseek-chat',
     temperature: 0.3,
     maxTokens: 500,
     timeoutMs: 20000,
@@ -120,11 +118,12 @@ function toggleGameSummaryModel(enabled: boolean) {
   setField('summaryModel', enabled ? newSummaryModel() : null)
 }
 
-function updateSummaryModel(key: keyof ModelSettings, value: unknown) {
+function updateSummaryModel(key: 'temperature' | 'maxTokens' | 'timeoutMs', value: number | undefined) {
+  if (value === undefined) return
   const next = cloneModel()
-  const model = cloneJson(next.summaryModel ?? newSummaryModel()) as unknown as Record<string, unknown>
+  const model = cloneJson(next.summaryModel ?? newSummaryModel())
   model[key] = value
-  next.summaryModel = model as unknown as ModelSettings
+  next.summaryModel = model
   emit('update:modelValue', next)
 }
 
@@ -207,12 +206,10 @@ watch(() => props.modelValue.extensions, value => {
         <el-switch :model-value="modelValue.summaryModel !== null" @update:model-value="toggleGameSummaryModel(Boolean($event))" /><span class="source-tag">game</span>
       </div>
       <div v-if="modelValue.summaryModel" class="model-grid">
-        <el-form-item label="Base URL"><el-input :model-value="modelValue.summaryModel.baseUrl" @update:model-value="updateSummaryModel('baseUrl', $event)" /></el-form-item>
-        <el-form-item label="模型名"><el-input :model-value="modelValue.summaryModel.model" @update:model-value="updateSummaryModel('model', $event)" /></el-form-item>
+        <p class="model-connection-note">摘要模型连接在「模型」入口统一分配；此处只调整生成参数。</p>
         <el-form-item label="Temperature"><el-input-number :model-value="modelValue.summaryModel.temperature" :min="0" :max="2" :step="0.1" @update:model-value="updateSummaryModel('temperature', $event)" /></el-form-item>
         <el-form-item label="Max Tokens"><el-input-number :model-value="modelValue.summaryModel.maxTokens" :min="64" :max="8192" @update:model-value="updateSummaryModel('maxTokens', $event)" /></el-form-item>
         <el-form-item label="超时毫秒"><el-input-number :model-value="modelValue.summaryModel.timeoutMs" :min="1000" :max="120000" :step="1000" @update:model-value="updateSummaryModel('timeoutMs', $event)" /></el-form-item>
-        <el-form-item label="API Key"><el-input type="password" show-password placeholder="留空表示保留服务端现有值" :model-value="modelValue.summaryModel.apiKey || ''" @update:model-value="updateSummaryModel('apiKey', $event)" /></el-form-item>
       </div>
     </section>
 

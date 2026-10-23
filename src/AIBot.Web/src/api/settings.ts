@@ -89,13 +89,4 @@ export const settingsApi = {
   testModelConnection: (id: string) => request<ModelConnectionTest>(
     `/api/admin/model-connections/${encodeURIComponent(id)}/test`, { method: 'POST' }),
   llmKeyStatus: () => request<LlmKeyStatus>('/api/admin/settings/llm'),
-  updateNpcKey: (gameId: string, npcId: string, apiKey?: string) =>
-    request<LlmKeyStatus>(`/api/admin/settings/llm/npcs/${encodeURIComponent(gameId)}/${encodeURIComponent(npcId)}/key`,
-      { method: 'PUT', body: JSON.stringify(apiKey ? { apiKey } : { clear: true }) }),
-  updateGameSummaryKey: (gameId: string, apiKey?: string) =>
-    request<LlmKeyStatus>(`/api/admin/settings/llm/games/${encodeURIComponent(gameId)}/summary-key`,
-      { method: 'PUT', body: JSON.stringify(apiKey ? { apiKey } : { clear: true }) }),
-  updateNpcSummaryKey: (gameId: string, npcId: string, apiKey?: string) =>
-    request<LlmKeyStatus>(`/api/admin/settings/llm/npcs/${encodeURIComponent(gameId)}/${encodeURIComponent(npcId)}/summary-key`,
-      { method: 'PUT', body: JSON.stringify(apiKey ? { apiKey } : { clear: true }) }),
 }

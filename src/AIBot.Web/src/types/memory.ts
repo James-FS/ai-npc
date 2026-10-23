@@ -1,7 +1,7 @@
 export interface ModelSettings {
-  baseUrl: string
+  baseUrl?: string
   apiKey?: string
-  model: string
+  model?: string
   temperature: number
   maxTokens: number
   timeoutMs: number

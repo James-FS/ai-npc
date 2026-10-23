@@ -50,7 +50,7 @@ export async function streamChat(
   const url = `${app.serverBase.replace(/\/$/, '')}${gamePath(gameId, '/chat/stream')}`
   const requestId = body.requestId || crypto.randomUUID().replace(/-/g, '')
   const requestBody = { ...body, requestId }
-  const delivered: string[] = []
+  const deliveredTerminal = new Map<string, string>()
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let response: Response
@@ -78,21 +78,25 @@ export async function streamChat(
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
-    let eventIndex = 0
     let terminal = false
+    const replayed = response.headers.get('X-AIBot-Replayed') === 'true'
     const consumeLine = (line: string) => {
       if (!line.startsWith('data: ')) return
       const payload = line.slice(6)
       let event: DebugChatEvent | null = null
       try { event = JSON.parse(payload) as DebugChatEvent } catch { /* 忽略非 JSON SSE 行 */ }
-      if (eventIndex < delivered.length) {
-        if (delivered[eventIndex] !== payload) throw new Error('同一 requestId 的重放内容不一致')
-      } else {
-        delivered.push(payload)
-        if (event) onEvent(event)
-      }
-      if (event) terminal = event.type === 'done' || event.type === 'error'
-      eventIndex += 1
+      if (!event) return
+      const finalEvent = event.type === 'reply' || event.type === 'done' || event.type === 'error'
+      if (replayed && !finalEvent) return
+      if (finalEvent) {
+        const previous = deliveredTerminal.get(event.type)
+        if (previous !== undefined && previous !== payload) throw new Error('同一 requestId 的重放内容不一致')
+        if (previous === undefined) {
+          deliveredTerminal.set(event.type, payload)
+          onEvent(event)
+        }
+      } else onEvent(event)
+      terminal = terminal || event.type === 'done' || event.type === 'error'
     }
 
     try {
@@ -111,6 +115,9 @@ export async function streamChat(
       if (error instanceof DOMException && error.name === 'AbortError') throw error
       if (terminal) return
       if (attempt > 0) throw error
+    } finally {
+      await reader.cancel().catch(() => {})
+      reader.releaseLock()
     }
   }
   throw new ApiError(0, 'Server 流中断且恢复失败', null, 'stream_incomplete')

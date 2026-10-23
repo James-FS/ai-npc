@@ -42,7 +42,7 @@ onMounted(load)
       <div class="metric-card"><div class="metric-label">输入 Tokens</div><div class="metric-value">{{ value('totalPromptTokens', 'promptTokens') }}</div></div>
       <div class="metric-card"><div class="metric-label">输出 Tokens</div><div class="metric-value">{{ value('totalCompletionTokens', 'completionTokens') }}</div></div>
       <div class="metric-card"><div class="metric-label">平均耗时</div><div class="metric-value">{{ seconds(value('avgMs', 'averageElapsedMs')) }}</div></div>
-      <div class="metric-card"><div class="metric-label">注入尝试</div><div class="metric-value">{{ value('injectionAttempts') }}</div></div>
+      <div class="metric-card"><div class="metric-label">注入尝试</div><div class="metric-value">{{ value('totalInjectionAttempts', 'injectionAttempts') }}</div></div>
     </div>
     <div class="panel section-gap"><div class="panel-head"><h3>按 NPC 统计</h3></div><el-table :data="byNpc()" stripe><el-table-column prop="npcId" label="NPC" /><el-table-column label="请求" width="170"><template #default="scope"><RampMeter :value="Number(scope.row.requests || 0)" :max="maxRequests" :label="String(scope.row.requests ?? 0)" /></template></el-table-column><el-table-column prop="fallbacks" label="兜底" /><el-table-column prop="promptTokens" label="输入 tokens" /><el-table-column prop="completionTokens" label="输出 tokens" /><el-table-column label="平均耗时"><template #default="scope">{{ seconds(scope.row.avgMs ?? scope.row.averageElapsedMs) }}</template></el-table-column><template #empty><div class="empty-state">暂无 NPC 统计数据</div></template></el-table></div>
     <p v-if="raw.note" class="hint-box section-gap">{{ raw.note }}</p>

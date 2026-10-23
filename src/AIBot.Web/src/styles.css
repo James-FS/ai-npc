@@ -22,6 +22,10 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, [role="button"]
 .nav-list a { color: #aeb9cc; text-decoration: none; padding: 8px 14px; border-radius: var(--radius-inset); display: flex; align-items: center; gap: 12px; transition: background-color .18s ease, color .18s ease; font-size: 14px; }
 .nav-list a:hover { color: white; background: rgba(255,255,255,.06); }
 .nav-list a.router-link-active { color: white; background: rgba(255,255,255,.12); box-shadow: inset 3px 0 rgba(255,255,255,.75); }
+.section-tabs { display: flex; align-items: center; gap: 8px; padding: 12px 34px 0; max-width: 1560px; margin: 0 auto; overflow-x: auto; }
+.section-tabs a { color: var(--graphite); text-decoration: none; padding: 8px 12px; border-radius: var(--radius-chip); white-space: nowrap; font-size: 13px; }
+.section-tabs a:hover { background: var(--surface-inset); }
+.section-tabs a.router-link-active { color: var(--ink); background: var(--surface-inset); font-weight: 700; }
 .nav-divider { margin: 12px 8px 2px; color: var(--graphite-on-field); font-size: 11px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; }
 .sidebar-foot { margin-top: auto; border-top: 1px solid rgba(255,255,255,.1); padding: 12px 8px 0; display: flex; align-items: center; gap: 10px; }
 .sidebar-foot strong, .sidebar-foot small { display: block; }
@@ -137,6 +141,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, [role="button"]
   .topbar { height: auto; min-height: 76px; padding: 14px 18px; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
   .context-bar { flex: 1 1 100%; flex-wrap: wrap; }
   .workspace { padding: 22px 18px 36px; }
+  .section-tabs { padding: 12px 18px 0; }
   .page-head { flex-direction: column; gap: 14px; }
   .page-actions { width: 100%; justify-content: flex-start; }
 }

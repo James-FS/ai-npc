@@ -10,6 +10,14 @@ const app = useAppStore()
 const route = useRoute()
 const router = useRouter()
 const npcMemoryRoute = computed(() => `/npc/${encodeURIComponent(app.currentNpcId || 'none')}/memory`)
+const navGroups = [
+  { id: 'debug', title: '调试', home: '/debug/chat', items: [['对话', '/debug/chat'], ['Prompt', '/debug/prompt'], ['会话', '/debug/sessions']] },
+  { id: 'content', title: '内容', home: '/debug/npc', items: [['NPC 配置', '/debug/npc'], ['世界观', '/debug/world']] },
+  { id: 'memory', title: '记忆', home: '/memories', items: [['记忆检查', '/memories'], ['Game 策略', '/game/memory-policy'], ['NPC 覆盖', npcMemoryRoute], ['系统边界', '/settings/memory'], ['审计', '/memory-audit']] },
+  { id: 'models', title: '模型', home: '/settings/llm', items: [['连接管理', '/settings/llm']] },
+  { id: 'ops', title: '运维', home: '/debug/logs', items: [['日志', '/debug/logs'], ['统计', '/debug/stats'], ['高级操作', '/memory-migrations']] },
+]
+const activeGroup = computed(() => navGroups.find(group => group.items.some(([, path]) => route.path === (typeof path === 'string' ? path : path.value))) || navGroups[0])
 
 async function refreshNpcs() {
   try { await Promise.all([app.loadNpcs(), app.loadGames(), app.loadReadiness()]) } catch (error) { ElMessage.error(error instanceof Error ? error.message : 'NPC 列表加载失败') }
@@ -57,23 +65,7 @@ onMounted(() => { app.loadStorage(); refreshNpcs() })
         <div><strong>NPC Memory</strong><span>运营控制台</span></div>
       </div>
       <nav class="nav-list">
-        <div class="nav-divider">记忆治理</div>
-        <RouterLink to="/settings/memory">系统边界</RouterLink>
-        <RouterLink to="/game/memory-policy">Game 策略</RouterLink>
-        <RouterLink :to="npcMemoryRoute">NPC 覆盖</RouterLink>
-        <RouterLink to="/memories">记忆检查器</RouterLink>
-        <RouterLink to="/memory-migrations">旧记忆迁移</RouterLink>
-        <RouterLink to="/memory-audit">审计记录</RouterLink>
-        <div class="nav-divider">调试工作台</div>
-        <RouterLink to="/debug/chat">流式对话</RouterLink>
-        <RouterLink to="/debug/npc">NPC 配置</RouterLink>
-        <RouterLink to="/debug/world">世界观</RouterLink>
-        <RouterLink to="/debug/prompt">Prompt 预览</RouterLink>
-        <RouterLink to="/debug/sessions">会话调试</RouterLink>
-        <RouterLink to="/debug/logs">请求日志</RouterLink>
-        <RouterLink to="/debug/stats">用量统计</RouterLink>
-        <div class="nav-divider">系统设置</div>
-        <RouterLink to="/settings/llm">模型连接管理</RouterLink>
+        <RouterLink v-for="group in navGroups" :key="group.id" :to="group.home" :class="{ 'router-link-active': activeGroup.id === group.id }">{{ group.title }}</RouterLink>
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot" :class="`is-${app.health}`" :title="app.healthLabel"></span>
@@ -104,6 +96,9 @@ onMounted(() => { app.loadStorage(); refreshNpcs() })
           <el-button circle title="刷新 NPC" @click="refreshNpcs"><el-icon><Refresh /></el-icon></el-button>
         </div>
       </header>
+      <nav class="section-tabs" aria-label="当前入口">
+        <RouterLink v-for="([label, path], index) in activeGroup.items" :key="index" :to="typeof path === 'string' ? path : path.value">{{ label }}</RouterLink>
+      </nav>
       <section class="workspace"><RouterView /></section>
     </main>
   </div>

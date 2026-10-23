@@ -75,6 +75,7 @@ onMounted(() => load())
       <template v-if="mode === 'chat'">
         <el-table-column label="时间" width="170"><template #default="scope">{{ formatTime(scope.row.ts || scope.row.timestamp) }}</template></el-table-column>
         <el-table-column prop="npcId" label="NPC" width="150" />
+        <el-table-column label="类型" width="100"><template #default="scope">{{ scope.row.kind === 'summary' ? '记忆摘要' : scope.row.kind === 'tool_pending' ? '工具挂起' : '对话' }}</template></el-table-column>
         <el-table-column label="玩家说" min-width="190"><template #default="scope">{{ preview(scope.row.userMessage) }}</template></el-table-column>
         <el-table-column label="回复" min-width="210"><template #default="scope"><span>{{ preview(scope.row.say) }}</span><el-tag v-if="scope.row.fallback" size="small" type="warning" class="flag">兜底</el-tag><el-tag v-if="scope.row.injection" size="small" type="danger" class="flag">注入</el-tag></template></el-table-column>
         <el-table-column label="Tokens" width="115"><template #default="scope">{{ number(scope.row.promptTokens) }} / {{ number(scope.row.completionTokens) }}</template></el-table-column>

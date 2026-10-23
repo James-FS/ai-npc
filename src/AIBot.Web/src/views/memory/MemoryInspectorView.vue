@@ -8,6 +8,7 @@ import { memoryApi } from '@/api/memory'
 import { useAppStore } from '@/stores/app'
 import { useMemoryInspectorStore } from '@/stores/memoryInspector'
 import type { MemoryFact, MemoryListItem } from '@/types/memory'
+import { cloneJson } from '@/utils/clone'
 
 const app = useAppStore()
 const store = useMemoryInspectorStore()
@@ -81,14 +82,14 @@ function newFact() {
 
 function editFact(fact: MemoryFact) {
   editingFactId.value = fact.id
-  Object.assign(factForm, structuredClone(fact))
+  Object.assign(factForm, cloneJson(fact))
   factDialogOpen.value = true
 }
 
 async function saveFact() {
   if (!factForm.value?.trim()) return ElMessage.warning('事实内容不能为空')
   try {
-    await store.saveFact(app.gameId, structuredClone(factForm), editingFactId.value || undefined)
+    await store.saveFact(app.gameId, cloneJson(factForm), editingFactId.value || undefined)
     factDialogOpen.value = false
     ElMessage.success(editingFactId.value ? '事实已更新' : '事实已新增')
     await search()
@@ -111,7 +112,7 @@ async function removeFact(fact: MemoryFact) {
 
 async function togglePinned(fact: MemoryFact, pinned: boolean) {
   try {
-    await store.saveFact(app.gameId, { ...structuredClone(fact), pinned }, fact.id)
+    await store.saveFact(app.gameId, { ...cloneJson(fact), pinned }, fact.id)
     ElMessage.success(pinned ? '事实已固定' : '事实已取消固定')
   } catch (error) {
     if (!await reloadAfterConflict(error)) ElMessage.error(error instanceof Error ? error.message : '固定状态更新失败')

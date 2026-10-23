@@ -49,8 +49,8 @@ function openEdit(row: any) {
 }
 async function save() {
   if (!form.value.name.trim() || !form.value.baseUrl.trim() || !form.value.model.trim()
-    || ((!editingHasKey.value) && !form.value.apiKey?.trim())) {
-    ElMessage.warning('请填写名称、Base URL、模型 ID 和 API Key')
+    || (creating.value && !form.value.apiKey?.trim())) {
+    ElMessage.warning('请填写名称、Base URL、模型 ID；新建连接时还需填写 API Key')
     return
   }
   saving.value = true
@@ -100,7 +100,7 @@ onMounted(load)
   <div class="panel section-gap" v-loading="loading">
     <div class="panel-head"><h3>模型连接配置</h3><div class="head-actions"><el-button @click="load">刷新</el-button><el-button type="primary" @click="openCreate">新增连接</el-button></div></div>
     <div class="panel-body">
-      <p class="explain">填写连接名称、Base URL、模型 ID 和 API Key。当前使用 OpenAI 兼容 Chat Completions 格式。NPC 选用连接后，整套配置一起生效；未分配时继续使用下方原有配置。</p>
+      <p class="explain">填写连接名称、Base URL、模型 ID 和 API Key。当前使用 OpenAI 兼容 Chat Completions 格式。NPC 选用连接后由此处统一维护。</p>
       <el-table :data="state?.connections || []" empty-text="暂无连接配置，请先新增">
         <el-table-column label="名称" min-width="170"><template #default="{ row }"><strong>{{ row.name }}</strong><div class="subtle">{{ assignmentCount(row.id) ? `已分配 ${assignmentCount(row.id)} 处` : '尚未分配，不会生效' }}</div></template></el-table-column>
         <el-table-column label="连接" min-width="270"><template #default="{ row }"><div class="mono">{{ row.baseUrl }}</div><div class="subtle">OpenAI 兼容 Chat Completions</div></template></el-table-column>
@@ -110,20 +110,20 @@ onMounted(load)
       </el-table>
 
       <h4 class="subhead">连接分配</h4>
-      <p class="explain">先选控制台默认连接，所有未单独分配的 NPC 对话都会使用它。需要例外时，在 NPC 行另选连接。Game 摘要连接仅供继承 Game 记忆设置且未指定摘要模型的 NPC 使用。</p>
-      <div class="default-connection"><strong>控制台默认模型</strong><el-select :model-value="state?.bindings.globalMain || ''" :disabled="saving" @change="bind('global_main', null, null, String($event))"><el-option label="未选择（沿用旧配置）" value="" /><el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · 缺少 Key'}`" :value="item.id" :disabled="!item.hasApiKey" /></el-select></div>
+      <p class="explain">先选控制台默认连接，未单独分配的 NPC 对话都会使用它。需要例外时，在 NPC 行另选连接。摘要连接可按 Game 或 NPC 单独分配。</p>
+      <div class="default-connection"><strong>控制台默认模型</strong><el-select :model-value="state?.bindings.globalMain || ''" :disabled="saving" @change="bind('global_main', null, null, String($event))"><el-option label="未选择" value="" /><el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · 缺少 Key'}`" :value="item.id" :disabled="!item.hasApiKey" /></el-select></div>
       <el-table :data="keyStatus?.games || []" empty-text="暂无 Game">
         <el-table-column prop="gameId" label="Game" min-width="170" />
-        <el-table-column label="Game 摘要模型" min-width="300"><template #default="{ row }"><el-select :model-value="state?.bindings.gameSummary[row.gameId] || ''" :disabled="saving" @change="bind('game_summary', row.gameId, null, String($event))"><el-option label="沿用原记忆策略" value="" /><el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · 缺少 Key'}`" :value="item.id" :disabled="!item.hasApiKey" /></el-select></template></el-table-column>
+        <el-table-column label="Game 摘要模型" min-width="300"><template #default="{ row }"><el-select :model-value="state?.bindings.gameSummary[row.gameId] || ''" :disabled="saving" @change="bind('game_summary', row.gameId, null, String($event))"><el-option label="复用对话主模型" value="" /><el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · Key 继承对话主模型'}`" :value="item.id" /></el-select></template></el-table-column>
       </el-table>
       <el-table :data="keyStatus?.npcs || []" empty-text="暂无 NPC">
         <el-table-column label="NPC" min-width="180"><template #default="{ row }"><strong>{{ row.displayName }}</strong><div class="subtle">{{ row.gameId }} / {{ row.npcId }}</div></template></el-table-column>
-        <el-table-column label="对话主模型" min-width="300"><template #default="{ row }"><el-select :model-value="state?.bindings.npcMain[`${row.gameId}/${row.npcId}`] || ''" :disabled="saving" @change="bind('npc_main', row.gameId, row.npcId, String($event))"><el-option :label="state?.bindings.globalMain ? '沿用控制台默认连接' : '沿用旧配置'" value="" /><el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · 缺少 Key'}`" :value="item.id" :disabled="!item.hasApiKey" /></el-select></template></el-table-column>
+        <el-table-column label="对话主模型" min-width="300"><template #default="{ row }"><el-select :model-value="state?.bindings.npcMain[`${row.gameId}/${row.npcId}`] || ''" :disabled="saving" @change="bind('npc_main', row.gameId, row.npcId, String($event))"><el-option :label="state?.bindings.globalMain ? '沿用控制台默认连接' : '未分配（需绑定连接）'" value="" /><el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · 缺少 Key'}`" :value="item.id" :disabled="!item.hasApiKey" /></el-select></template></el-table-column>
         <el-table-column label="记忆摘要模型" min-width="300">
           <template #default="{ row }">
             <div v-if="editingNpcSummary === npcKey(row.gameId, row.npcId)" class="summary-editor">
               <el-select :model-value="npcSummaryConnection(row.gameId, row.npcId)" :disabled="saving" placeholder="选择专用连接" @change="saveNpcSummary(row.gameId, row.npcId, String($event))">
-                <el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · 缺少 Key'}`" :value="item.id" :disabled="!item.hasApiKey" />
+              <el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · Key 继承对话主模型'}`" :value="item.id" />
               </el-select>
               <el-button size="small" :disabled="saving" @click="editingNpcSummary = null">取消</el-button>
             </div>
@@ -143,7 +143,7 @@ onMounted(load)
       <el-form-item label="名称"><el-input v-model="form.name" placeholder="例如 主对话模型" /></el-form-item>
       <el-form-item label="Base URL"><el-input v-model="form.baseUrl" placeholder="例如 https://api.example.com/v1" /><div class="subtle">填写接口前缀；Server 自动追加 /chat/completions。</div></el-form-item>
       <el-form-item label="模型 ID"><el-input v-model="form.model" placeholder="接口要求的模型名称" /></el-form-item>
-      <el-form-item :label="editingHasKey ? 'API Key（留空保留原值）' : 'API Key'"><el-input v-model="form.apiKey" type="password" show-password autocomplete="new-password" :placeholder="editingHasKey ? '已有 Key 不会回显；留空保留原值' : '填写服务商提供的 API Key'" /></el-form-item>
+      <el-form-item :label="editingHasKey ? 'API Key（留空保留原值）' : creating ? 'API Key' : 'API Key（可留空）'"><el-input v-model="form.apiKey" type="password" show-password autocomplete="new-password" :placeholder="editingHasKey ? '已有 Key 不会回显；留空保留原值' : creating ? '填写服务商提供的 API Key' : '留空保留无 Key 状态，摘要连接可继承主模型 Key'" /></el-form-item>
     </el-form>
     <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存连接</el-button></template>
   </el-dialog>
