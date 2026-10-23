@@ -44,6 +44,12 @@ namespace AIBot.Unity
                 }
                 catch (LlmTransportException ex)
                 {
+                    if (ex.StatusCode == 400 && request.StreamOptions != null && ex.Body.Contains("stream_options"))
+                    {
+                        request.StreamOptions = null;
+                        attempt = -1;
+                        continue;
+                    }
                     if (ex.StatusCode == 400 && !degraded && request.ResponseFormat != null
                         && ex.Body.Contains("response_format"))
                     {

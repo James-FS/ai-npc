@@ -36,7 +36,8 @@ namespace AIBot.Core.Memory
 
         public static async Task<MemorySummaryResult> RunAsync(ILlmBackend backend, ModelSettings settings,
             string existingSummary, List<string> existingFacts, List<LlmMessage> evictedMessages,
-            int maxFacts, ILogSink log, CancellationToken ct, MemoryPolicy policy = null)
+            int maxFacts, ILogSink log, CancellationToken ct, MemoryPolicy policy = null,
+            Action<Usage> usageObserver = null)
         {
             var sb = new StringBuilder();
             sb.AppendLine("【已有记忆】");
@@ -70,13 +71,15 @@ namespace AIBot.Core.Memory
             string raw = null;
             var collector = new CollectorSink();
             await backend.ChatStreamAsync(request, collector, ct);
+            usageObserver?.Invoke(collector.Usage);
             raw = collector.Text ?? string.Empty;
 
             MemorySummaryResult result = Parse(raw);
             if (result == null)
             {
-                log.Log(LogLevel.Warning, "Memory summary parse failed, raw=" + raw);
-                result = new MemorySummaryResult { Summary = existingSummary ?? "", Facts = existingFacts ?? new List<string>() };
+                (log ?? NullLogSink.Instance).Log(LogLevel.Warning, "Memory summary parse failed");
+                // Let AgentLoop restore the batch; returning the old summary would acknowledge it.
+                throw new InvalidOperationException("memory summary parse failed");
             }
             int factLimit = Math.Max(1, maxFacts);
             if (result.Facts != null && result.Facts.Count > factLimit)
@@ -84,7 +87,7 @@ namespace AIBot.Core.Memory
             return result;
         }
 
-        /// <summary>容错解析：JObject 失败则正则抽取 summary/facts。</summary>
+        /// <summary>摘要确认消费旧消息前，必须拿到完整的 summary/facts 对象。</summary>
         private static MemorySummaryResult Parse(string raw)
         {
             if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -95,38 +98,34 @@ namespace AIBot.Core.Memory
                 if (start >= 0 && end > start)
                 {
                     var obj = JObject.Parse(raw.Substring(start, end - start + 1));
+                    if (obj["summary"]?.Type != JTokenType.String || !(obj["facts"] is JArray facts)) return null;
                     var result = new MemorySummaryResult
                     {
                         Summary = obj["summary"]?.ToString() ?? ""
                     };
-                    foreach (var f in (obj["facts"] as JArray) ?? new JArray())
+                    foreach (var f in facts)
                     {
+                        if (f.Type != JTokenType.String) return null;
                         string s = f.ToString();
                         if (!string.IsNullOrWhiteSpace(s)) result.Facts.Add(s);
                     }
-                    if (!string.IsNullOrEmpty(result.Summary)) return result;
+                    if (!string.IsNullOrWhiteSpace(result.Summary)) return result;
                 }
             }
             catch (Exception) { }
-            var mSummary = System.Text.RegularExpressions.Regex.Match(raw, "\"summary\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
-            if (mSummary.Success)
-            {
-                return new MemorySummaryResult
-                {
-                    Summary = JsonConvert.DeserializeObject<string>("\"" + mSummary.Groups[1].Value + "\"")
-                };
-            }
             return null;
         }
 
         private sealed class CollectorSink : ILlmStreamSink
         {
             private readonly StringBuilder _text = new StringBuilder();
+            public Usage Usage { get; private set; } = new Usage();
             public string Text { get { return _text.ToString(); } }
             public void OnToken(string delta) { if (!string.IsNullOrEmpty(delta)) _text.Append(delta); }
             public void OnToolCall(ToolCallDto call) { }
             public void OnCompleted(string fullText, Usage usage)
             {
+                Usage = usage ?? new Usage();
                 _text.Clear();
                 if (!string.IsNullOrEmpty(fullText)) _text.Append(fullText);
             }
@@ -137,7 +136,7 @@ namespace AIBot.Core.Memory
         public static async Task<PlayerMemorySummaryResult> RunStructuredAsync(ILlmBackend backend,
             ModelSettings settings, PlayerLongTermMemory existing, List<LlmMessage> evictedMessages,
             int maxFacts, string sourceSessionId, ILogSink log, CancellationToken ct,
-            MemoryPolicy policy = null)
+            MemoryPolicy policy = null, Action<Usage> usageObserver = null)
         {
             var sb = new StringBuilder();
             sb.AppendLine("【已有长期摘要】");
@@ -174,6 +173,7 @@ namespace AIBot.Core.Memory
             };
             var collector = new CollectorSink();
             await backend.ChatStreamAsync(request, collector, ct);
+            usageObserver?.Invoke(collector.Usage);
             PlayerMemorySummaryResult parsed = ParseStructured(collector.Text, maxFacts, sourceSessionId);
             if (parsed != null) return parsed;
             (log ?? NullLogSink.Instance).Log(LogLevel.Warning,

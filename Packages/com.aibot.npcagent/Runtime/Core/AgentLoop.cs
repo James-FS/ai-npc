@@ -28,6 +28,7 @@ namespace AIBot.Core
         public MemoryPolicy ResolvedMemoryPolicy; // 宿主完成四级配置合并后传入；为空时使用 Core+NPC 兼容解析
         public bool DeferMemorySummarizationToHost; // Server 玩家后台队列为 true；Unity/Session 同步路径为 false
         public bool NotifyReplyBeforeSummary; // Unity UI 可在摘要 LLM 调用前先收到最终台词
+        public Action<Usage> OnSummaryUsage; // optional host accounting, including invalid summary responses
         public bool DeferToolsToHost;            // game 模式：工具调用不执行，挂起后交回宿主（如 Unity 本地工具）
         public List<ToolSchema> DeferredTools;   // DeferToolsToHost 时作为工具 schema 来源（由客户端上传，Server 已过滤）
         public List<LlmMessage> ResumeMessages;  // 非空时从该消息列表续跑（挂起-恢复协议第二段）；旧 system 会在入口被重建
@@ -194,6 +195,9 @@ namespace AIBot.Core
 
             List<ToolSchema> schemas = input.DeferredTools
                 ?? (input.Tools != null ? input.Tools.BuildSchemas(cfg.enabledToolIds) : new List<ToolSchema>());
+            var allowedTools = new HashSet<string>(StringComparer.Ordinal);
+            foreach (ToolSchema schema in schemas)
+                if (!string.IsNullOrEmpty(schema?.Function?.Name)) allowedTools.Add(schema.Function.Name);
 
             var executions = new List<ToolExecution>();
             var totalUsage = new Usage();
@@ -249,7 +253,8 @@ namespace AIBot.Core
                         Content = collector.Text ?? string.Empty,
                         ToolCalls = collector.ToolCalls
                     });
-                    if (input.DeferToolsToHost)
+                    if (input.DeferToolsToHost && collector.ToolCalls.TrueForAll(call =>
+                        call?.Function?.Name != null && allowedTools.Contains(call.Function.Name)))
                     {
                         // game 模式：工具由宿主（Unity）执行。挂起当前消息列表，
                         // 宿主持久化后携带工具结果走 ResumeMessages 续跑；此时不写记忆、不触发摘要。
@@ -264,9 +269,12 @@ namespace AIBot.Core
                     foreach (ToolCallDto call in collector.ToolCalls)
                     {
                         ct.ThrowIfCancellationRequested();
-                        ToolResult result = input.Tools != null
-                            ? await input.Tools.ExecuteAsync(call.Function.Name, call.Function.Arguments, input.HostContext)
-                            : ToolResult.Fail("no tool registry");
+                        bool allowed = call?.Function?.Name != null && allowedTools.Contains(call.Function.Name);
+                        ToolResult result = !allowed ? ToolResult.Fail("tool is not enabled for this NPC")
+                            : input.DeferToolsToHost ? ToolResult.Fail("invalid mixed tool round; request allowed tools again")
+                            : input.Tools != null
+                                ? await input.Tools.ExecuteAsync(call.Function.Name, call.Function.Arguments, input.HostContext)
+                                : ToolResult.Fail("no tool registry");
                         executions.Add(new ToolExecution { Call = call, Result = result });
                         var toolSink = sink as IToolExecutionSink;
                         if (toolSink != null) toolSink.OnToolExecuted(executions[executions.Count - 1]);
@@ -345,7 +353,7 @@ namespace AIBot.Core
                     : _backend;
                 MemorySummaryResult summary = await MemorySummarizer.RunAsync(
                     summaryBackend, summarySettings, input.MemorySummary, input.MemoryFacts, evicted,
-                    policy.maxFacts, _log, ct, policy);
+                    policy.maxFacts, _log, ct, policy, input.OnSummaryUsage);
                 result.MemorySummary = summary.Summary;
                 result.MemoryFacts = summary.Facts;
                 result.MemorySummarizedMessages = evicted;

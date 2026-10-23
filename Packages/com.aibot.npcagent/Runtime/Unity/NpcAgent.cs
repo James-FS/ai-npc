@@ -28,7 +28,7 @@ namespace AIBot.Unity
 
     /// <summary>
     /// NPC Agent 主组件：挂到角色上，调用 Chat(message) 获得流式回复。
-    /// 配置来源：Server 连接 Profile、configAsset（SO）或 npcId + gameId（data/ 下的 JSON）。
+    /// 配置来源：Local 使用 AgentConfigAsset；Server 使用 AIBotConnectionProfile。
     /// </summary>
     public class NpcAgent : MonoBehaviour
     {
@@ -41,7 +41,7 @@ namespace AIBot.Unity
         [Tooltip("Server 模式下的会话 ID；同一会话持续对话即可复用短期记忆。")]
         public string sessionId = "s-unity";
 
-        [Tooltip("Local 模式留空则从 data/games/{gameId}/npcs/{npcId}.json 加载；Server Profile 模式下可留空")]
+        [Tooltip("Local 模式必填；从旧 JSON 导入 AgentConfigAsset 后指定。")]
         public AgentConfigAsset configAsset;
 
         [Tooltip("Local 模式可选。填写后无需从 data/ 目录加载 world.json。")]
@@ -84,8 +84,9 @@ namespace AIBot.Unity
         private bool _running;
         private bool _capabilityWarningIssued;
         private bool _serverGameTools;          // game 模式：Server 会把工具调用挂起回传本地执行
-        private readonly System.Collections.Generic.HashSet<string> _executedRoundTokens =
-            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal); // 防重放导致的工具双执行
+        private ToolRoundJournal _toolJournal;
+        public bool HasPendingServerTools { get { return _toolJournal?.Pending != null; } }
+        public string PendingServerToolRoundToken { get { return _toolJournal?.Pending?.roundToken; } }
         private string _loadedGameId;
         private string _loadedNpcId;
 
@@ -191,10 +192,25 @@ namespace AIBot.Unity
         public Task<AgentLoopResult> RetryServerRequestAsync(string message, string requestId)
         {
             if (!ChatRequestIds.IsValid(requestId)) throw new ArgumentException("requestId 格式无效", nameof(requestId));
-            return ChatInternalAsync(message, requestId);
+            return ChatInternalAsync(message, requestId, resumeTools: HasPendingServerTools);
         }
 
-        private async Task<AgentLoopResult> ChatInternalAsync(string message, string requestId)
+        /// <summary>恢复尚未完成的工具轮（含客户端重启）；复用已保存的工具结果和续跑 requestId。</summary>
+        public Task<AgentLoopResult> ResumeServerToolsAsync()
+        {
+            return ChatInternalAsync(null, null, resumeTools: true);
+        }
+
+        /// <summary>只有查询游戏权威数据确认结果后，才能解除一次崩溃中的不确定工具状态。</summary>
+        public void ConfirmServerToolResult(string roundToken, string callId, bool success, string message)
+        {
+            if (_running) throw new InvalidOperationException("对话进行中不能更改工具执行结果");
+            if (_toolJournal == null) throw new InvalidOperationException("当前未启用 game 工具模式");
+            _toolJournal.ConfirmResult(roundToken, callId,
+                new ClientToolResult { CallId = callId, Success = success, Message = message });
+        }
+
+        private async Task<AgentLoopResult> ChatInternalAsync(string message, string requestId, bool resumeTools = false)
         {
             if (_running)
             {
@@ -215,54 +231,45 @@ namespace AIBot.Unity
             {
                 if (IsServerMode())
                 {
-                    const int MaxGameToolRounds = 6;
+                    const int MaxGameToolRounds = 8;
                     UnityStreamSink sink = new UnityStreamSink(this);
-                    ServerChatResult serverResult = await _serverBackend.ChatAsync(
-                        message, sink, _requestCts.Token, requestId);
+                    JournalToolRound recovery = _toolJournal?.Pending;
+                    if (!resumeTools && recovery != null)
+                        throw new InvalidOperationException("上一轮游戏工具尚未完成，请调用 ResumeServerToolsAsync");
+                    if (resumeTools && recovery == null)
+                        throw new InvalidOperationException("当前没有待恢复的游戏工具轮");
+                    ServerChatResult serverResult = resumeTools
+                        ? new ServerChatResult { RoundToken = recovery.roundToken,
+                            PendingToolCalls = recovery.calls.ConvertAll(x => x.call) }
+                        : await _serverBackend.ChatAsync(message, sink, _requestCts.Token, requestId);
 
                     // game 模式自动续跑链：Server 挂起 → 本地工具真实执行 → 携带结果续跑，
                     // 直到模型给出 reply 或达到轮数上限。工具执行语义与 Local 模式完全一致。
                     int gameRound = 0;
+                    string completedRoundToken = null;
                     while (serverResult != null && serverResult.PendingToolCalls != null
                         && serverResult.PendingToolCalls.Count > 0)
                     {
-                        if (string.IsNullOrEmpty(serverResult.RoundToken)
-                            || !_executedRoundTokens.Add(serverResult.RoundToken))
-                        {
-                            // 同一挂起轮只执行一次：断线重放会原样回放 tool_pending，
-                            // 此时结果已在 Server 侧消费过，不能再次执行游戏工具。
-                            EmitError("收到重复或无效的工具挂起轮: " + (serverResult.RoundToken ?? "<empty>"));
-                            return null;
-                        }
-                        if (_executedRoundTokens.Count > 128)
-                        {
-                            // 有界防泄漏：留下最近执行过的令牌即可覆盖重放窗口
-                            foreach (string token in _executedRoundTokens)
-                            {
-                                _executedRoundTokens.Remove(token);
-                                if (_executedRoundTokens.Count <= 64) break;
-                            }
-                        }
                         if (++gameRound > MaxGameToolRounds)
                         {
                             EmitError("工具回传轮数超过上限（" + MaxGameToolRounds + "），已终止本轮对话");
                             return null;
                         }
 
-                        var results = new List<ClientToolResult>();
-                        foreach (ToolCallDto call in serverResult.PendingToolCalls)
-                        {
-                            ToolResult executed = await ExecuteLocalToolAsync(call);
-                            results.Add(new ClientToolResult
+                        if (_toolJournal == null) throw new InvalidOperationException("game 工具执行记录未初始化");
+                        JournalToolRound recorded = await _toolJournal.ExecuteAsync(serverResult.RoundToken,
+                            serverResult.PendingToolCalls, async call =>
                             {
-                                CallId = call.Id,
-                                Success = executed != null && executed.Success,
-                                Message = executed == null ? null : executed.MessageForModel
-                            });
-                        }
+                                ToolResult executed = await ExecuteLocalToolAsync(call);
+                                return new ClientToolResult { CallId = call.Id,
+                                    Success = executed != null && executed.Success,
+                                    Message = executed?.MessageForModel };
+                            }, _requestCts.Token);
 
+                        completedRoundToken = recorded.roundToken;
                         serverResult = await _serverBackend.ChatResumeAsync(
-                            serverResult.RoundToken, results, sink, _requestCts.Token);
+                            recorded.roundToken, recorded.calls.ConvertAll(x => x.result), sink,
+                            _requestCts.Token, recorded.resumeRequestId);
                     }
 
                     if (serverResult == null || serverResult.Reply == null)
@@ -270,6 +277,7 @@ namespace AIBot.Unity
                         EmitError("AIBot.Server 未返回有效回复");
                         return null;
                     }
+                    if (completedRoundToken != null) _toolJournal?.Complete(completedRoundToken);
                     var directResult = new AgentLoopResult
                     {
                         Reply = serverResult.Reply,
@@ -332,6 +340,13 @@ namespace AIBot.Unity
 
         private void LoadConfig()
         {
+            if (connectionProfile == null && configAsset != null
+                && configAsset.runtimeMode == AgentRuntimeMode.Server)
+            {
+                Debug.LogError("[AIBot] 此 AgentConfigAsset 是旧版 Server 配置。请在 Hierarchy 选择该 NPC，执行 AIBot → Convert Selected Legacy Server NpcAgent to Connection Profile。");
+                _config = null;
+                return;
+            }
             bool useConnectionProfile = connectionProfile != null;
             string resolvedGameId = useConnectionProfile && !string.IsNullOrWhiteSpace(connectionProfile.gameId)
                 ? connectionProfile.gameId : gameId;
@@ -363,31 +378,23 @@ namespace AIBot.Unity
                         : new List<string>()
                 };
             }
-            else
+            else _config = configAsset != null ? configAsset.ToDto() : null;
+            if (_config == null)
             {
-                _config = configAsset != null ? configAsset.ToDto() : DevConfigStore.LoadNpc(gameId, npcId);
+                Debug.LogError("[AIBot] 请为 Local 模式指定 AgentConfigAsset，或为 Server 模式指定 AIBotConnectionProfile");
+                return;
             }
-            if (_config == null) return;
             _loadedGameId = resolvedGameId;
             _loadedNpcId = resolvedNpcId;
             if (_config.model == null) _config.model = new ModelSettings();
             if (!useConnectionProfile)
             {
                 if (!string.IsNullOrEmpty(apiKeyOverride)) _config.model.apiKey = apiKeyOverride;
-                if (configAsset != null)
-                {
-                    // 使用 Unity Asset 时完全脱离外部 data/ 目录；Game 策略和世界观均可选。
-                    _memoryPolicy = MemoryPolicyResolver.Resolve(null, _config.memory, null).policy;
-                }
-                else
-                {
-                    MemoryPolicy gameMemoryPolicy = DevConfigStore.LoadMemoryPolicy(resolvedGameId);
-                    _memoryPolicy = MemoryPolicyResolver.Resolve(gameMemoryPolicy, _config.memory, null).policy;
-                }
-                if (worldConfigAsset != null)
-                    _world = worldConfigAsset.ToDto();
-                else if (configAsset == null)
-                    _world = DevConfigStore.LoadWorld(resolvedGameId, _config.worldId);
+                MemoryPolicy localGamePolicy = configAsset.ToGameMemoryPolicy();
+                _memoryPolicy = MemoryPolicyResolver.Resolve(localGamePolicy, _config.memory, null).policy;
+                WorldConfigAsset selectedWorld = worldConfigAsset != null ? worldConfigAsset : configAsset.worldConfigAsset;
+                if (selectedWorld != null)
+                    _world = selectedWorld.ToDto();
                 else
                     _world = new WorldConfigDto { worldId = _config.worldId };
             }
@@ -398,19 +405,19 @@ namespace AIBot.Unity
             }
             if (IsServerMode())
             {
-                string serverUrl = string.IsNullOrWhiteSpace(_config.serverBaseUrl)
-                    ? "http://127.0.0.1:5000" : _config.serverBaseUrl;
+                string serverUrl = connectionProfile.serverBaseUrl;
                 string resolvedPlayerId = useConnectionProfile ? connectionProfile.playerId : playerId;
                 string resolvedSessionId = useConnectionProfile ? connectionProfile.sessionId : sessionId;
-                int resolvedTimeoutMs = useConnectionProfile
-                    ? connectionProfile.timeoutMs : _config.model.timeoutMs;
-                bool enableSimulatedTools = useConnectionProfile
-                    ? connectionProfile.enableSimulatedTools
-                    : configAsset != null && configAsset.enableServerSimulatedTools;
+                int resolvedTimeoutMs = connectionProfile.timeoutMs;
+                bool enableSimulatedTools = connectionProfile.enableSimulatedTools;
                 // game 模式仅支持 Connection Profile：工具 schema 与执行都在 Unity 侧，
                 // 通过 Profile 显式声明后，Server 会把模型工具调用挂起回传给本地工具。
                 bool enableGameTools = useConnectionProfile && connectionProfile.enableGameTools;
                 _serverGameTools = enableGameTools;
+                _toolJournal = enableGameTools ? new ToolRoundJournal(System.IO.Path.Combine(
+                    Application.persistentDataPath, "AIBot", "tool-rounds",
+                    LlmRequestSession.For(serverUrl.TrimEnd('/'), resolvedGameId, resolvedNpcId,
+                        resolvedPlayerId, resolvedSessionId) + ".json")) : null;
                 _serverBackend = new UnityServerBackend(serverUrl, resolvedGameId, resolvedNpcId,
                     resolvedPlayerId, resolvedSessionId, resolvedTimeoutMs,
                     () =>
@@ -432,6 +439,7 @@ namespace AIBot.Unity
                     resolvedGameId, resolvedNpcId, localSessionId);
                 _backend = new UnityWebRequestBackend(_config.model, upstreamSession);
                 _serverBackend = null;
+                _toolJournal = null;
                 _loop = new AgentLoop(_backend, UnityLogSink.Instance,
                     backendFactory: settings => new UnityWebRequestBackend(settings, upstreamSession));
             }
@@ -439,8 +447,7 @@ namespace AIBot.Unity
 
         private bool IsServerMode()
         {
-            return _config != null && string.Equals(_config.runtimeMode, "server",
-                StringComparison.OrdinalIgnoreCase);
+            return connectionProfile != null;
         }
 
         /// <summary>game 模式上传用：把本地已注册、且 NPC 配置启用的工具转成描述列表。</summary>
@@ -468,7 +475,10 @@ namespace AIBot.Unity
             ToolResult result;
             try
             {
-                if (_tools == null)
+                if (call?.Function?.Name == null || _config.enabledToolIds == null
+                    || !_config.enabledToolIds.Contains(call.Function.Name))
+                    result = ToolResult.Fail("tool is not enabled for this NPC");
+                else if (_tools == null)
                     result = ToolResult.Fail("game 模式未注册本地工具");
                 else
                     result = await _tools.ExecuteAsync(call?.Function?.Name, call?.Function?.Arguments, gameObject);

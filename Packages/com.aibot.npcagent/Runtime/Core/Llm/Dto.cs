@@ -14,9 +14,16 @@ namespace AIBot.Core.Llm
         [JsonProperty("temperature")] public float Temperature = 0.8f;
         [JsonProperty("max_tokens")] public int MaxTokens = 500;
         [JsonProperty("response_format")] public ResponseFormat ResponseFormat;
+        [JsonProperty("stream_options")] public LlmStreamOptions StreamOptions = new LlmStreamOptions();
 
         public bool ShouldSerializeTools() { return Tools != null && Tools.Count > 0; }
         public bool ShouldSerializeResponseFormat() { return ResponseFormat != null; }
+        public bool ShouldSerializeStreamOptions() { return StreamOptions != null; }
+    }
+
+    public sealed class LlmStreamOptions
+    {
+        [JsonProperty("include_usage")] public bool IncludeUsage = true;
     }
 
     /// <summary>结构化输出开关。与 tools 同用可能被供应商拒绝（§5.5 策略：带工具时禁用）。</summary>

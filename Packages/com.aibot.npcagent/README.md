@@ -21,7 +21,7 @@
 1. 等待 Unity 完成 Package 编译。
 2. 在菜单中选择 **AIBot → Demo → Create Demo Scene**。
 3. 场景会自动生成 NPC、对话气泡、输入框和发送按钮。
-4. 点击 Play，在输入框中发送消息。
+4. 在 `Assets/AIBotDemo/BlacksmithConfig.asset` 填写模型 API Key（或调整模型地址、模型 ID），点击 Play 后即可在输入框中发送消息。
 
 Demo 创建逻辑位于 `Editor/DemoSceneBuilder.cs`，不需要 `Samples~` 目录或额外示例资源。
 
@@ -33,10 +33,12 @@ Unity 直接调用 OpenAI 兼容模型，适合单机 Demo 和原型。
 
 1. 创建 **AI NPC → Agent Config**（`AgentConfigAsset`）。
 2. 填写模型地址、模型名称和开发期 API Key。
-3. 将资源拖到 `NpcAgent.agentConfigAsset`。
+3. 将资源拖到 `NpcAgent.configAsset`。
 4. 可选设置 `WorldConfigAsset` 和 `NpcAgent.worldConfigAsset`。
 
 Local 模式不需要启动 AIBot.Server，但 API Key 会进入客户端运行环境，只建议用于开发或可信场景。
+
+Local 运行必须指定 `configAsset`；Server 运行必须指定 `connectionProfile`。旧版从 `data/games/{gameId}/npcs/*.json` 运行时加载的项目，可通过 Unity 菜单 **AIBot → Import Legacy NPC JSON as Local Asset...** 导入为 `AgentConfigAsset`；相邻 `world.json` 和 `memory-policy.json` 会一并导入，NPC 与 Game 记忆字段在 Asset 中保留。无效的 Game 策略会中止导入并提示，不会静默丢弃。旧 Server JSON 可用 **Import Legacy NPC JSON as Server Profile...** 导入 Server 地址、Game/NPC 标识和工具 ID。导入保留源文件；Server Profile 不复制旧 JSON 中的模型 Key，请在管理台模型连接页确认集中连接。若场景中的旧 `AgentConfigAsset.runtimeMode` 为 Server，请选中 Hierarchy 中的旧 NPC，执行 **AIBot → Convert Selected Legacy Server NpcAgent to Connection Profile...**，工具会创建并指派 Profile。
 
 ### Server 模式
 
@@ -77,7 +79,7 @@ public class NpcDemo : MonoBehaviour
 - `onToolExecuted`：工具执行结果；
 - `onServerStatus`：Server 连接状态。
 
-Server 模式每轮请求使用幂等 `requestId`。断线时插件会自动进行有限次数恢复；需要手动恢复时，可使用 `agent.LastServerRequestId` 和 `RetryServerRequestAsync`。Server 的 JSON 存储模式适合单实例运行；维护任务会按 `Sessions:MemoryIdleHours` 清理长期不活跃的 Session 文件。正式环境若需要多实例，应切换到 MongoDB 等共享存储。
+Server 模式每轮请求使用幂等 `requestId`。断线时插件会自动进行有限次数恢复；需要手动恢复时，可使用 `agent.LastServerRequestId` 和 `RetryServerRequestAsync`。Server 的 JSON 存储模式适合单实例运行；维护任务会按 `Sessions:MemoryIdleHours` 清理长期不活跃的 Session 文件。Mongo 模式同样仅允许单活 Server：数据库租约会拒绝第二个活跃实例，租约丢失时原实例停止服务。
 
 Local 模式若从仓库 `data/` 目录加载配置，可在游戏启动阶段调用
 `DevConfigStore.SetDataRoot(path)`，进行目录存在性校验后再创建 NPC；不要在运行中依赖绝对开发机路径。
@@ -90,7 +92,7 @@ Server 模式有三种工具形态：
 
 - `none`（默认）：Server 侧不执行任何工具；
 - `simulated`（仅调试）：Server 的 SimulatedToolHost 只写会话模拟状态；
-- `game`（工具回传）：在 Connection Profile 勾选 **Enable Game Tools**，Server 遇到模型工具调用时挂起对话并下发 `tool_pending` 事件，Unity 用本地注册的工具真实执行后自动续跑。要求：NPC 配置的 `enabledToolIds` 包含对应工具、NpcAgent 已注册本地工具；同一挂起轮只会执行一次（断线重放安全），工具本身仍应保持幂等。
+- `game`（工具回传）：在 Connection Profile 勾选 **Enable Game Tools**，Server 遇到模型工具调用时挂起对话并下发 `tool_pending` 事件，Unity 用本地注册的工具真实执行后自动续跑。要求：NPC 配置的 `enabledToolIds` 包含对应工具、NpcAgent 已注册本地工具；工具执行意图和结果会持久化，重放复用结果；执行中崩溃会阻止自动重做，工具本身仍应保持业务幂等。
 
 ```csharp
 using System.Threading.Tasks;
@@ -116,6 +118,10 @@ public class GiveItemTool : IAgentTool
 ```csharp
 agent.Tools.Register(new GiveItemTool());
 ```
+
+工具挂起后的网络重试耗尽或客户端重启后，可通过 `agent.HasPendingServerTools` 判断并调用 `await agent.ResumeServerToolsAsync()`。工具执行意图和结果位于 `Application.persistentDataPath/AIBot/tool-rounds`，应与游戏存档一起保留；恢复会复用结果和原续跑 requestId。
+
+如果客户端在工具执行中崩溃，插件会报告执行状态不确定并阻止自动重做。游戏应先查询背包/任务系统，再调用 `agent.ConfirmServerToolResult(agent.PendingServerToolRoundToken, callId, success, message)` 写入确认结果，随后恢复。仍需由游戏工具实现业务幂等；不要删除执行记录来强行重试。
 
 ## 安全注意事项
 

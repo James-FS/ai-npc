@@ -14,9 +14,11 @@ namespace AIBot.Unity.EditorTools
         [MenuItem("AIBot/Demo/Create Demo Scene")]
         public static void Create()
         {
+            AgentConfigAsset demoConfig = GetDemoConfig();
             var npcGo = new GameObject("NPC_老王");
             var agent = npcGo.AddComponent<NpcAgent>();
             agent.npcId = NpcId;
+            agent.configAsset = demoConfig;
             var relay = npcGo.AddComponent<GameContextRelay>();
             relay.stage = 0;
             relay.favorability = 30;
@@ -64,7 +66,39 @@ namespace AIBot.Unity.EditorTools
             chat.bubble = bubble;
 
             Selection.activeGameObject = npcGo;
-            Debug.Log("[AIBot] Demo 场景已生成。可使用 data/ 下的 NPC JSON，或在 NpcAgent 上指定 AgentConfigAsset 进行 Local 模式配置。");
+            Debug.Log("[AIBot] Demo 场景已生成并绑定 AgentConfigAsset。请先在 Assets/AIBotDemo/BlacksmithConfig.asset 中填写模型 API Key，再点击 Play。");
+            EditorUtility.DisplayDialog("Demo 配置已创建", "Demo 已绑定 Local AgentConfigAsset。Play 前请在 Assets/AIBotDemo/BlacksmithConfig.asset 填写 API Key（或更换模型地址和模型 ID）。", "确定");
+        }
+
+        private static AgentConfigAsset GetDemoConfig()
+        {
+            const string folder = "Assets/AIBotDemo";
+            if (!AssetDatabase.IsValidFolder(folder)) AssetDatabase.CreateFolder("Assets", "AIBotDemo");
+            const string path = folder + "/BlacksmithConfig.asset";
+            var config = AssetDatabase.LoadAssetAtPath<AgentConfigAsset>(path);
+            if (config == null)
+            {
+                config = ScriptableObject.CreateInstance<AgentConfigAsset>();
+                config.npcId = NpcId;
+                config.displayName = "老王";
+                config.persona = "你是村里的铁匠，爽快、热心，喜欢聊武器和冒险。";
+                config.backstory = "在村中经营铁匠铺多年，认识许多往来的冒险者。";
+                config.worldId = "default";
+                AssetDatabase.CreateAsset(config, path);
+            }
+            var world = AssetDatabase.LoadAssetAtPath<WorldConfigAsset>(folder + "/DemoWorld.asset");
+            if (world == null)
+            {
+                world = ScriptableObject.CreateInstance<WorldConfigAsset>();
+                world.worldId = "default";
+                world.description = "一个有村庄、铁匠铺和冒险者的奇幻世界。";
+                AssetDatabase.CreateAsset(world, folder + "/DemoWorld.asset");
+            }
+            config.runtimeMode = AgentRuntimeMode.Local;
+            config.worldConfigAsset = world;
+            EditorUtility.SetDirty(config);
+            AssetDatabase.SaveAssets();
+            return config;
         }
 
         private static void SetAnchors(RectTransform rt, Vector2 min, Vector2 max)

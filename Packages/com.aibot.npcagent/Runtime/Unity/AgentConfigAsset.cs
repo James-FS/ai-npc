@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using AIBot.Core.Config;
+using AIBot.Core.Memory;
 using Newtonsoft.Json;
 using UnityEngine;
 
@@ -21,13 +22,14 @@ namespace AIBot.Unity
         [TextArea(2, 6)] public string persona;
         [TextArea(2, 6)] public string backstory;
         public string worldId = "default";
+        [Tooltip("可选：关联本地世界观 Asset。NpcAgent.worldConfigAsset 有直接指定时优先。")]
+        public WorldConfigAsset worldConfigAsset;
 
-        [Header("运行模式")]
-        [Tooltip("local 直连模型；server 通过 AIBot.Server 中转。")]
-        public AgentRuntimeMode runtimeMode = AgentRuntimeMode.Local;
-        public string serverBaseUrl = "http://127.0.0.1:5000";
-        [Tooltip("仅旧版 Server 配置兼容使用。启用后只执行 Server 会话模拟工具，不会修改 Unity 正式游戏状态。")]
-        public bool enableServerSimulatedTools;
+        // Retained for serialized assets created by older package versions. Runtime mode now comes
+        // from the asset type: AgentConfigAsset is Local; AIBotConnectionProfile is Server.
+        [HideInInspector] public AgentRuntimeMode runtimeMode = AgentRuntimeMode.Local;
+        [HideInInspector] public string serverBaseUrl = "http://127.0.0.1:5000";
+        [HideInInspector] public bool enableServerSimulatedTools;
 
         [Serializable]
         public class LoreEntry
@@ -55,6 +57,10 @@ namespace AIBot.Unity
         [Header("记忆")]
         public int shortTermTurns = 12;
         public int summaryThreshold = 20;
+        [HideInInspector] public string memorySettingsJson;
+        [HideInInspector] public string gameMemoryPolicyJson;
+        [SerializeField, HideInInspector] private int memorySnapshotShortTermTurns;
+        [SerializeField, HideInInspector] private int memorySnapshotSummaryThreshold;
 
         [Header("输出枚举（与游戏 Animator 参数对齐）")]
         public List<string> emotions = new List<string> { "neutral", "happy", "angry", "sad", "surprised" };
@@ -93,14 +99,9 @@ namespace AIBot.Unity
                     maxTokens = maxTokens,
                     timeoutMs = timeoutMs
                 },
-                memory = new MemorySettings
-                {
-                    shortTermTurns = shortTermTurns,
-                    summaryThreshold = summaryThreshold
-                },
+                memory = ToMemorySettings(),
                 output = new OutputSettings { emotions = emotions, actions = actions },
-                runtimeMode = runtimeMode == AgentRuntimeMode.Server ? "server" : "local",
-                serverBaseUrl = serverBaseUrl
+                runtimeMode = "local"
             };
             foreach (LoreEntry entry in loreBlocks)
             {
@@ -118,19 +119,26 @@ namespace AIBot.Unity
 
         public void FromDto(AgentConfigDto dto)
         {
+            if (dto == null) throw new ArgumentNullException(nameof(dto));
+            ModelSettings sourceModel = dto.model ?? new ModelSettings();
+            MemorySettings sourceMemory = dto.memory ?? new MemorySettings();
+            OutputSettings sourceOutput = dto.output ?? new OutputSettings();
             npcId = dto.npcId; displayName = dto.displayName;
             persona = dto.persona; backstory = dto.backstory; worldId = dto.worldId;
             runtimeMode = string.Equals(dto.runtimeMode, "server", StringComparison.OrdinalIgnoreCase)
                 ? AgentRuntimeMode.Server : AgentRuntimeMode.Local;
             serverBaseUrl = string.IsNullOrEmpty(dto.serverBaseUrl) ? "http://127.0.0.1:5000" : dto.serverBaseUrl;
             enabledToolIds = dto.enabledToolIds; fallbackReplies = dto.fallbackReplies;
-            baseUrl = dto.model.baseUrl; model = dto.model.model; apiKey = dto.model.apiKey;
-            temperature = dto.model.temperature; maxTokens = dto.model.maxTokens; timeoutMs = dto.model.timeoutMs;
-            shortTermTurns = dto.memory?.shortTermTurns ?? 12;
-            summaryThreshold = dto.memory?.summaryThreshold ?? 20;
-            emotions = dto.output.emotions; actions = dto.output.actions;
+            baseUrl = sourceModel.baseUrl; model = sourceModel.model; apiKey = sourceModel.apiKey;
+            temperature = sourceModel.temperature; maxTokens = sourceModel.maxTokens; timeoutMs = sourceModel.timeoutMs;
+            shortTermTurns = sourceMemory.shortTermTurns ?? 12;
+            summaryThreshold = sourceMemory.summaryThreshold ?? 20;
+            memorySettingsJson = dto.memory == null ? null : JsonConvert.SerializeObject(sourceMemory);
+            memorySnapshotShortTermTurns = shortTermTurns;
+            memorySnapshotSummaryThreshold = summaryThreshold;
+            emotions = sourceOutput.emotions; actions = sourceOutput.actions;
             loreBlocks = new List<LoreEntry>();
-            foreach (LoreBlock block in dto.loreBlocks)
+            foreach (LoreBlock block in dto.loreBlocks ?? new List<LoreBlock>())
             {
                 loreBlocks.Add(new LoreEntry
                 {
@@ -141,5 +149,25 @@ namespace AIBot.Unity
         }
 
         public string ToJson() { return JsonConvert.SerializeObject(ToDto(), Formatting.Indented); }
+
+        public MemoryPolicy ToGameMemoryPolicy()
+        {
+            return string.IsNullOrWhiteSpace(gameMemoryPolicyJson) ? null
+                : JsonConvert.DeserializeObject<MemoryPolicy>(gameMemoryPolicyJson);
+        }
+
+        private MemorySettings ToMemorySettings()
+        {
+            MemorySettings value = string.IsNullOrWhiteSpace(memorySettingsJson)
+                ? new MemorySettings()
+                : JsonConvert.DeserializeObject<MemorySettings>(memorySettingsJson) ?? new MemorySettings();
+            if (string.IsNullOrWhiteSpace(memorySettingsJson)
+                || shortTermTurns != memorySnapshotShortTermTurns)
+                value.shortTermTurns = shortTermTurns;
+            if (string.IsNullOrWhiteSpace(memorySettingsJson)
+                || summaryThreshold != memorySnapshotSummaryThreshold)
+                value.summaryThreshold = summaryThreshold;
+            return value;
+        }
     }
 }
