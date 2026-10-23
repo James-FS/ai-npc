@@ -50,26 +50,26 @@ namespace AIBot.Server
                 + string.Join(",", limits.supportedSummaryTriggers)
                 + "; scopes=" + string.Join(",", limits.supportedMemoryScopes));
 
-            List<string> npcIds = DataStore.ListNpcIds("default");
+            var npcs = DataStore.ListGameIds().SelectMany(game => DataStore.ListNpcIds(game)
+                .Select(id => new { game, id })).ToList();
             bool hasConnection = false;
             try
             {
                 ModelConnectionDocument doc = ModelConnectionStore.Snapshot();
-                hasConnection = npcIds.Any(id =>
+                hasConnection = npcs.Any(npc =>
                 {
-                    string assigned = doc.npcMain.TryGetValue("default/" + id, out string profileId)
+                    string assigned = doc.npcMain.TryGetValue(npc.game + "/" + npc.id, out string profileId)
                         ? profileId : doc.globalMain;
                     return doc.connections.Any(x => x.id == assigned && !string.IsNullOrWhiteSpace(x.apiKey));
                 });
             }
             catch { }
-            if (!hasConnection && !npcIds.Any(id =>
-                !string.IsNullOrWhiteSpace(DataStore.LoadNpc("default", id)?.model?.apiKey)))
-                Console.WriteLine("[startup][warning] 未分配模型连接且 NPC 旧配置没有 Key；对话请求会失败");
-            if (npcIds.Count == 0)
-                Console.WriteLine("[startup][warning] default Game 未发现可用 NPC 配置");
+            if (!hasConnection)
+                Console.WriteLine("[startup][warning] 未发现带 Key 的已分配主模型连接；请在管理台“模型”入口绑定连接");
+            if (npcs.Count == 0)
+                Console.WriteLine("[startup][warning] 未发现可用 NPC 配置");
             else
-                Console.WriteLine("[startup] default NPCs: " + string.Join(",", npcIds));
+                Console.WriteLine("[startup] NPCs: " + string.Join(",", npcs.Select(npc => npc.game + "/" + npc.id)));
         }
 
         /// <summary>记录本次存储模式到 data/ 标记文件，供控制台提示“上次运行模式”；失败不影响启动。</summary>

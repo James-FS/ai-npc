@@ -9,17 +9,6 @@ namespace AIBot.Server
 {
     public static class ReadinessService
     {
-        /// <summary>测试缝：覆盖「任一 NPC 自带 key」判定，避免就绪探针用例依赖真实 data 目录。为 null 时走真实扫描。</summary>
-        internal static Func<bool> HasAnyNpcKeyOverride = null;
-
-        private static bool HasAnyNpcKey(List<string> npcIds)
-        {
-            if (HasAnyNpcKeyOverride != null) return HasAnyNpcKeyOverride();
-            return npcIds
-                .Select(id => DataStore.LoadNpc("default", id)?.model?.apiKey)
-                .Any(value => !string.IsNullOrWhiteSpace(value));
-        }
-
         public static async Task<(bool Ready, object Body)> CheckAsync(StorageOptions storage,
             MemorySummaryQueue queue, Microsoft.Extensions.Configuration.IConfiguration config,
             CancellationToken ct, MongoConnectionFactory mongo = null)
@@ -50,26 +39,26 @@ namespace AIBot.Server
                 }
             }
 
-            // NPC 专用连接优先于控制台默认连接；旧 NPC 文件里的 Key 仍可兼容读取。
-            List<string> npcIds = DataStore.ListNpcIds("default");
-            bool hasConnection = false;
-            if (HasAnyNpcKeyOverride == null && DataStore.FindDataRoot() != null)
+            // Server 运行必须解析到已分配的模型连接；旧 NPC 文件中的字段不会作为运行时回退。
+            var npcs = DataStore.ListGameIds().SelectMany(gameId => DataStore.ListNpcIds(gameId)
+                .Select(npcId => new { gameId, npcId })).ToList();
+            bool hasLlmKey = false;
+            if (DataStore.FindDataRoot() != null)
             {
                 try
                 {
                     ModelConnectionDocument connections = ModelConnectionStore.Snapshot();
-                    hasConnection = npcIds.Any(id =>
+                    hasLlmKey = npcs.Any(npc =>
                     {
-                        string profileId = connections.npcMain.TryGetValue("default/" + id, out string assigned)
+                        string profileId = connections.npcMain.TryGetValue(npc.gameId + "/" + npc.npcId, out string assigned)
                             ? assigned : connections.globalMain;
-                        return connections.connections.Any(profile => profile.id == profileId
+                        return profileId != null && connections.connections.Any(profile => profile.id == profileId
                             && !string.IsNullOrWhiteSpace(profile.apiKey));
                     });
                 }
-                catch { hasConnection = false; }
+                catch { hasLlmKey = false; }
             }
-            bool hasLlmKey = hasConnection || HasAnyNpcKey(npcIds);
-            int npcCount = npcIds.Count;
+            int npcCount = npcs.Count;
             bool queueReady = queue != null;
             bool ready = storageReady && hasLlmKey && npcCount > 0 && queueReady;
             return (ready, new

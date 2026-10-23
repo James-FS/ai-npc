@@ -313,7 +313,7 @@ namespace AIBot.Server
 
             EffectiveMemoryPolicy effective = MemoryPolicyService.Resolve(job.GameId, cfg, null, _configuration);
             MemoryPolicy policy = effective.policy;
-            bool summaryConnection = ModelConnectionStore.ApplySummary(job.GameId, job.NpcId, cfg.memory, policy);
+            ModelConnectionStore.ApplySummary(job.GameId, job.NpcId, cfg.memory, policy);
             if (policy.memoryScope != MemoryPolicyValues.ScopePlayerNpc
                 || (!policy.backgroundSummarization && !job.Force)) return;
 
@@ -347,13 +347,18 @@ namespace AIBot.Server
                     PlayerLongTermMemory existing = await _memoryService.LoadAsync(job.GameId,
                         job.NpcId, job.PlayerId, ct);
                     JToken before = JToken.FromObject(existing);
-                    ModelSettings settings = ResolveSummarySettings(policy.summaryModel, cfg.model, summaryConnection);
+                    ModelSettings settings = ResolveSummarySettings(policy.summaryModel, cfg.model);
                     // 摘要按玩家范围独立成一会话标识：避免与聊天共用缓存前缀而互相污染
                     var backend = new HttpLlmBackend(settings, LlmRequestSession.For("summarize",
                         job.GameId, job.NpcId, job.PlayerId));
                     PlayerMemorySummaryResult summarized = await MemorySummarizer.RunStructuredAsync(
                         backend, settings, existing, snapshot, policy.maxFacts, job.SessionId, _log, ct,
-                        policy);
+                        policy, usage => ChatLogService.Record(job.GameId, new ChatLogService.ChatLogEntry
+                        {
+                            ts = DateTime.UtcNow.ToString("o"), kind = "summary", npcId = job.NpcId,
+                            playerId = job.PlayerId, sessionId = job.SessionId,
+                            promptTokens = usage.PromptTokens, completionTokens = usage.CompletionTokens
+                        }));
                     summarized.Facts.RemoveAll(f => !PlayerMemoryService.IsCategoryEnabled(f.category, policy));
                     try
                     {
@@ -410,14 +415,13 @@ namespace AIBot.Server
             }
         }
 
-        private static ModelSettings ResolveSummarySettings(ModelSettings summary, ModelSettings fallback,
-            bool ownConnection = false)
+        internal static ModelSettings ResolveSummarySettings(ModelSettings summary, ModelSettings fallback)
         {
             ModelSettings source = summary ?? fallback ?? new ModelSettings();
             return new ModelSettings
             {
                 baseUrl = string.IsNullOrEmpty(source.baseUrl) ? fallback?.baseUrl : source.baseUrl,
-                apiKey = !ownConnection && string.IsNullOrEmpty(source.apiKey) ? fallback?.apiKey : source.apiKey,
+                apiKey = string.IsNullOrEmpty(source.apiKey) ? fallback?.apiKey : source.apiKey,
                 model = string.IsNullOrEmpty(source.model) ? fallback?.model : source.model,
                 temperature = source.temperature,
                 maxTokens = source.maxTokens,

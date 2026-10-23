@@ -38,6 +38,7 @@ namespace AIBot.Server
         public List<string> events = new List<string>();
         public DateTime createdUtc;
         public DateTime completedUtc;
+        public bool replayExpired;
     }
 
     /// <summary>game 模式的挂起工具轮：等待客户端执行工具并携带结果发起续跑请求。</summary>
@@ -144,9 +145,8 @@ namespace AIBot.Server
             }
             catch (Exception ex)
             {
-                // 存储抖动不应升级为聊天请求失败：从空白会话继续。
-                Log.Log(LogLevel.Warning, "会话恢复失败(" + sid + ")，从空白开始: " + ex.Message);
-                return null;
+                // A missing idempotency record must never be inferred from a failed read.
+                throw new System.IO.IOException("会话恢复失败，拒绝从空白状态重新执行请求", ex);
             }
         }
 
@@ -214,7 +214,13 @@ namespace AIBot.Server
                     session.Memory.Clear();
                     session.Summary = null;
                     session.Facts = new List<string>();
-                    session.RecentRequests = new List<ChatRequestRecord>();
+                    session.PendingToolRound = null;
+                    // Clearing conversation content must not forget already executed request IDs.
+                    foreach (ChatRequestRecord request in session.RecentRequests)
+                    {
+                        request.events.Clear();
+                        request.replayExpired = true;
+                    }
                     savedAll = Save(session) && savedAll;
                 }
                 finally { session.Gate.Release(); }
@@ -359,11 +365,16 @@ namespace AIBot.Server
         private static void PruneRequests(SessionState session)
         {
             const int maxRequests = 20;
-            if (session.RecentRequests.Count <= maxRequests) return;
-            session.RecentRequests = session.RecentRequests
+            // Keep old IDs as tombstones for the entire session lifetime. Only full replay
+            // payloads are bounded; forgetting an ID would allow old side effects to run again.
+            foreach (ChatRequestRecord old in session.RecentRequests
+                .Where(item => item.status != ChatRequestStatuses.Processing)
                 .OrderByDescending(item => item.completedUtc == default(DateTime) ? item.createdUtc : item.completedUtc)
-                .Take(maxRequests)
-                .ToList();
+                .Skip(maxRequests - 1))
+            {
+                old.events.Clear();
+                old.replayExpired = true;
+            }
         }
 
         private static List<ChatRequestRecord> CopyRequests(IEnumerable<ChatRequestRecord> source)
@@ -377,7 +388,8 @@ namespace AIBot.Server
                     status = item.status,
                     events = item.events == null ? new List<string>() : new List<string>(item.events),
                     createdUtc = item.createdUtc,
-                    completedUtc = item.completedUtc
+                    completedUtc = item.completedUtc,
+                    replayExpired = item.replayExpired
                 })
                 .ToList();
         }

@@ -121,14 +121,16 @@ namespace AIBot.Server
         {
             ValidateKey(gameId, npcId, playerId);
             string id = Key(gameId, npcId, playerId);
+            FilterDefinition<MemoryDocument> filter = Builders<MemoryDocument>.Filter.Eq(d => d.Id, id);
             if (expectedVersion.HasValue)
+                filter &= Builders<MemoryDocument>.Filter.Eq(d => d.MemoryVersion, expectedVersion.Value);
+            DeleteResult deleted = await _memories.DeleteOneAsync(filter, ct);
+            if (expectedVersion.HasValue && deleted.DeletedCount == 0)
             {
                 MemoryDocument current = await LoadDocumentAsync(id, ct);
-                if (current == null) return;                       // 不存在 → 幂等
-                if (current.MemoryVersion != expectedVersion.Value)
+                if (current != null)
                     throw new MemoryVersionConflictException(expectedVersion.Value, current.MemoryVersion);
             }
-            await _memories.DeleteOneAsync(d => d.Id == id, ct);
         }
 
         private async Task<MemoryDocument> LoadDocumentAsync(string id, CancellationToken ct)

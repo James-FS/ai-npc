@@ -15,6 +15,29 @@ namespace AIBot.Tests
     [Collection("mongo-integration")]
     public class MongoStoresTests
     {
+        [MongoFact]
+        public void StatisticsSurviveStoreRecreationAndIncludeSummaryAndPendingRounds()
+        {
+            MongoConnectionFactory factory = NewFactory();
+            try
+            {
+                var store = new MongoChatLogStore(factory);
+                store.Write(GameId, new ChatLogService.ChatLogEntry { npcId = "npc", kind = "tool_pending", promptTokens = 10 });
+                store.Write(GameId, new ChatLogService.ChatLogEntry { npcId = "npc", kind = "summary", promptTokens = 20 });
+                store.Write(GameId, new ChatLogService.ChatLogEntry { npcId = "npc", kind = "chat", promptTokens = 30 });
+                ChatLogService.UseStore(new MongoChatLogStore(factory));
+                JObject stats = ChatLogService.Snapshot(GameId);
+                Assert.Equal(2, (int)stats["totalRequests"]);
+                Assert.Equal(1, (int)stats["totalSummaryCalls"]);
+                Assert.Equal(60, (int)stats["totalPromptTokens"]);
+            }
+            finally
+            {
+                ChatLogService.UseStore(new JsonChatLogStore(30));
+                factory.Client.DropDatabase(factory.DatabaseName);
+            }
+        }
+
         private const string GameId = "zz_mongo_stores_game";
 
         private static MongoConnectionFactory NewFactory()

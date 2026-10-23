@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using AIBot.Core.Logging;
 using Microsoft.Extensions.Configuration;
@@ -7,7 +6,7 @@ using Newtonsoft.Json.Linq;
 
 namespace AIBot.Server
 {
-    /// <summary>对话日志门面：落盘委托给 <see cref="IChatLogStore"/>，内存聚合用量统计。</summary>
+    /// <summary>对话日志门面：统计从保留期内的持久化日志生成，重启不清零。</summary>
     public static class ChatLogService
     {
         private static readonly ILogSink Log = new ConsoleLogSink();
@@ -25,7 +24,6 @@ namespace AIBot.Server
             RuntimeLogs = runtimeLogs;
         }
 
-        // ---- 统计（内存聚合，重启清零；明细见 jsonl 日志）----
         public sealed class NpcAgg
         {
             public long Requests;
@@ -34,14 +32,13 @@ namespace AIBot.Server
             public long PromptTokens;
             public long CompletionTokens;
             public double TotalMs;
+            public long SummaryCalls;
         }
-
-        private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, NpcAgg>> Stats =
-            new ConcurrentDictionary<string, ConcurrentDictionary<string, NpcAgg>>();
 
         public sealed class ChatLogEntry
         {
             public string ts;
+            public string kind = "chat"; // chat / tool_pending / summary
             public string npcId;
             public string playerId;
             public string sessionId;
@@ -70,22 +67,6 @@ namespace AIBot.Server
                 RuntimeLogs?.Write(LogLevel.Warning, "ChatLog", "write_failed",
                     "对话日志写入失败: " + ex.Message, null, ex);
             }
-            Aggregate(gameId, entry);
-        }
-
-        private static void Aggregate(string gameId, ChatLogEntry e)
-        {
-            var perGame = Stats.GetOrAdd(gameId, _ => new ConcurrentDictionary<string, NpcAgg>());
-            NpcAgg agg = perGame.GetOrAdd(e.npcId ?? "?", _ => new NpcAgg());
-            lock (agg)
-            {
-                agg.Requests++;
-                if (e.fallback) agg.Fallbacks++;
-                if (e.injection) agg.InjectionAttempts++;
-                agg.PromptTokens += e.promptTokens;
-                agg.CompletionTokens += e.completionTokens;
-                agg.TotalMs += e.elapsedMs;
-            }
         }
 
         /// <summary>查询某日对话日志（最新在前，分页；供 /api/games/{gid}/logs）。</summary>
@@ -100,29 +81,43 @@ namespace AIBot.Server
             var byNpc = new JObject();
             long totalRequests = 0, totalPrompt = 0, totalCompletion = 0, totalFallbacks = 0, totalInjections = 0;
             double totalMs = 0;
-            if (Stats.TryGetValue(gameId, out var perGame))
+            long totalSummaryCalls = 0;
+            var perGame = new Dictionary<string, NpcAgg>();
+            foreach (ChatLogEntry e in _store.ReadForStats(gameId))
             {
-                foreach (KeyValuePair<string, NpcAgg> kv in perGame)
+                string npc = e.npcId ?? "?";
+                if (!perGame.TryGetValue(npc, out NpcAgg agg)) perGame[npc] = agg = new NpcAgg();
+                bool summary = e.kind == "summary";
+                if (summary) agg.SummaryCalls++;
+                else
                 {
-                    lock (kv.Value)
-                    {
-                        byNpc[kv.Key] = new JObject
-                        {
-                            ["requests"] = kv.Value.Requests,
-                            ["fallbacks"] = kv.Value.Fallbacks,
-                            ["injectionAttempts"] = kv.Value.InjectionAttempts,
-                            ["promptTokens"] = kv.Value.PromptTokens,
-                            ["completionTokens"] = kv.Value.CompletionTokens,
-                            ["avgMs"] = kv.Value.Requests > 0 ? Math.Round(kv.Value.TotalMs / kv.Value.Requests) : 0
-                        };
-                        totalRequests += kv.Value.Requests;
-                        totalFallbacks += kv.Value.Fallbacks;
-                        totalInjections += kv.Value.InjectionAttempts;
-                        totalPrompt += kv.Value.PromptTokens;
-                        totalCompletion += kv.Value.CompletionTokens;
-                        totalMs += kv.Value.TotalMs;
-                    }
+                    agg.Requests++;
+                    agg.TotalMs += e.elapsedMs;
+                    if (e.fallback) agg.Fallbacks++;
+                    if (e.injection) agg.InjectionAttempts++;
                 }
+                agg.PromptTokens += e.promptTokens;
+                agg.CompletionTokens += e.completionTokens;
+            }
+            foreach (KeyValuePair<string, NpcAgg> kv in perGame)
+            {
+                byNpc[kv.Key] = new JObject
+                {
+                    ["requests"] = kv.Value.Requests,
+                    ["fallbacks"] = kv.Value.Fallbacks,
+                    ["injectionAttempts"] = kv.Value.InjectionAttempts,
+                    ["promptTokens"] = kv.Value.PromptTokens,
+                    ["completionTokens"] = kv.Value.CompletionTokens,
+                    ["summaryCalls"] = kv.Value.SummaryCalls,
+                    ["avgMs"] = kv.Value.Requests > 0 ? Math.Round(kv.Value.TotalMs / kv.Value.Requests) : 0
+                };
+                totalRequests += kv.Value.Requests;
+                totalFallbacks += kv.Value.Fallbacks;
+                totalInjections += kv.Value.InjectionAttempts;
+                totalPrompt += kv.Value.PromptTokens;
+                totalCompletion += kv.Value.CompletionTokens;
+                totalMs += kv.Value.TotalMs;
+                totalSummaryCalls += kv.Value.SummaryCalls;
             }
             return new JObject
             {
@@ -131,9 +126,10 @@ namespace AIBot.Server
                 ["totalInjectionAttempts"] = totalInjections,
                 ["totalPromptTokens"] = totalPrompt,
                 ["totalCompletionTokens"] = totalCompletion,
+                ["totalSummaryCalls"] = totalSummaryCalls,
                 ["avgMs"] = totalRequests > 0 ? Math.Round(totalMs / totalRequests) : 0,
                 ["byNpc"] = byNpc,
-                ["note"] = "统计为本次启动以来累计"
+                ["note"] = "统计来自当前存储保留期内的日志，重启保留；Token 包含工具挂起轮与摘要调用，仅计入上游实际返回的 usage，不等同账单。"
             };
         }
     }

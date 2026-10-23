@@ -81,6 +81,11 @@ namespace AIBot.Server
             lock (IoLock) return LoadUnsafe();
         }
 
+        internal static void SaveMigration(ModelConnectionDocument document)
+        {
+            lock (IoLock) SaveUnsafe(document);
+        }
+
         public static string Validate(ModelConnection value, bool requireKey = false)
         {
             if (value == null || !DataStore.IsValidId(value.id)) return "连接 ID 不合法";
@@ -115,8 +120,7 @@ namespace AIBot.Server
                 ModelConnectionDocument doc = LoadUnsafe();
                 ModelConnection existing = doc.connections.FirstOrDefault(x => x.id == incoming.id);
                 if (create == (existing != null)) return false;
-                if (clearKey || (string.IsNullOrWhiteSpace(incoming.apiKey)
-                    && string.IsNullOrWhiteSpace(existing?.apiKey))) return false;
+                if (clearKey || (create && string.IsNullOrWhiteSpace(incoming.apiKey))) return false;
                 incoming.baseUrl = incoming.baseUrl.TrimEnd('/');
                 incoming.apiKey = string.IsNullOrWhiteSpace(incoming.apiKey)
                     ? existing?.apiKey : incoming.apiKey.Trim();
@@ -156,7 +160,8 @@ namespace AIBot.Server
                 ModelConnectionDocument doc = LoadUnsafe();
                 if (!string.IsNullOrWhiteSpace(request.connectionId)
                     && !doc.connections.Any(x => x.id == request.connectionId
-                        && !string.IsNullOrWhiteSpace(x.apiKey))) return false;
+                        && (request.scope == "npc_main" || request.scope == "global_main"
+                            ? !string.IsNullOrWhiteSpace(x.apiKey) : true))) return false;
                 if (request.scope == "global_main")
                 {
                     doc.globalMain = string.IsNullOrWhiteSpace(request.connectionId) ? null : request.connectionId;
@@ -211,31 +216,55 @@ namespace AIBot.Server
             };
         }
 
-        public static ModelSettings ResolveMain(string gameId, string npcId, ModelSettings legacy)
+        private static ModelConnection MainConnection(ModelConnectionDocument doc, string gameId, string npcId)
         {
-            ModelConnectionDocument doc = Snapshot();
             ModelConnection connection = Bound(doc, doc.npcMain, Pair(gameId, npcId))
                 ?? (doc.globalMain == null ? null : doc.connections.FirstOrDefault(x => x.id == doc.globalMain)
                     ?? throw new InvalidOperationException("模型连接配置不存在: " + doc.globalMain));
-            if (connection != null) return Settings(connection, legacy);
-            return legacy ?? new ModelSettings();
+            if (connection == null)
+                throw new InvalidOperationException("未分配 Server 主模型连接；请在管理台“模型”入口绑定 NPC 连接或控制台默认连接");
+            return connection;
+        }
+
+        public static ModelSettings ResolveMain(string gameId, string npcId, ModelSettings legacy)
+        {
+            return Settings(MainConnection(Snapshot(), gameId, npcId), legacy);
         }
 
         /// <returns>是否使用了整条专用连接配置。</returns>
         public static bool ApplySummary(string gameId, string npcId, MemorySettings npcMemory,
             MemoryPolicy policy, MemoryPolicyOverrides sessionOverride = null)
         {
-            // 管理端本次请求显式选择摘要模型时，保留 Session 层的优先级。
-            if (sessionOverride?.useMainSummaryModel == true || sessionOverride?.summaryModel != null)
+            // 显式复用主模型只影响连接选择；summaryModel 仅覆盖生成参数。
+            if (sessionOverride?.useMainSummaryModel == true || npcMemory?.useMainSummaryModel == true)
+            {
+                policy.summaryModel = null;
                 return false;
+            }
             ModelConnectionDocument doc = Snapshot();
             ModelConnection connection = Bound(doc, doc.npcSummary, Pair(gameId, npcId));
-            if (connection == null && npcMemory?.useMainSummaryModel != true
-                && npcMemory?.summaryModel == null && npcMemory?.inheritGameDefaults == true)
+            if (connection == null && npcMemory?.inheritGameDefaults == true
+                && npcMemory.useMainSummaryModel != false)
                 connection = Bound(doc, doc.gameSummary, gameId);
-            if (connection == null) return false;
-            policy.summaryModel = Settings(connection, policy.summaryModel);
-            return true;
+            if (connection == null && npcMemory?.useMainSummaryModel == false)
+                throw new InvalidOperationException("NPC 选择了独立摘要模型，但未分配 NPC 摘要连接；请在管理台“模型”入口绑定连接或改为复用主模型");
+            if (connection == null && policy.summaryModel != null)
+                throw new InvalidOperationException("摘要模型参数已配置，但未分配专用摘要连接；请在管理台“模型”入口绑定 Game 或 NPC 摘要连接，或选择复用主模型");
+            if (connection == null)
+            {
+                // No summary profile and no summary-specific generation parameters means
+                // reuse cfg.model as-is, including its temperature/token/timeout settings.
+                policy.summaryModel = null;
+                return false;
+            }
+            bool dedicatedConnection = connection != null;
+            ModelSettings defaults = policy.summaryModel;
+            string inheritedApiKey = string.IsNullOrWhiteSpace(connection.apiKey)
+                ? MainConnection(doc, gameId, npcId).apiKey : connection.apiKey;
+            policy.summaryModel = Settings(connection, defaults);
+            if (dedicatedConnection && string.IsNullOrWhiteSpace(connection.apiKey))
+                policy.summaryModel.apiKey = inheritedApiKey;
+            return dedicatedConnection;
         }
 
         public static object RedactedSnapshot()

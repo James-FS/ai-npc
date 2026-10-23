@@ -33,7 +33,7 @@ namespace AIBot.Tests
         }
 
         [Fact]
-        public void BeginRequest_PrunesOldCompletedEntries()
+        public void BeginRequest_ExpiresPayloadsButRetainsOldIds()
         {
             var session = new SessionState();
             for (int i = 0; i < 25; i++)
@@ -42,8 +42,10 @@ namespace AIBot.Tests
                 SessionStore.CompleteRequest(record, Array.Empty<string>());
             }
 
-            Assert.Equal(20, session.RecentRequests.Count);
-            Assert.Null(SessionStore.FindRequest(session, "req-0"));
+            Assert.Equal(25, session.RecentRequests.Count);
+            Assert.True(SessionStore.FindRequest(session, "req-0").replayExpired);
+            Assert.Same(SessionStore.FindRequest(session, "req-0"),
+                SessionStore.BeginRequest(session, "req-0", "hash-0"));
             Assert.NotNull(SessionStore.FindRequest(session, "req-24"));
         }
     }

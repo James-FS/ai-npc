@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Collections.Generic;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -66,6 +67,24 @@ namespace AIBot.Server
             string root = DataStore.FindDataRoot();
             if (root == null) return Path.Combine(Path.GetTempPath(), "aibot-logs", gameId);
             return Path.Combine(root, "logs", gameId);
+        }
+
+        public IEnumerable<ChatLogService.ChatLogEntry> ReadForStats(string gameId)
+        {
+            string dir = FindLogDir(gameId);
+            lock (_fileLock)
+            {
+                if (!Directory.Exists(dir)) yield break;
+                Cleanup(dir);
+                foreach (string path in Directory.GetFiles(dir, "*.jsonl"))
+                foreach (string line in File.ReadLines(path))
+                {
+                    ChatLogService.ChatLogEntry entry;
+                    try { entry = JsonConvert.DeserializeObject<ChatLogService.ChatLogEntry>(line); }
+                    catch (JsonException) { continue; }
+                    if (entry != null) yield return entry;
+                }
+            }
         }
 
         /// <summary>按日分文件即天然轮转；写时顺手清理超过保留期的旧文件。</summary>

@@ -17,6 +17,11 @@ StorageOptions storageOptions = StorageOptions.From(builder.Configuration);
 storageOptions.Validate();
 MongoConnectionFactory mongoFactory = storageOptions.IsMongo
     ? new MongoConnectionFactory(storageOptions.MongoConnectionString, storageOptions.MongoDatabase) : null;
+await using var instanceLease = storageOptions.IsMongo ? new MongoServerLease(mongoFactory) : null;
+using var dataDirectoryLock = ServerDataLock.Acquire(DataStore.FindDataRoot());
+int migratedModelConfigs = LegacyModelConnectionMigration.Run();
+if (migratedModelConfigs > 0)
+    Console.WriteLine("Migrated legacy inline model settings into model-connections.json: " + migratedModelConfigs);
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.IncludeFields = true;        // Core DTO 使用公共字段（SimGameState 等）
@@ -69,7 +74,10 @@ builder.Services.AddRateLimiter(options =>
         }));
 });
 
-var app = builder.Build();
+await using var app = builder.Build();
+
+if (instanceLease != null)
+    await instanceLease.AcquireAsync(app.Lifetime, app.Lifetime.ApplicationStopping);
 
 app.UseAIBotApiErrors();
 
@@ -115,6 +123,12 @@ if (!storageOptions.IsMongo)
 }
 app.Use(async (context, next) =>
 {
+    if (instanceLease != null && !instanceLease.IsHeld)
+    {
+        await ApiErrorWriter.WriteAsync(context, StatusCodes.Status503ServiceUnavailable,
+            "server_lease_lost", "Server 已失去数据库写入租约，正在停止");
+        return;
+    }
     string path = context.Request.Path.Value ?? string.Empty;
     string normalizedPath = path.TrimEnd('/');
     // StartsWithSegments 同时覆盖精确的 /api/games 和其子路径，避免管理端的
@@ -128,7 +142,9 @@ app.Use(async (context, next) =>
     if (isChatStream && !string.IsNullOrWhiteSpace(clientToken))
     {
         string auth = context.Request.Headers.Authorization.ToString();
-        if (!string.Equals(auth, "Bearer " + clientToken, StringComparison.Ordinal))
+        bool isAdmin = !string.IsNullOrWhiteSpace(adminToken)
+            && string.Equals(auth, "Bearer " + adminToken, StringComparison.Ordinal);
+        if (!isAdmin && !string.Equals(auth, "Bearer " + clientToken, StringComparison.Ordinal))
         {
             await ApiErrorWriter.WriteAsync(context, StatusCodes.Status401Unauthorized,
                 "client_auth_required", "聊天 API 需要有效的客户端 token");

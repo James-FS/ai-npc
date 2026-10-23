@@ -5,47 +5,12 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <IsPackable>false</IsPackable>
-    <!-- 与 Unity EditMode Test 共享同一套用例数据（Tests/Cases/），此处直接编译 Core 源码 -->
+    <!-- 测试真实 Server 程序集（包含共享 Core），避免复制源码遗漏宿主和中间件。 -->
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="..\..\Packages\com.aibot.npcagent\Runtime\Core\**\*.cs" />
-    <Compile Include="..\AIBot.Server\DataStore.cs" Link="Server\DataStore.cs" />
-    <Compile Include="..\AIBot.Server\StorageOptions.cs" Link="Server\StorageOptions.cs" />
-    <Compile Include="..\AIBot.Server\MemoryRepository.cs" Link="Server\MemoryRepository.cs" />
-    <Compile Include="..\AIBot.Server\MemoryAuditService.cs" Link="Server\MemoryAuditService.cs" />
-    <Compile Include="..\AIBot.Server\PlayerMemoryService.cs" Link="Server\PlayerMemoryService.cs" />
-    <Compile Include="..\AIBot.Server\SessionStore.cs" Link="Server\SessionStore.cs" />
-    <Compile Include="..\AIBot.Server\ISessionPersistence.cs" Link="Server\ISessionPersistence.cs" />
-    <Compile Include="..\AIBot.Server\JsonSessionPersistence.cs" Link="Server\JsonSessionPersistence.cs" />
-    <Compile Include="..\AIBot.Server\MongoSessionPersistence.cs" Link="Server\MongoSessionPersistence.cs" />
-    <Compile Include="..\AIBot.Server\MemoryPolicyService.cs" Link="Server\MemoryPolicyService.cs" />
-    <Compile Include="..\AIBot.Server\MemorySummaryQueue.cs" Link="Server\MemorySummaryQueue.cs" />
-    <Compile Include="..\AIBot.Server\RuntimeLogService.cs" Link="Server\RuntimeLogService.cs" />
-    <Compile Include="..\AIBot.Server\ChatEndpoints.cs" Link="Server\ChatEndpoints.cs" />
-    <Compile Include="..\AIBot.Server\ApiErrorContract.cs" Link="Server\ApiErrorContract.cs" />
-    <Compile Include="..\AIBot.Server\ChatLogService.cs" Link="Server\ChatLogService.cs" />
-    <Compile Include="..\AIBot.Server\IChatLogStore.cs" Link="Server\IChatLogStore.cs" />
-    <Compile Include="..\AIBot.Server\JsonChatLogStore.cs" Link="Server\JsonChatLogStore.cs" />
-    <Compile Include="..\AIBot.Server\IMemoryAuditStore.cs" Link="Server\IMemoryAuditStore.cs" />
-    <Compile Include="..\AIBot.Server\JsonMemoryAuditStore.cs" Link="Server\JsonMemoryAuditStore.cs" />
-    <Compile Include="..\AIBot.Server\IMemorySummaryJobPersistence.cs" Link="Server\IMemorySummaryJobPersistence.cs" />
-    <Compile Include="..\AIBot.Server\MemorySummaryJobRecord.cs" Link="Server\MemorySummaryJobRecord.cs" />
-    <Compile Include="..\AIBot.Server\ModelErrorContract.cs" Link="Server\ModelErrorContract.cs" />
-    <Compile Include="..\AIBot.Server\ReadinessService.cs" Link="Server\ReadinessService.cs" />
-    <Compile Include="..\AIBot.Server\ModelConnectionStore.cs" Link="Server\ModelConnectionStore.cs" />
-    <Compile Include="..\AIBot.Server\AdminEndpoints.cs" Link="Server\AdminEndpoints.cs" />
-    <Compile Include="..\AIBot.Server\StartupDiagnostics.cs" Link="Server\StartupDiagnostics.cs" />
-    <Compile Include="..\AIBot.Server\ModelDiagnostics.cs" Link="Server\ModelDiagnostics.cs" />
-    <Compile Include="..\AIBot.Server\JsonToMemoryRepositoryMigrator.cs" Link="Server\JsonToMemoryRepositoryMigrator.cs" />
-    <Compile Include="..\AIBot.Server\MongoConnectionFactory.cs" Link="Server\MongoConnectionFactory.cs" />
-    <Compile Include="..\AIBot.Server\BsonJson.cs" Link="Server\BsonJson.cs" />
-    <Compile Include="..\AIBot.Server\MongoInitializer.cs" Link="Server\MongoInitializer.cs" />
-    <Compile Include="..\AIBot.Server\MongoMemoryRepository.cs" Link="Server\MongoMemoryRepository.cs" />
-    <Compile Include="..\AIBot.Server\MongoChatLogStore.cs" Link="Server\MongoChatLogStore.cs" />
-    <Compile Include="..\AIBot.Server\MongoMemoryAuditStore.cs" Link="Server\MongoMemoryAuditStore.cs" />
-    <Compile Include="..\AIBot.Server\MongoMemorySummaryJobPersistence.cs" Link="Server\MongoMemorySummaryJobPersistence.cs" />
+    <ProjectReference Include="..\AIBot.Server\AIBot.Server.csproj" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />

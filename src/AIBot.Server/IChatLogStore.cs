@@ -1,4 +1,5 @@
 using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
 
 namespace AIBot.Server
 {
@@ -7,5 +8,6 @@ namespace AIBot.Server
     {
         void Write(string gameId, ChatLogService.ChatLogEntry entry);
         JObject Query(string gameId, string date, string npcId, int limit, int offset);
+        IEnumerable<ChatLogService.ChatLogEntry> ReadForStats(string gameId);
     }
 }

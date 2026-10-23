@@ -168,13 +168,33 @@ namespace AIBot.Tests
             return (AgentConfigDto)method.Invoke(null, new object[] { source });
         }
 
-        // ---- Readiness 探针只检查分配的连接或旧 NPC Key ----
+        // ---- Readiness 探针只检查实际分配的 Server 主模型连接 ----
 
-        private static async Task<(bool Ready, object Body)> CheckReadiness(string tempRoot, Func<bool> anyNpcKey = null)
+        private static async Task<(bool Ready, object Body)> CheckReadiness(string tempRoot, Func<bool> anyNpcKey = null,
+            bool bindConnection = false)
         {
-            ReadinessService.HasAnyNpcKeyOverride = anyNpcKey;
+            var cachedRoot = typeof(DataStore).GetField("_cachedRoot",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            object previousRoot = cachedRoot.GetValue(null);
+            string previousConnectionPath = ModelConnectionStore.OverridePath;
+            cachedRoot.SetValue(null, tempRoot);
+            ModelConnectionStore.OverridePath = Path.Combine(tempRoot, "model-connections.json");
             try
             {
+                var npc = new AgentConfigDto { npcId = "readiness-test" };
+                npc.model.apiKey = anyNpcKey?.Invoke() == true ? "test-key" : null;
+                DataStore.SaveNpc("test-game", npc);
+                if (bindConnection)
+                {
+                    var connection = new ModelConnection
+                    {
+                        id = "readiness", name = "readiness", baseUrl = "https://example.test/v1",
+                        model = "test", apiKey = "readiness-key-012345", apiFormat = "openai_chat_completions"
+                    };
+                    ModelConnectionStore.Save(connection, false, true);
+                    ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest
+                    { scope = "npc_main", gameId = "test-game", npcId = npc.npcId, connectionId = connection.id });
+                }
                 var config = ConfigWith();
                 var repository = new JsonMemoryRepository(() => tempRoot);
                 var queue = new MemorySummaryQueue(new PlayerMemoryService(repository), config,
@@ -184,16 +204,25 @@ namespace AIBot.Tests
             }
             finally
             {
-                ReadinessService.HasAnyNpcKeyOverride = null;
+                cachedRoot.SetValue(null, previousRoot);
+                ModelConnectionStore.OverridePath = previousConnectionPath;
             }
         }
 
         [Fact]
-        public async Task Readiness_OnlyPerNpcKey_StillCountsAsReady()
+        public async Task Readiness_BoundConnectionCountsAsReady()
+        {
+            (bool ready, _) = await CheckReadiness(_tempDir, bindConnection: true);
+
+            Assert.True(ready);
+        }
+
+        [Fact]
+        public async Task Readiness_IgnoresLegacyInlineNpcKey()
         {
             (bool ready, _) = await CheckReadiness(_tempDir, anyNpcKey: () => true);
 
-            Assert.True(ready);
+            Assert.False(ready);
         }
 
         [Fact]

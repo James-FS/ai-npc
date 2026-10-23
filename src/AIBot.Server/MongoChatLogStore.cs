@@ -26,6 +26,7 @@ namespace AIBot.Server
             var document = new BsonDocument
             {
                 ["gameId"] = gameId ?? string.Empty,
+                ["kind"] = entry.kind ?? "chat",
                 ["ts"] = new BsonDateTime(ts),
                 ["npcId"] = entry.npcId ?? string.Empty,
                 ["playerId"] = entry.playerId ?? string.Empty,
@@ -87,6 +88,7 @@ namespace AIBot.Server
             return new JObject
             {
                 ["ts"] = ToIso(document, "ts"),
+                ["kind"] = Str(document, "kind") ?? "chat",
                 ["npcId"] = Str(document, "npcId"),
                 ["playerId"] = Str(document, "playerId"),
                 ["sessionId"] = Str(document, "sessionId"),
@@ -102,6 +104,26 @@ namespace AIBot.Server
                 ["tools"] = toolArray,
                 ["injection"] = Bool(document, "injection")
             };
+        }
+
+        public IEnumerable<ChatLogService.ChatLogEntry> ReadForStats(string gameId)
+        {
+            var projection = Builders<BsonDocument>.Projection.Include("npcId").Include("kind")
+                .Include("fallback").Include("injection").Include("promptTokens")
+                .Include("completionTokens").Include("elapsedMs");
+            using (var cursor = _logs.Find(Builders<BsonDocument>.Filter.Eq("gameId", gameId))
+                .Project<BsonDocument>(projection).ToCursor())
+            {
+                while (cursor.MoveNext())
+                foreach (BsonDocument item in cursor.Current)
+                    yield return new ChatLogService.ChatLogEntry
+                    {
+                        npcId = Str(item, "npcId"), kind = Str(item, "kind"),
+                        fallback = Bool(item, "fallback"), injection = Bool(item, "injection"),
+                        promptTokens = Int(item, "promptTokens"), completionTokens = Int(item, "completionTokens"),
+                        elapsedMs = Long(item, "elapsedMs")
+                    };
+            }
         }
 
         private static string ToIso(BsonDocument document, string name)
