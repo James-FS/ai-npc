@@ -34,11 +34,17 @@ Unity 直接调用 OpenAI 兼容模型，适合单机 Demo 和原型。
 1. 创建 **AI NPC → Agent Config**（`AgentConfigAsset`）。
 2. 填写模型地址、模型名称和开发期 API Key。
 3. 将资源拖到 `NpcAgent.configAsset`。
-4. 可选设置 `WorldConfigAsset` 和 `NpcAgent.worldConfigAsset`。
+4. 可选创建 `WorldConfigAsset` 并指派给 `configAsset.worldConfigAsset` 或 `NpcAgent.worldConfigAsset`；后者优先，均未设置时使用空世界观。
 
 Local 模式不需要启动 AIBot.Server，但 API Key 会进入客户端运行环境，只建议用于开发或可信场景。
 
-Local 运行必须指定 `configAsset`；Server 运行必须指定 `connectionProfile`。旧版从 `data/games/{gameId}/npcs/*.json` 运行时加载的项目，可通过 Unity 菜单 **AIBot → Import Legacy NPC JSON as Local Asset...** 导入为 `AgentConfigAsset`；相邻 `world.json` 和 `memory-policy.json` 会一并导入，NPC 与 Game 记忆字段在 Asset 中保留。无效的 Game 策略会中止导入并提示，不会静默丢弃。旧 Server JSON 可用 **Import Legacy NPC JSON as Server Profile...** 导入 Server 地址、Game/NPC 标识和工具 ID。导入保留源文件；Server Profile 不复制旧 JSON 中的模型 Key，请在管理台模型连接页确认集中连接。若场景中的旧 `AgentConfigAsset.runtimeMode` 为 Server，请选中 Hierarchy 中的旧 NPC，执行 **AIBot → Convert Selected Legacy Server NpcAgent to Connection Profile...**，工具会创建并指派 Profile。
+Local 运行必须指定 `configAsset`；Server 运行必须指定 `connectionProfile`，同时指派时 Profile 优先。NpcAgent 不再在运行时搜索或加载 `data/` 下的 JSON。
+
+旧项目可通过以下 Editor 菜单迁移，源文件会保留：
+
+- **AIBot → Import Legacy NPC JSON as Local Asset...**：将 NPC JSON 导入为 `AgentConfigAsset`，保留完整 NPC 记忆设置，并导入相邻 Game 目录中的 `memory-policy.json` 与 `world.json`；无效的策略或世界观文件会中止导入。导入后把 Asset 指派给 `NpcAgent.configAsset`。
+- **AIBot → Import Legacy NPC JSON as Server Profile...**：源文件须位于 `data/games/{gameId}/npcs/`，导入 Server 地址、Game/NPC 标识和工具 ID；不复制模型 Key。导入后指派给 `NpcAgent.connectionProfile`，在 Server 管理台确认模型连接，并按需启用工具回传。
+- **AIBot → Convert Selected Legacy Server NpcAgent to Connection Profile...**：在 Hierarchy 选中引用旧 Server 模式 `AgentConfigAsset` 的 NPC，创建并自动指派 Profile。
 
 ### Server 模式
 
@@ -52,7 +58,9 @@ Unity 通过 HTTP/SSE 调用独立的 AIBot.Server，适合集中管理 NPC、�
 
 正式部署时，在 Server 设置环境变量 `AIBOT_CLIENT_TOKEN`，并在 Connection Profile 的 `serverAuthToken` 填写同一令牌。令牌只用于游戏客户端调用聊天 API，不要提交到公共仓库；本机开发可留空，但 Server 会输出安全警告。
 
-Server 模式不需要在 Unity 中保存模型 API Key。服务端启动方式和配置请参考仓库根目录 README。
+Server 模式不需要在 Unity 中保存模型 API Key。在管理台「模型」入口为 NPC 分配主模型连接或控制台默认连接；Game/NPC 摘要连接也在该页选择，记忆策略页只覆盖生成参数。缺少主模型连接或要求独立摘要却未配置连接时，聊天返回 `422 model_connection_missing`，请先修正 Server 配置。服务端启动与完整规则见[根目录 README](../../README.md)。
+
+Server 模式从 Connection Profile 读取 `playerId` 和 `sessionId`；填写稳定的 `playerId` 并启用玩家范围记忆策略后才使用玩家长期记忆。
 
 ## 代码调用
 
@@ -80,9 +88,6 @@ public class NpcDemo : MonoBehaviour
 - `onServerStatus`：Server 连接状态。
 
 Server 模式每轮请求使用幂等 `requestId`。断线时插件会自动进行有限次数恢复；需要手动恢复时，可使用 `agent.LastServerRequestId` 和 `RetryServerRequestAsync`。Server 的 JSON 存储模式适合单实例运行；维护任务会按 `Sessions:MemoryIdleHours` 清理长期不活跃的 Session 文件。Mongo 模式同样仅允许单活 Server：数据库租约会拒绝第二个活跃实例，租约丢失时原实例停止服务。
-
-Local 模式若从仓库 `data/` 目录加载配置，可在游戏启动阶段调用
-`DevConfigStore.SetDataRoot(path)`，进行目录存在性校验后再创建 NPC；不要在运行中依赖绝对开发机路径。
 
 ## 注册游戏工具
 
