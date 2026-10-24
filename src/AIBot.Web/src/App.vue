@@ -1,12 +1,25 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { memoryApi } from '@/api/memory'
 import { useAppStore } from '@/stores/app'
 
+import { confirmDiscard } from '@/utils/unsaved'
 const app = useAppStore()
+const connectionDialog = ref(false)
+const connectionDraft = reactive({ serverBase: '', adminToken: '', auditActor: '' })
+function openConnection() { Object.assign(connectionDraft, { serverBase: app.serverBase, adminToken: app.adminToken, auditActor: app.auditActor }); connectionDialog.value = true }
+async function applyConnection() {
+  try { const url = new URL(connectionDraft.serverBase.trim() || location.origin); if (!['http:', 'https:'].includes(url.protocol)) throw new Error(); connectionDraft.serverBase = connectionDraft.serverBase.trim().replace(/\/+$/, '') } catch { ElMessage.error('请填写有效的 HTTP/HTTPS Server 地址'); return }
+  if (!await confirmDiscard()) return
+  Object.assign(app, connectionDraft); connectionDialog.value = false
+  await Promise.all([refreshNpcs(), app.loadStorage()])
+}
+async function selectGame(value: string) { if (value !== app.gameId && await confirmDiscard()) app.gameId = value }
+async function selectNpc(value: string) { if (value !== app.selectedNpcId && await confirmDiscard()) app.selectedNpcId = value }
+
 const route = useRoute()
 const router = useRouter()
 const npcMemoryRoute = computed(() => `/npc/${encodeURIComponent(app.currentNpcId || 'none')}/memory`)
@@ -15,7 +28,7 @@ const navGroups = [
   { id: 'content', title: '内容', home: '/debug/npc', items: [['NPC 配置', '/debug/npc'], ['世界观', '/debug/world']] },
   { id: 'memory', title: '记忆', home: '/memories', items: [['记忆检查', '/memories'], ['Game 策略', '/game/memory-policy'], ['NPC 覆盖', npcMemoryRoute], ['系统边界', '/settings/memory'], ['审计', '/memory-audit']] },
   { id: 'models', title: '模型', home: '/settings/llm', items: [['连接管理', '/settings/llm']] },
-  { id: 'ops', title: '运维', home: '/debug/logs', items: [['日志', '/debug/logs'], ['统计', '/debug/stats'], ['高级操作', '/memory-migrations']] },
+  { id: 'ops', title: '运维', home: '/debug/logs', items: [['日志', '/debug/logs'], ['统计', '/debug/stats'], ['旧记忆迁移', '/memory-migrations']] },
 ]
 const activeGroup = computed(() => navGroups.find(group => group.items.some(([, path]) => route.path === (typeof path === 'string' ? path : path.value))) || navGroups[0])
 
@@ -39,13 +52,14 @@ async function createGame() {
     gameId = value.trim()
     await memoryApi.createGame(gameId)
     ElMessage.success(`Game「${gameId}」已创建`)
+    if (!await confirmDiscard()) return
     app.gameId = gameId   // 触发 NPC 列表与 Game 列表刷新
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : 'Game 创建失败')
   }
 }
 
-watch(() => app.gameId, async () => {
+watch(() => [app.serverBase, app.gameId], async () => {
   await refreshNpcs()
   if (route.path.startsWith('/npc/')) await router.replace(npcMemoryRoute.value)
 })
@@ -83,24 +97,30 @@ onMounted(() => { app.loadStorage(); refreshNpcs() })
           <span class="eyebrow">AIBot.Server</span>
           <strong>统一管理台</strong>
         </div>
-        <div class="context-bar">
+        <div class="context-bar"><el-button @click="openConnection">连接设置</el-button>
           <label>Game</label>
-          <el-select v-model="app.gameId" class="compact-input" filterable allow-create default-first-option title="选择或输入 Game ID">
+          <el-select :model-value="app.gameId" @change="selectGame" class="compact-input" filterable allow-create default-first-option title="选择或输入 Game ID">
             <el-option v-for="id in app.gameIds" :key="id" :label="id" :value="id" />
           </el-select>
           <el-button circle title="新建 Game" @click="createGame"><el-icon><Plus /></el-icon></el-button>
           <label>NPC</label>
-          <el-select v-model="app.selectedNpcId" class="npc-select" :loading="app.loadingNpcs">
+          <el-select :model-value="app.selectedNpcId" @change="selectNpc" class="npc-select" :loading="app.loadingNpcs">
             <el-option v-for="id in app.npcIds" :key="id" :label="id" :value="id" />
           </el-select>
           <el-button circle title="刷新 NPC" @click="refreshNpcs"><el-icon><Refresh /></el-icon></el-button>
         </div>
       </header>
-      <nav class="section-tabs" aria-label="当前入口">
+      <!-- 单项分组（如“模型”）不再重复渲染子导航 -->
+      <nav v-if="activeGroup.items.length > 1" class="section-tabs" aria-label="当前入口">
         <RouterLink v-for="([label, path], index) in activeGroup.items" :key="index" :to="typeof path === 'string' ? path : path.value">{{ label }}</RouterLink>
       </nav>
-      <section class="workspace"><RouterView /></section>
+      <section class="workspace"><RouterView :key="app.connectionEpoch" /></section>
     </main>
+    <el-dialog v-model="connectionDialog" title="连接设置" width="min(540px, 94vw)">
+      <el-form label-position="top"><el-form-item label="Server Base URL"><el-input v-model="connectionDraft.serverBase" placeholder="留空使用当前站点" /></el-form-item><el-form-item label="管理 Bearer Token"><el-input v-model="connectionDraft.adminToken" type="password" show-password /></el-form-item><el-form-item label="审计操作人"><el-input v-model="connectionDraft.auditActor" maxlength="80" /></el-form-item></el-form>
+      <p>连接信息保存在当前浏览器。遇到 401/403 时请核对管理 Token。</p>
+      <template #footer><el-button @click="connectionDialog = false">取消</el-button><el-button type="primary" @click="applyConnection">应用连接</el-button></template>
+    </el-dialog>
   </div>
 </template>
 

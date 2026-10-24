@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import RampMeter from '@/components/RampMeter.vue'
@@ -19,7 +19,12 @@ const drawerOpen = ref(false)
 const summaryDraft = ref('')
 const factDialogOpen = ref(false)
 const editingFactId = ref('')
+const factOwner = ref('')
 const factForm = reactive<Partial<MemoryFact>>({ category: 'general', key: '', value: '', confidence: 0.8, pinned: false, sourceSessionId: null, expiresUtc: null })
+let detailSeq = 0
+let openingDetail = false
+let openingDetailSeq = 0
+let factDraftEpoch = 0
 
 const detailTitle = computed(() => store.detail ? `${store.detail.npcId} × ${store.detail.playerId}` : '长期记忆')
 
@@ -49,38 +54,55 @@ async function retryFailedSummaries() {
 }
 
 async function openDetail(npcId: string, playerId: string) {
+  const seq = ++detailSeq, game = app.gameId
+  factDialogOpen.value = false; factOwner.value = ''; factDraftEpoch++; drawerOpen.value = false
+  openingDetail = true; openingDetailSeq = seq
   try {
-    await store.open(app.gameId, npcId, playerId)
+    await store.open(game, npcId, playerId)
+    if (seq !== detailSeq || game !== app.gameId || store.detail?.gameId !== game || store.detail?.npcId !== npcId || store.detail?.playerId !== playerId) return
     summaryDraft.value = store.detail?.summary || ''
     drawerOpen.value = true
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '记忆详情加载失败') }
+  } catch (error) { if (seq === detailSeq && game === app.gameId) ElMessage.error(error instanceof Error ? error.message : '记忆详情加载失败') }
+  finally { if (openingDetailSeq === seq) openingDetail = false }
 }
 
-async function reloadAfterConflict(error: unknown) {
+async function reloadAfterConflict(error: unknown, expected?: { seq: number; game: string; npcId: string; playerId: string }) {
   if (!(error instanceof ApiError) || error.status !== 409 || !store.detail) return false
+  if (expected && (expected.seq !== detailSeq || expected.game !== app.gameId || store.detail.gameId !== expected.game
+    || store.detail.npcId !== expected.npcId || store.detail.playerId !== expected.playerId)) return true
   ElMessage.warning('记忆版本已变化，已刷新为最新内容，请确认后重试')
   await openDetail(store.detail.npcId, store.detail.playerId)
   return true
 }
 
 async function saveSummary() {
+  const seq = detailSeq, game = app.gameId, target = store.detail && { npcId: store.detail.npcId, playerId: store.detail.playerId }
+  const payload = summaryDraft.value
   try {
-    await store.saveSummary(app.gameId, summaryDraft.value)
-    summaryDraft.value = store.detail?.summary || ''
+    const applied = await store.saveSummary(game, payload)
+    if (!applied) return
+    if (!target || seq !== detailSeq || game !== app.gameId || store.detail?.npcId !== target.npcId || store.detail?.playerId !== target.playerId) return
+    if (summaryDraft.value === payload) summaryDraft.value = store.detail?.summary || ''
     ElMessage.success('长期摘要已保存')
     await search()
   } catch (error) {
-    if (!await reloadAfterConflict(error)) ElMessage.error(error instanceof Error ? error.message : '摘要保存失败')
+    if (!await reloadAfterConflict(error, target ? { seq, game, ...target } : undefined)) ElMessage.error(error instanceof Error ? error.message : '摘要保存失败')
   }
 }
 
 function newFact() {
+  if (!store.detail) return
+  factDraftEpoch++
+  factOwner.value = `${store.detail.gameId}/${store.detail.npcId}/${store.detail.playerId}/${detailSeq}`
   editingFactId.value = ''
   Object.assign(factForm, { id: undefined, category: 'general', key: '', value: '', confidence: 0.8, pinned: false, sourceSessionId: null, expiresUtc: null })
   factDialogOpen.value = true
 }
 
 function editFact(fact: MemoryFact) {
+  if (!store.detail) return
+  factDraftEpoch++
+  factOwner.value = `${store.detail.gameId}/${store.detail.npcId}/${store.detail.playerId}/${detailSeq}`
   editingFactId.value = fact.id
   Object.assign(factForm, cloneJson(fact))
   factDialogOpen.value = true
@@ -88,44 +110,59 @@ function editFact(fact: MemoryFact) {
 
 async function saveFact() {
   if (!factForm.value?.trim()) return ElMessage.warning('事实内容不能为空')
+  const seq = detailSeq, game = app.gameId, target = store.detail && { npcId: store.detail.npcId, playerId: store.detail.playerId }
+  if (!target || factOwner.value !== `${store.detail?.gameId}/${target.npcId}/${target.playerId}/${seq}`) return
+  const draftEpoch = factDraftEpoch, factId = editingFactId.value || undefined
   try {
-    await store.saveFact(app.gameId, cloneJson(factForm), editingFactId.value || undefined)
-    factDialogOpen.value = false
-    ElMessage.success(editingFactId.value ? '事实已更新' : '事实已新增')
+    const applied = await store.saveFact(game, cloneJson(factForm), factId)
+    if (!applied) return
+    if (!target || seq !== detailSeq || draftEpoch !== factDraftEpoch || game !== app.gameId || store.detail?.npcId !== target.npcId || store.detail?.playerId !== target.playerId) return
+    factDialogOpen.value = false; factOwner.value = ''; factDraftEpoch++
+    ElMessage.success(factId ? '事实已更新' : '事实已新增')
     await search()
   } catch (error) {
-    if (!await reloadAfterConflict(error)) ElMessage.error(error instanceof Error ? error.message : '事实保存失败')
+    if (draftEpoch !== factDraftEpoch) return
+    if (!await reloadAfterConflict(error, target ? { seq, game, ...target } : undefined)) ElMessage.error(error instanceof Error ? error.message : '事实保存失败')
   }
 }
 
 async function removeFact(fact: MemoryFact) {
+  const seq = detailSeq, game = app.gameId, current = store.detail && { ...store.detail }
   try {
     await ElMessageBox.confirm(`确定删除事实“${fact.value.slice(0, 40)}”吗？`, '删除事实', { type: 'warning' })
-    await store.deleteFact(app.gameId, fact.id)
+    if (!current || seq !== detailSeq || game !== app.gameId || store.detail?.gameId !== game || store.detail?.npcId !== current.npcId || store.detail?.playerId !== current.playerId) return
+    const applied = await store.deleteFact(game, fact.id)
+    if (!applied) return
+    if (seq !== detailSeq || game !== app.gameId) return
     ElMessage.success('事实已删除')
     await search()
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
-    if (!await reloadAfterConflict(error)) ElMessage.error(error instanceof Error ? error.message : '删除失败')
+    if (!await reloadAfterConflict(error, current ? { seq, game, npcId: current.npcId, playerId: current.playerId } : undefined)) ElMessage.error(error instanceof Error ? error.message : '删除失败')
   }
 }
 
 async function togglePinned(fact: MemoryFact, pinned: boolean) {
+  const seq = detailSeq, game = app.gameId, target = store.detail && { npcId: store.detail.npcId, playerId: store.detail.playerId }
   try {
-    await store.saveFact(app.gameId, { ...cloneJson(fact), pinned }, fact.id)
+    const applied = await store.saveFact(game, { ...cloneJson(fact), pinned }, fact.id)
+    if (!applied) return
+    if (seq !== detailSeq || game !== app.gameId) return
     ElMessage.success(pinned ? '事实已固定' : '事实已取消固定')
   } catch (error) {
-    if (!await reloadAfterConflict(error)) ElMessage.error(error instanceof Error ? error.message : '固定状态更新失败')
+    if (!await reloadAfterConflict(error, target ? { seq, game, ...target } : undefined)) ElMessage.error(error instanceof Error ? error.message : '固定状态更新失败')
   }
 }
 
 async function summarize(sessionId: string) {
   if (!store.detail) return
+  const seq = detailSeq, game = app.gameId, target = { npcId: store.detail.npcId, playerId: store.detail.playerId }
   try {
-    const result = await memoryApi.summarize(app.gameId, store.detail.npcId, store.detail.playerId, sessionId)
+    const result = await memoryApi.summarize(game, target.npcId, target.playerId, sessionId)
+    if (seq !== detailSeq || game !== app.gameId || store.detail?.npcId !== target.npcId || store.detail?.playerId !== target.playerId) return
     ElMessage.success(`摘要任务已排队，待处理 ${result.pendingMessages} 条消息`)
-    await openDetail(store.detail.npcId, store.detail.playerId)
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '摘要任务提交失败') }
+    await openDetail(target.npcId, target.playerId)
+  } catch (error) { if (seq === detailSeq && game === app.gameId) ElMessage.error(error instanceof Error ? error.message : '摘要任务提交失败') }
 }
 
 async function exportMemory() {
@@ -136,21 +173,31 @@ async function exportMemory() {
 
 async function deleteMemory() {
   if (!store.detail) return
+  const seq = detailSeq
+  const game = app.gameId, target = { npcId: store.detail.npcId, playerId: store.detail.playerId, memoryVersion: store.detail.memoryVersion }
   try {
     await ElMessageBox.confirm(`将永久清空 ${detailTitle.value} 的长期摘要、全部事实，以及该玩家与 NPC 的所有 Session 消息和待摘要队列。此操作会写入审计。`, '清空整份记忆', { type: 'error', confirmButtonText: '确认清空' })
-    await memoryApi.deleteMemory(app.gameId, store.detail.npcId, store.detail.playerId, store.detail.memoryVersion)
+    if (seq !== detailSeq || game !== app.gameId || store.detail?.npcId !== target.npcId || store.detail?.playerId !== target.playerId) return
+    await memoryApi.deleteMemory(game, target.npcId, target.playerId, target.memoryVersion)
+    if (seq !== detailSeq || game !== app.gameId || store.detail?.npcId !== target.npcId || store.detail?.playerId !== target.playerId) return
     drawerOpen.value = false
     store.detail = null
     await search(true)
     ElMessage.success('长期记忆与关联 Session 已清空')
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
-    if (!await reloadAfterConflict(error)) ElMessage.error(error instanceof Error ? error.message : '清空失败')
+    if (!await reloadAfterConflict(error, { seq, game, npcId: target.npcId, playerId: target.playerId })) ElMessage.error(error instanceof Error ? error.message : '清空失败')
   }
 }
 
-watch(() => app.gameId, async () => { await search(true); await refreshQueue() })
+watch(drawerOpen, open => {
+  if (!open && !openingDetail) {
+    detailSeq++; factDraftEpoch++; factDialogOpen.value = false; factOwner.value = ''; summaryDraft.value = ''; store.closeDetail()
+  }
+})
+watch(() => app.gameId, async () => { detailSeq++; openingDetailSeq++; openingDetail = false; factDraftEpoch++; drawerOpen.value = false; factDialogOpen.value = false; factOwner.value = ''; summaryDraft.value = ''; store.closeDetail(); await search(true); await refreshQueue() })
 onMounted(async () => { await search(true); await refreshQueue() })
+onBeforeUnmount(() => { detailSeq++; factDraftEpoch++; store.invalidate() })
 </script>
 
 <template>
@@ -225,10 +272,15 @@ onMounted(async () => { await search(true); await refreshQueue() })
 
   <el-dialog v-model="factDialogOpen" :title="editingFactId ? '编辑结构化事实' : '新增结构化事实'" width="620px">
     <el-form label-position="top">
-      <div class="dialog-grid"><el-form-item label="类别"><el-select v-model="factForm.category" allow-create filterable><el-option v-for="item in ['player_profile','promise','quest','relationship','casual','general']" :key="item" :value="item" /></el-select></el-form-item><el-form-item label="唯一 Key"><el-input v-model="factForm.key" placeholder="例如 player.name，可留空" /></el-form-item></div>
+      <el-form-item label="类别"><el-select v-model="factForm.category" allow-create filterable><el-option v-for="item in ['player_profile','promise','quest','relationship','casual','general']" :key="item" :value="item" /></el-select></el-form-item>
       <el-form-item label="事实内容"><el-input v-model="factForm.value" type="textarea" :rows="4" maxlength="1000" show-word-limit /></el-form-item>
-      <div class="dialog-grid"><el-form-item label="可信度"><el-slider v-model="factForm.confidence" :min="0" :max="1" :step="0.05" show-input /></el-form-item><el-form-item label="来源 Session"><el-input v-model="factForm.sourceSessionId" clearable /></el-form-item></div>
-      <div class="dialog-grid"><el-form-item label="过期时间"><el-date-picker v-model="factForm.expiresUtc" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss.SSSZ" clearable /></el-form-item><el-form-item label="固定事实"><el-switch v-model="factForm.pinned" active-text="固定后不被自动淘汰" /></el-form-item></div>
+      <details class="fact-advanced">
+        <summary>高级选项</summary>
+        <p class="fact-advanced-note">折叠只影响显示；已填写或已保存的高级字段会保留并随保存提交。</p>
+        <div class="dialog-grid"><el-form-item label="唯一 Key"><el-input v-model="factForm.key" placeholder="例如 player.name，可留空" /></el-form-item><el-form-item label="可信度"><el-slider v-model="factForm.confidence" :min="0" :max="1" :step="0.05" show-input /></el-form-item></div>
+        <div class="dialog-grid"><el-form-item label="来源 Session"><el-input v-model="factForm.sourceSessionId" clearable /></el-form-item><el-form-item label="过期时间"><el-date-picker v-model="factForm.expiresUtc" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss.SSSZ" clearable /></el-form-item></div>
+        <el-form-item label="固定事实"><el-switch v-model="factForm.pinned" active-text="固定后不被自动淘汰" /></el-form-item>
+      </details>
     </el-form>
     <template #footer><el-button @click="factDialogOpen = false">取消</el-button><el-button type="primary" @click="saveFact">保存</el-button></template>
   </el-dialog>
@@ -244,4 +296,7 @@ onMounted(async () => { await search(true); await refreshQueue() })
 .detail-toolbar { display: flex; align-items: center; gap: 12px; color: var(--graphite); font-size: 12px; }
 .toolbar-spacer { flex: 1; }
 .dialog-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.fact-advanced { margin: 4px 0 18px; padding: 12px 16px; border: 1px solid var(--line); border-radius: var(--radius-inset); background: var(--surface-inset); }
+.fact-advanced summary { cursor: pointer; font-size: 13px; font-weight: 600; color: #35445d; user-select: none; }
+.fact-advanced-note { margin: 10px 0 0; color: var(--graphite); font-size: 12px; line-height: 1.5; }
 </style>

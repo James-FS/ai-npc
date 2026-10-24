@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { settingsApi, type LlmKeyStatus, type ModelConnectionInput, type ModelConnectionState } from '@/api/settings'
 
@@ -15,10 +15,19 @@ const editingHasKey = ref(false)
 const form = ref<ModelConnectionInput>(blank())
 const testResults = ref<Record<string, string>>({})
 const editingNpcSummary = ref<string | null>(null)
+// 页面统一刷新在编辑期间禁用：对话框或专用摘要草稿打开时都算草稿
+const hasDraft = computed(() => dialog.value || editingNpcSummary.value !== null)
+defineExpose({ load, hasDraft })
 
 function npcKey(gameId: string, npcId: string) { return `${gameId}/${npcId}` }
 function npcSummaryConnection(gameId: string, npcId: string) {
   return state.value?.bindings.npcSummary[npcKey(gameId, npcId)] || ''
+}
+function npcSummaryMode(row: { gameId?: string; npcId?: string; summaryMode?: string }) {
+  const connection = row.gameId && row.npcId ? npcSummaryConnection(row.gameId, row.npcId) : ''
+  const key = row.gameId && row.npcId ? npcKey(row.gameId, row.npcId) : ''
+  return (key && state.value?.bindings.npcSummaryMode?.[key]) || row.summaryMode
+    || (connection ? 'dedicated' : 'inherit')
 }
 function connectionName(id: string) {
   return state.value?.connections.find(item => item.id === id)?.name || '已分配的连接'
@@ -90,22 +99,39 @@ async function bind(scope: 'global_main' | 'npc_main' | 'npc_summary' | 'game_su
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : '分配失败'); return false }
   finally { saving.value = false }
 }
+async function setNpcSummaryMode(gameId: string, npcId: string, mode: 'inherit' | 'main' | 'dedicated') {
+  if (mode === 'dedicated') { editingNpcSummary.value = npcKey(gameId, npcId); return }
+  editingNpcSummary.value = null
+  saving.value = true
+  try {
+    state.value = await settingsApi.bindModelConnection('npc_summary', gameId, npcId,
+      null, mode)
+    emit('changed'); ElMessage.success('NPC 摘要模型选择已保存；下一次请求生效')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '选择保存失败') }
+  finally { saving.value = false }
+}
 async function saveNpcSummary(gameId: string, npcId: string, connectionId: string) {
-  if (await bind('npc_summary', gameId, npcId, connectionId)) editingNpcSummary.value = null
+  if (!state.value?.connections.some(item => item.id === connectionId)) return
+  saving.value = true
+  try {
+    state.value = await settingsApi.bindModelConnection('npc_summary', gameId, npcId, connectionId, 'dedicated')
+    editingNpcSummary.value = null; emit('changed'); ElMessage.success('摘要连接已保存')
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '保存失败') }
+  finally { saving.value = false }
 }
 onMounted(load)
 </script>
 
 <template>
   <div class="panel section-gap" v-loading="loading">
-    <div class="panel-head"><h3>模型连接配置</h3><div class="head-actions"><el-button @click="load">刷新</el-button><el-button type="primary" @click="openCreate">新增连接</el-button></div></div>
+    <div class="panel-head"><h3>模型连接配置</h3><div class="head-actions"><el-button type="primary" @click="openCreate">新增连接</el-button></div></div>
     <div class="panel-body">
       <p class="explain">填写连接名称、Base URL、模型 ID 和 API Key。当前使用 OpenAI 兼容 Chat Completions 格式。NPC 选用连接后由此处统一维护。</p>
       <el-table :data="state?.connections || []" empty-text="暂无连接配置，请先新增">
         <el-table-column label="名称" min-width="170"><template #default="{ row }"><strong>{{ row.name }}</strong><div class="subtle">{{ assignmentCount(row.id) ? `已分配 ${assignmentCount(row.id)} 处` : '尚未分配，不会生效' }}</div></template></el-table-column>
-        <el-table-column label="连接" min-width="270"><template #default="{ row }"><div class="mono">{{ row.baseUrl }}</div><div class="subtle">OpenAI 兼容 Chat Completions</div></template></el-table-column>
+        <el-table-column type="expand"><template #default="{ row }"><div class="mono">{{ row.baseUrl }}</div><div class="mono">API Key：{{ row.maskedKey || '未配置' }}</div><div class="subtle">OpenAI 兼容 Chat Completions</div></template></el-table-column>
         <el-table-column label="模型 ID" min-width="170"><template #default="{ row }"><div class="mono">{{ row.model }}</div></template></el-table-column>
-        <el-table-column label="API Key" min-width="150"><template #default="{ row }"><span class="mono">{{ row.maskedKey || '未配置' }}</span></template></el-table-column>
+        <el-table-column label="API Key" width="100"><template #default="{ row }"><span class="mono">{{ row.hasApiKey ? '已配置' : '继承' }}</span></template></el-table-column>
         <el-table-column label="操作" min-width="230"><template #default="{ row }"><el-button size="small" @click="openEdit(row)">编辑</el-button><el-button size="small" :loading="testing === row.id" @click="test(row.id)">测试</el-button><el-button size="small" type="danger" plain :disabled="saving" @click="remove(row.id, row.name)">删除</el-button><div v-if="testResults[row.id]" class="subtle">{{ testResults[row.id] }}</div></template></el-table-column>
       </el-table>
 
@@ -119,26 +145,29 @@ onMounted(load)
       <el-table :data="keyStatus?.npcs || []" empty-text="暂无 NPC">
         <el-table-column label="NPC" min-width="180"><template #default="{ row }"><strong>{{ row.displayName }}</strong><div class="subtle">{{ row.gameId }} / {{ row.npcId }}</div></template></el-table-column>
         <el-table-column label="对话主模型" min-width="300"><template #default="{ row }"><el-select :model-value="state?.bindings.npcMain[`${row.gameId}/${row.npcId}`] || ''" :disabled="saving" @change="bind('npc_main', row.gameId, row.npcId, String($event))"><el-option :label="state?.bindings.globalMain ? '沿用控制台默认连接' : '未分配（需绑定连接）'" value="" /><el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · 缺少 Key'}`" :value="item.id" :disabled="!item.hasApiKey" /></el-select></template></el-table-column>
-        <el-table-column label="记忆摘要模型" min-width="300">
+        <el-table-column label="记忆摘要模型" min-width="390">
           <template #default="{ row }">
-            <div v-if="editingNpcSummary === npcKey(row.gameId, row.npcId)" class="summary-editor">
-              <el-select :model-value="npcSummaryConnection(row.gameId, row.npcId)" :disabled="saving" placeholder="选择专用连接" @change="saveNpcSummary(row.gameId, row.npcId, String($event))">
-              <el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · Key 继承对话主模型'}`" :value="item.id" />
-              </el-select>
-              <el-button size="small" :disabled="saving" @click="editingNpcSummary = null">取消</el-button>
+            <el-select :model-value="npcSummaryMode(row)" :disabled="saving" @change="setNpcSummaryMode(row.gameId, row.npcId, $event as 'inherit' | 'main' | 'dedicated')"><el-option label="继承 Game 选择" value="inherit"/><el-option label="复用 NPC 对话主模型" value="main"/><el-option label="指定 NPC 专用连接" value="dedicated"/></el-select>
+            <div v-if="npcSummaryMode(row) === 'dedicated' || editingNpcSummary === npcKey(row.gameId, row.npcId)" class="summary-assignment">
+              <div v-if="editingNpcSummary === npcKey(row.gameId, row.npcId)" class="summary-editor">
+                <el-select :model-value="npcSummaryConnection(row.gameId, row.npcId)" :disabled="saving" placeholder="选择专用连接" @change="saveNpcSummary(row.gameId, row.npcId, String($event))">
+                  <el-option v-for="item in state?.connections || []" :key="item.id" :label="`${item.name} · ${item.model}${item.hasApiKey ? '' : ' · Key 继承对话主模型'}`" :value="item.id" />
+                </el-select>
+                <el-button size="small" :disabled="saving" @click="editingNpcSummary = null">取消</el-button>
+              </div>
+              <div v-else class="summary-assignment">
+                <span>{{ npcSummaryConnection(row.gameId, row.npcId) ? connectionName(npcSummaryConnection(row.gameId, row.npcId)) : '选择专用连接' }}</span>
+                <el-button size="small" :disabled="saving" @click="editingNpcSummary = npcKey(row.gameId, row.npcId)">{{ npcSummaryConnection(row.gameId, row.npcId) ? '修改' : '单独设置' }}</el-button>
+              </div>
             </div>
-            <div v-else class="summary-assignment">
-              <span>{{ npcSummaryConnection(row.gameId, row.npcId) ? connectionName(npcSummaryConnection(row.gameId, row.npcId)) : '沿用默认' }}</span>
-              <el-button size="small" :disabled="saving" @click="editingNpcSummary = npcKey(row.gameId, row.npcId)">{{ npcSummaryConnection(row.gameId, row.npcId) ? '修改' : '单独设置' }}</el-button>
-              <el-button v-if="npcSummaryConnection(row.gameId, row.npcId)" size="small" :disabled="saving" @click="saveNpcSummary(row.gameId, row.npcId, '')">恢复默认</el-button>
-            </div>
+            <div class="subtle">当前生效：{{ row.summaryDiagnostic || `${row.summarySource || 'main'} · ${row.summaryConnectionName || '沿用对话主模型'}` }}</div>
           </template>
         </el-table-column>
       </el-table>
     </div>
   </div>
 
-  <el-dialog v-model="dialog" :title="creating ? '新增模型连接' : `编辑连接：${form.name}`" width="580px">
+  <el-dialog v-model="dialog" :title="creating ? '新增模型连接' : `编辑连接：${form.name}`" width="min(580px, 94vw)">
     <el-form label-position="top">
       <el-form-item label="名称"><el-input v-model="form.name" placeholder="例如 主对话模型" /></el-form-item>
       <el-form-item label="Base URL"><el-input v-model="form.baseUrl" placeholder="例如 https://api.example.com/v1" /><div class="subtle">填写接口前缀；Server 自动追加 /chat/completions。</div></el-form-item>

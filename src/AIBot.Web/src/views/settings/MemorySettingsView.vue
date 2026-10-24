@@ -84,11 +84,7 @@ onMounted(load)
     <div class="panel">
       <div class="panel-head"><h3>控制台连接设置</h3></div>
       <div class="panel-body">
-        <el-form label-position="top">
-          <el-form-item label="Server Base URL"><el-input v-model="app.serverBase" placeholder="留空表示当前站点，例如 http://127.0.0.1:5000" /></el-form-item>
-          <el-form-item label="管理 Bearer Token"><el-input v-model="app.adminToken" type="password" show-password placeholder="本地未启用鉴权时可留空" /></el-form-item>
-          <el-form-item label="审计操作人"><el-input v-model="app.auditActor" maxlength="80" /></el-form-item>
-        </el-form>
+        <p>请使用顶栏「连接设置」编辑 Server 地址、管理 Token 和审计操作人。</p>
         <div class="hint-box">连接信息仅保存在当前浏览器 localStorage。服务端不会通过管理 API 返回管理 Token、模型密钥或数据路径。</div>
       </div>
     </div>

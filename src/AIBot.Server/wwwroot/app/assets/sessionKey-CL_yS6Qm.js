@@ -1,0 +1,1 @@
+function r(n,o,s,e){const i=new URL(n.trim()||location.origin,location.origin),t=`${i.origin}${i.pathname.replace(/\/+$/,"")}`;return`aibot.debug.session.v2.${JSON.stringify([t,o,s,e])}`}export{r as s};

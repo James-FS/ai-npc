@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import LayerStack from '@/components/LayerStack.vue'
@@ -8,12 +8,14 @@ import { useAppStore } from '@/stores/app'
 import { percentOf, rampClass, shareOf } from '@/utils/ramp'
 import type { PromptPreview, SimGameState } from '@/types/debug'
 
+import { sessionKey as scopedSessionKey } from '@/utils/sessionKey'
 const app = useAppStore()
+let epoch = 0
+onBeforeUnmount(() => { epoch++;  })
 const playerId = ref(localStorage.getItem('aibot.debug.playerId') || 'player-local')
-// 会话按 NPC 隔离，与流式对话页保持一致；旧的全局键已被对话页主动移除，
-// 因此这里不能再读取它，否则只要访问过对话页，本页 Session ID 就会永远为空。
+// 与对话页共用 Server/Game/NPC/Player 范围的会话选择；旧键保留但不猜测归属。
 const npcId = computed(() => app.currentNpcId)
-function sessionKey() { return `aibot.debug.sessionId.${npcId.value || 'none'}` }
+function sessionKey() { return scopedSessionKey(app.serverBase, app.gameId, npcId.value, playerId.value) }
 const sessionId = ref(localStorage.getItem(sessionKey()) || '')
 const stage = ref(0)
 const favorability = ref(30)
@@ -34,14 +36,16 @@ const budgetPercent = computed(() => percentOf(preview.value?.totalEstTokens ?? 
 function loadSessionId() {
   sessionId.value = localStorage.getItem(sessionKey()) || ''
 }
-watch(() => npcId.value, loadSessionId)
+watch(() => [app.serverBase, app.gameId, npcId.value, playerId.value], () => { epoch++; loading.value = false; preview.value = null; loadSessionId() }, { flush: 'sync' })
+watch(sessionId, () => { epoch++; preview.value = null; loading.value = false })
 
 async function load() {
   if (!npcId.value) return
+  const request = ++epoch
   loading.value = true
-  try { preview.value = await debugApi.previewPrompt(app.gameId, npcId.value, { playerId: playerId.value, sessionId: sessionId.value || undefined, simState: state.value }) }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : 'Prompt 预览失败') }
-  finally { loading.value = false }
+  try { const result = await debugApi.previewPrompt(app.gameId, npcId.value, { playerId: playerId.value, sessionId: sessionId.value || undefined, simState: state.value }); if (request === epoch) preview.value = result }
+  catch (error) { if (request === epoch) ElMessage.error(error instanceof Error ? error.message : 'Prompt 预览失败') }
+  finally { if (request === epoch) loading.value = false }
 }
 watch(() => [app.gameId, app.selectedNpcId], () => { preview.value = null })
 onMounted(() => { loadSessionId(); load() })

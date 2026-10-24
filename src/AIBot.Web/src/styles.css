@@ -6,11 +6,11 @@
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--paper); overflow-x: hidden; font-variant-numeric: tabular-nums; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--paper); font-variant-numeric: tabular-nums; }
 button, input, textarea { font: inherit; }
 a:focus-visible, button:focus-visible, [tabindex]:focus-visible, [role="button"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .app-shell { min-height: 100vh; display: flex; }
-.sidebar { width: 244px; flex: 0 0 244px; background: linear-gradient(180deg, var(--field) 0%, var(--field-deep) 100%); color: white; display: flex; flex-direction: column; padding: 18px 16px 14px; position: fixed; inset: 0 auto 0 0; z-index: var(--z-sidebar); overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.16) transparent; --focus-ring: #a9c4ff; }
+.sidebar { width: 200px; flex: 0 0 200px; background: linear-gradient(180deg, var(--field) 0%, var(--field-deep) 100%); color: white; display: flex; flex-direction: column; padding: 18px 16px 14px; position: fixed; inset: 0 auto 0 0; z-index: var(--z-sidebar); overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.16) transparent; --focus-ring: #a9c4ff; }
 .sidebar::-webkit-scrollbar { width: 6px; }
 .sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 3px; }
 .sidebar::-webkit-scrollbar-track { background: transparent; }
@@ -38,8 +38,8 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, [role="button"]
 .status-dot.is-unknown { background: #909399; box-shadow: 0 0 0 5px rgba(144,147,153,.14); }
 .status-dot.is-ready { background: #67c23a; box-shadow: 0 0 0 5px rgba(103,194,58,.14); }
 .status-dot.is-down { background: #f56c6c; box-shadow: 0 0 0 5px rgba(245,108,108,.14); }
-.main-shell { margin-left: 244px; min-height: 100vh; width: calc(100% - 244px); }
-.topbar { height: 86px; padding: 0 34px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,.9); border-bottom: 1px solid #e4e9f0; backdrop-filter: blur(12px); position: sticky; top: 0; z-index: var(--z-topbar); }
+.main-shell { margin-left: 200px; min-height: 100vh; width: calc(100% - 200px); }
+.topbar { min-height: 64px; padding: 0 34px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,.9); border-bottom: 1px solid #e4e9f0; backdrop-filter: blur(12px); position: sticky; top: 0; z-index: var(--z-topbar); }
 /* 顶栏只承载产品标识与全局上下文；页面标题由工作区的 h1 独占，避免同句说三遍。 */
 .topbar-brand { display: flex; flex-direction: column; gap: 2px; }
 .topbar-brand strong { font-size: 17px; letter-spacing: -.3px; }
@@ -74,7 +74,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, [role="button"]
 .filter-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 16px 18px; }
 /* 来源标记承载“继承/覆盖”这一真实区分，用中性色而非品牌蓝；
    原 #3b6fce on #edf3ff 仅 4.34:1（10px 小字不达标），中性后 6.20:1。 */
-.source-tag { font-size: 10px; border-radius: var(--radius-pill); padding: 2px 8px; background: #f0f2f6; color: #4e5a70; }
+.source-tag { font-size: 12px; border-radius: var(--radius-pill); padding: 2px 8px; background: #f0f2f6; color: #4e5a70; }
 .hint-box { padding: 13px 15px; border-radius: var(--radius-inset); background: var(--surface-inset); color: var(--graphite); font-size: 12px; line-height: 1.65; }
 .warning-box { background: #fff7e8; color: #996b14; border: 1px solid #f4dfb5; }
 .code-block { margin: 0; max-height: 360px; overflow: auto; background: var(--field-deep); color: #cbd7ed; padding: 14px; border-radius: var(--radius-inset); font: 12px/1.6 var(--font-mono); white-space: pre-wrap; }
@@ -155,3 +155,12 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible, [role="button"]
   }
 }
 
+
+.editor-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.editor-fields:disabled { opacity: .75; pointer-events: none; }
+.save-bar { position: sticky; bottom: 12px; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; margin-top: 24px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-card); box-shadow: 0 4px 24px #17233c18; }
+.save-bar span { margin-right: auto; }
+.main-shell, .workspace, .panel, .page-actions { min-width: 0; }
+.context-bar { flex-wrap: wrap; }
+.el-dialog { max-width: 94vw; }
+@media (max-width: 768px) { .topbar { height: auto; padding: 12px; gap: 12px; flex-wrap: wrap; } .context-bar { width: 100%; } .context-bar .el-select { max-width: 100%; flex: 1 1 120px; } }

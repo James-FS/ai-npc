@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { debugApi } from '@/api/debug'
@@ -7,6 +7,8 @@ import { useAppStore } from '@/stores/app'
 import type { DebugSession, DebugSessionDetail } from '@/types/debug'
 
 const app = useAppStore()
+let epoch = 0, loadRequest = 0, detailRequest = 0
+onBeforeUnmount(() => { epoch++; loadRequest++; detailRequest++ })
 const playerId = ref(localStorage.getItem('aibot.debug.playerId') || 'player-local')
 const sessions = ref<DebugSession[]>([])
 const detail = ref<DebugSessionDetail | null>(null)
@@ -15,15 +17,18 @@ const npcId = computed(() => app.currentNpcId)
 
 async function load() {
   if (!npcId.value) return
+  const request = ++loadRequest, version = epoch
   loading.value = true
-  try { sessions.value = (await debugApi.sessions(app.gameId, npcId.value, playerId.value)).sessions }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : '会话加载失败') }
-  finally { loading.value = false }
+  try { const result = await debugApi.sessions(app.gameId, npcId.value, playerId.value); if (request === loadRequest && version === epoch) sessions.value = result.sessions }
+  catch (error) { if (request === loadRequest && version === epoch) ElMessage.error(error instanceof Error ? error.message : '会话加载失败') }
+  finally { if (request === loadRequest && version === epoch) loading.value = false }
 }
 async function open(sessionId: string) {
   if (!npcId.value) return
-  try { detail.value = await debugApi.session(app.gameId, npcId.value, playerId.value, sessionId) }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : '会话详情加载失败') }
+  const request = ++detailRequest, version = epoch
+  detail.value = null
+  try { const result = await debugApi.session(app.gameId, npcId.value, playerId.value, sessionId); if (request === detailRequest && version === epoch) detail.value = result }
+  catch (error) { if (request === detailRequest && version === epoch) ElMessage.error(error instanceof Error ? error.message : '会话详情加载失败') }
 }
 function openRow(row: DebugSession) { void open(row.sessionId) }
 
@@ -36,10 +41,11 @@ function formatTime(iso?: string) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 async function remove(session: DebugSession) {
-  try { await ElMessageBox.confirm(`确认删除会话 ${session.sessionId}？这会删除短期消息和待摘要队列。`, '删除会话', { type: 'warning' }); await debugApi.deleteSession(app.gameId, session.npcId, playerId.value, session.sessionId); detail.value = null; await load(); ElMessage.success('会话已删除') }
-  catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '会话删除失败') }
+  const version = epoch, game = app.gameId, player = playerId.value, target = { ...session }
+  try { await ElMessageBox.confirm(`确认删除会话 ${session.sessionId}？这会删除短期消息和待摘要队列。`, '删除会话', { type: 'warning' }); if (version !== epoch) return; await debugApi.deleteSession(game, target.npcId, player, target.sessionId); if (version !== epoch) return; detail.value = null; await load(); ElMessage.success('会话已删除') }
+  catch (error) { if (version === epoch && error !== 'cancel' && error !== 'close') ElMessage.error(error instanceof Error ? error.message : '会话删除失败') }
 }
-watch(() => [app.gameId, app.selectedNpcId], load)
+watch(() => [app.serverBase, app.gameId, app.currentNpcId, playerId.value], () => { epoch++; detailRequest++; detail.value = null; sessions.value = []; loading.value = false; void load() }, { flush: 'sync' })
 onMounted(load)
 </script>
 

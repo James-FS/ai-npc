@@ -4,6 +4,7 @@ import type { EffectiveMemoryPolicy } from '@/types/memory'
 defineProps<{ value: EffectiveMemoryPolicy | null }>()
 
 const fields = [
+  ['summaryModel', '摘要模型选择'],
   ['shortTermTurns', '短期轮数'],
   ['summaryThreshold', '摘要阈值'],
   ['summaryTrigger', '摘要触发器'],
@@ -17,6 +18,7 @@ const fields = [
 ] as const
 
 function display(value: unknown) {
+  if (value && typeof value === 'object') return '生成参数独立管理'
   if (typeof value === 'boolean') return value ? '开启' : '关闭'
   return String(value ?? '—')
 }
@@ -28,7 +30,7 @@ function display(value: unknown) {
     <div v-if="value" class="panel-body effective-list">
       <div v-for="field in fields" :key="field[0]" class="effective-row">
         <span>{{ field[1] }}</span>
-        <strong>{{ display(value.policy[field[0]]) }}</strong>
+        <strong>{{ field[0] === 'summaryModel' ? (value.sources.summaryModel || 'main-model') : display(value.policy[field[0]]) }}</strong>
         <span class="source-tag">{{ value.sources[field[0]] || 'core' }}</span>
       </div>
       <el-alert v-if="value.adjustments.length" class="section-gap" type="warning" :closable="false">

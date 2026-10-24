@@ -12,6 +12,11 @@ export const useAppStore = defineStore('app', () => {
   const npcIds = ref<string[]>([])
   const selectedNpcId = ref(localStorage.getItem('aibot.web.npcId') || '')
   const loadingNpcs = ref(false)
+  let serverEpoch = 0
+  const connectionEpoch = ref(0)
+  watch([serverBase, adminToken], () => { serverEpoch++; connectionEpoch.value++; npcRequest++; npcIds.value = []; selectedNpcId.value = ''; gameIds.value = [gameId.value]; storageInfo.value = null; readiness.value = null; readinessReachable.value = null }, { flush: 'sync' })
+  let npcRequest = 0
+  let npcOwner = ''
   const storageInfo = ref<StorageInfo | null>(null)
   /// null = 尚未探测；探测失败或未就绪都为 false，避免状态灯谎报健康。
   const readiness = ref<Readiness | null>(null)
@@ -46,20 +51,28 @@ export const useAppStore = defineStore('app', () => {
   watch(selectedNpcId, value => localStorage.setItem('aibot.web.npcId', value))
 
   async function loadNpcs() {
+    const request = ++npcRequest
+    const requestedGame = gameId.value, epoch = serverEpoch
+    if (npcOwner !== requestedGame) { npcOwner = requestedGame; npcIds.value = []; selectedNpcId.value = '' }
     loadingNpcs.value = true
     try {
-      const result = await memoryApi.npcIds(gameId.value)
+      const result = await memoryApi.npcIds(requestedGame)
+      if (epoch !== serverEpoch || request !== npcRequest || requestedGame !== gameId.value) return
       npcIds.value = result.npcs
       if (!npcIds.value.includes(selectedNpcId.value)) selectedNpcId.value = npcIds.value[0] || ''
+    } catch (error) {
+      if (epoch === serverEpoch && request === npcRequest && requestedGame === gameId.value) throw error
     } finally {
-      loadingNpcs.value = false
+      if (request === npcRequest) loadingNpcs.value = false
     }
   }
 
   /// <summary>加载可选 Game 列表；接口不可用（旧版 Server）时静默保留当前值。</summary>
   async function loadGames() {
+    const epoch = serverEpoch
     try {
       const result = await memoryApi.games()
+      if (epoch !== serverEpoch) return
       const merged = new Set(result.games)
       merged.add(gameId.value)
       gameIds.value = [...merged]
@@ -68,18 +81,21 @@ export const useAppStore = defineStore('app', () => {
 
   /// <summary>加载存储模式展示信息；接口不可用（旧版 Server）时静默留空。</summary>
   async function loadStorage() {
-    try { storageInfo.value = await memoryApi.storage() } catch { /* 旧版 Server 无此接口 */ }
+    const epoch = serverEpoch
+    try { const result = await memoryApi.storage(); if (epoch === serverEpoch) storageInfo.value = result } catch { /* 旧版 Server 无此接口 */ }
   }
 
   /// <summary>探测 /api/ready；未就绪属正常结果，由 api 层取回响应体。</summary>
   async function loadReadiness() {
+    const epoch = serverEpoch
     const { reachable, data } = await memoryApi.readiness()
+    if (epoch !== serverEpoch) return
     readiness.value = data
     readinessReachable.value = reachable
   }
 
   return {
-    serverBase, adminToken, auditActor, gameId, gameIds, npcIds, selectedNpcId,
+    connectionEpoch, serverBase, adminToken, auditActor, gameId, gameIds, npcIds, selectedNpcId,
     currentNpcId, loadingNpcs, loadNpcs, loadGames, storageInfo, storageLabel, loadStorage,
     readiness, readinessReachable, health, healthLabel, loadReadiness,
   }

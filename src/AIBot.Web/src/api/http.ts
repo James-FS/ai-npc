@@ -58,7 +58,7 @@ export function apiErrorFromResponse(response: Response, payload: unknown) {
   const code = typeof record?.code === 'string' ? record.code : 'http_error'
   const requestIdHeader = response.headers.get('X-Request-Id') ?? undefined
   const requestId = typeof record?.requestId === 'string' ? record.requestId : requestIdHeader
-  const message = payloadMessage(payload) ?? defaultStatusMessage(status)
+  const message = (payloadMessage(payload) ?? defaultStatusMessage(status)) + ([401, 403].includes(status) ? '；请打开顶栏「连接设置」核对管理 Token' : '')
   const suffix = requestId ? `（请求 ID: ${requestId}）` : ''
   return new ApiError(status, `${message}${suffix}`, payload, code, requestId)
 }

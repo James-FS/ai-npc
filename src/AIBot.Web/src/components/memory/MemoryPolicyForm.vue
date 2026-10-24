@@ -88,33 +88,7 @@ function newSummaryModel(): ModelSettings {
   }
 }
 
-function summaryOverridden() {
-  if (!isNpc.value) return props.modelValue.summaryModel !== null
-  const npc = props.modelValue as MemorySettings
-  return npc.useMainSummaryModel !== null && npc.useMainSummaryModel !== undefined
-    || npc.summaryModel !== null && npc.summaryModel !== undefined
-}
-
-function toggleSummaryOverride(enabled: boolean) {
-  const next = cloneModel() as MemorySettings
-  if (!enabled) {
-    next.summaryModel = null
-    next.useMainSummaryModel = null
-  } else {
-    next.useMainSummaryModel = true
-    next.summaryModel = null
-  }
-  emit('update:modelValue', next)
-}
-
-function setSummaryMode(mode: 'main' | 'dedicated') {
-  const next = cloneModel() as MemorySettings
-  next.useMainSummaryModel = mode === 'main'
-  next.summaryModel = mode === 'dedicated' ? newSummaryModel() : null
-  emit('update:modelValue', next)
-}
-
-function toggleGameSummaryModel(enabled: boolean) {
+function toggleSummaryParameters(enabled: boolean) {
   setField('summaryModel', enabled ? newSummaryModel() : null)
 }
 
@@ -192,18 +166,15 @@ watch(() => props.modelValue.extensions, value => {
     </section>
 
     <section class="form-section">
-      <div class="form-section-title"><div><h4>摘要模型</h4><p>默认复用 NPC 主模型；也可以为摘要任务配置独立模型。</p></div></div>
+      <div class="form-section-title"><div><h4>摘要生成参数</h4><p>摘要连接只在「模型」入口选择；这里仅设置摘要生成参数覆盖。</p></div></div>
       <div v-if="isNpc" class="policy-row summary-model-row">
-        <div class="field-copy"><strong>覆盖摘要模型选择</strong><span>关闭时继承 Game 策略。</span></div>
-        <el-switch :model-value="summaryOverridden()" inline-prompt active-text="覆盖" inactive-text="继承" @update:model-value="toggleSummaryOverride(Boolean($event))" />
-        <el-radio-group :model-value="(modelValue as MemorySettings).useMainSummaryModel === false ? 'dedicated' : 'main'" :disabled="!summaryOverridden()" @update:model-value="setSummaryMode($event as 'main' | 'dedicated')">
-          <el-radio-button value="main">复用主模型</el-radio-button><el-radio-button value="dedicated">独立模型</el-radio-button>
-        </el-radio-group>
+        <div class="field-copy"><strong>覆盖摘要生成参数</strong><span>关闭时继承 Game 参数；摘要连接仍按模型连接页的选择生效。</span></div>
+        <el-switch :model-value="modelValue.summaryModel !== null && modelValue.summaryModel !== undefined" inline-prompt active-text="覆盖" inactive-text="继承" @update:model-value="toggleSummaryParameters(Boolean($event))" />
         <span class="source-tag">{{ source('summaryModel') }}</span>
       </div>
       <div v-else class="policy-row summary-model-row">
-        <div class="field-copy"><strong>使用独立摘要模型</strong><span>关闭时由运行端复用 NPC 主模型。</span></div>
-        <el-switch :model-value="modelValue.summaryModel !== null" @update:model-value="toggleGameSummaryModel(Boolean($event))" /><span class="source-tag">game</span>
+        <div class="field-copy"><strong>覆盖摘要生成参数</strong><span>关闭时沿用对话主模型的生成参数。</span></div>
+        <el-switch :model-value="modelValue.summaryModel !== null" @update:model-value="toggleSummaryParameters(Boolean($event))" /><span class="source-tag">game</span>
       </div>
       <div v-if="modelValue.summaryModel" class="model-grid">
         <p class="model-connection-note">摘要模型连接在「模型」入口统一分配；此处只调整生成参数。</p>

@@ -29,6 +29,8 @@ export interface NpcKeyStatus {
   npcSummaryKeyConfigured: boolean
   npcSummaryMaskedKey?: string | null
   summarySource: string
+  summaryMode?: 'inherit' | 'main' | 'dedicated'
+  summaryDiagnostic?: string | null
   summaryConnectionName?: string | null
   summaryConnectionScope?: 'npc' | 'game' | null
   summaryMainSource?: string | null
@@ -61,6 +63,7 @@ export interface ModelConnectionState {
     npcMain: Record<string, string>
     npcSummary: Record<string, string>
     gameSummary: Record<string, string>
+    npcSummaryMode?: Record<string, string>
   }
 }
 
@@ -83,9 +86,9 @@ export const settingsApi = {
   deleteModelConnection: (id: string) => request<ModelConnectionState>(
     `/api/admin/model-connections/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   bindModelConnection: (scope: 'global_main' | 'npc_main' | 'npc_summary' | 'game_summary', gameId: string | null,
-    npcId: string | null, connectionId: string | null) => request<ModelConnectionState>(
+    npcId: string | null, connectionId: string | null, summaryMode?: 'inherit' | 'main' | 'dedicated') => request<ModelConnectionState>(
       '/api/admin/model-connections/binding',
-      { method: 'PUT', body: JSON.stringify({ scope, gameId, npcId, connectionId }) }),
+      { method: 'PUT', body: JSON.stringify({ scope, gameId, npcId, connectionId, summaryMode }) }),
   testModelConnection: (id: string) => request<ModelConnectionTest>(
     `/api/admin/model-connections/${encodeURIComponent(id)}/test`, { method: 'POST' }),
   llmKeyStatus: () => request<LlmKeyStatus>('/api/admin/settings/llm'),

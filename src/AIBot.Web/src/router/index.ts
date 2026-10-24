@@ -18,7 +18,7 @@ const DebugStatsView = () => import('@/views/debug/DebugStatsView.vue')
 export default createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', redirect: '/settings/memory' },
+    { path: '/', redirect: '/debug/chat' },
     { path: '/settings/memory', component: MemorySettingsView, meta: { title: '系统记忆边界' } },
     { path: '/settings/llm', component: LlmSettingsView, meta: { title: '模型连接管理' } },
     { path: '/game/memory-policy', component: GameMemoryPolicyView, meta: { title: 'Game 记忆策略' } },

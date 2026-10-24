@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/PageHeader.vue'
 import { memoryApi } from '@/api/memory'
@@ -7,6 +7,8 @@ import { useAppStore } from '@/stores/app'
 import type { MigrationCandidate } from '@/types/memory'
 
 const app = useAppStore()
+let epoch = 0, loadRequest = 0, detailRequest = 0
+onBeforeUnmount(() => { epoch++; loadRequest++; detailRequest++ })
 const items = ref<MigrationCandidate[]>([])
 const loading = ref(false)
 const filterNpcId = ref('')
@@ -16,29 +18,33 @@ function rowKey(row: MigrationCandidate) { return `${row.npcId}/${row.sessionId}
 function formatDate(value: string) { return new Date(value).toLocaleString() }
 
 async function load() {
+  const request = ++loadRequest, version = epoch
   loading.value = true
   try {
     const result = await memoryApi.migrations(app.gameId, filterNpcId.value || undefined)
-    items.value = result.items
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : '迁移候选加载失败') }
-  finally { loading.value = false }
+    if (request === loadRequest && version === epoch) items.value = result.items
+  } catch (error) { if (request === loadRequest && version === epoch) ElMessage.error(error instanceof Error ? error.message : '迁移候选加载失败') }
+  finally { if (request === loadRequest && version === epoch) loading.value = false }
 }
 
 async function migrate(row: MigrationCandidate) {
+  const version = epoch, game = app.gameId, target = { ...row }
   const playerId = playerIds[rowKey(row)]?.trim()
   if (!playerId) return ElMessage.warning('请填写目标 playerId')
   try {
     await ElMessageBox.confirm(`把 Session ${row.sessionId} 的旧摘要与事实迁移到 ${row.npcId} × ${playerId}？`, '确认显式迁移', { type: 'warning' })
-    const result = await memoryApi.migrate(app.gameId, row.npcId, playerId, row.sessionId)
+    if (version !== epoch) return
+    const result = await memoryApi.migrate(game, target.npcId, playerId, target.sessionId)
+    if (version !== epoch) return
     ElMessage.success(result.migrated ? `迁移完成，长期记忆版本 ${result.memory.memoryVersion}` : '该 Session 已迁移，无需重复处理')
     await load()
   } catch (error) {
-    if (error === 'cancel' || error === 'close') return
+    if (version !== epoch || error === 'cancel' || error === 'close') return
     ElMessage.error(error instanceof Error ? error.message : '迁移失败')
   }
 }
 
-watch(() => app.gameId, load)
+watch(() => [app.serverBase, app.gameId, filterNpcId.value], () => { epoch++; items.value = []; Object.keys(playerIds).forEach(key => delete playerIds[key]); loading.value = false; void load() }, { flush: 'sync' })
 onMounted(load)
 </script>
 
