@@ -187,13 +187,8 @@ namespace AIBot.Server
                 }
             }
 
-            EffectiveMemoryPolicy effectiveMemory = MemoryPolicyService.Resolve(
-                gid, cfg, body.MemoryOverride, config);
-            try
-            {
-                ModelConnectionStore.ApplySummary(gid, body.NpcId, cfg.memory, effectiveMemory.policy,
-                    body.MemoryOverride);
-            }
+            EffectiveMemoryPolicy effectiveMemory;
+            try { effectiveMemory = MemoryPolicyService.Resolve(gid, cfg, body.MemoryOverride, config, strictSummary: true); }
             catch (InvalidOperationException ex)
             {
                 await ApiErrorWriter.WriteAsync(http, StatusCodes.Status422UnprocessableEntity,
@@ -371,7 +366,8 @@ namespace AIBot.Server
                         PlayerId = body.PlayerId,
                         SessionId = body.SessionId
                     }),
-                    backendFactory: settings => new HttpLlmBackend(settings, upstreamSession));
+                    backendFactory: settings => new SummaryParameterBackend(
+                        new HttpLlmBackend(settings, upstreamSession), settings));
                 var input = new AgentRunInput
                 {
                     Config = cfg,

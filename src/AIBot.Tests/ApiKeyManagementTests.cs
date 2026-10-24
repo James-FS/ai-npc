@@ -34,12 +34,18 @@ namespace AIBot.Tests
             var cachedRoot = typeof(DataStore).GetField("_cachedRoot",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             string originalCache = (string)cachedRoot.GetValue(null);
+            string originalConnectionsPath = ModelConnectionStore.OverridePath;
             string dataRoot = Path.Combine(_tempDir, "data");
             Directory.CreateDirectory(Path.Combine(dataRoot, "games"));
             try
             {
                 Environment.SetEnvironmentVariable("AIBOT_DATA_ROOT", dataRoot);
                 cachedRoot.SetValue(null, null);
+                ModelConnectionStore.OverridePath = Path.Combine(_tempDir, "model-connections.json");
+                Assert.True(ModelConnectionStore.Save(new ModelConnection { id = "main", name = "Main", baseUrl = "https://main.example/v1", model = "main-model", apiKey = "npc-main-key-0123456789" }, false, true));
+                Assert.True(ModelConnectionStore.Save(new ModelConnection { id = "summary", name = "Game Summary", baseUrl = "https://summary.example/v1", model = "summary-model", apiKey = "game-summary-key-0123456789" }, false, true));
+                Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "npc_main", gameId = "demo", npcId = "tester", connectionId = "main" }));
+                Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "game_summary", gameId = "demo", connectionId = "summary" }));
                 var gamePolicy = AIBot.Core.Memory.MemoryPolicy.Defaults();
                 gamePolicy.summaryModel = new ModelSettings { apiKey = "game-summary-key-0123456789" };
                 Assert.True(DataStore.SaveMemoryPolicy("demo", gamePolicy));
@@ -56,7 +62,7 @@ namespace AIBot.Tests
                 Assert.DoesNotContain("npc-main-key-0123456789", json);
                 Assert.DoesNotContain("game-summary-key-0123456789", json);
                 var row = (Newtonsoft.Json.Linq.JObject)snapshot["npcs"][0];
-                Assert.Equal("npc", (string)row["mainSource"]);
+                Assert.Equal("connection", (string)row["mainSource"]);
                 Assert.Equal("game", (string)row["summarySource"]);
                 Assert.Equal("npc-mai*****6789", (string)row["mainMaskedKey"]);
                 Assert.Equal("game-su*****6789", (string)row["summaryMaskedKey"]);
@@ -65,6 +71,7 @@ namespace AIBot.Tests
             {
                 Environment.SetEnvironmentVariable("AIBOT_DATA_ROOT", originalDataRoot);
                 cachedRoot.SetValue(null, originalCache);
+                ModelConnectionStore.OverridePath = originalConnectionsPath;
             }
         }
 

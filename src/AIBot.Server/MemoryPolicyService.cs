@@ -11,12 +11,55 @@ namespace AIBot.Server
     public static class MemoryPolicyService
     {
         public static EffectiveMemoryPolicy Resolve(string gameId, AgentConfigDto npc,
-            MemoryPolicyOverrides sessionOverride, IConfiguration configuration)
+            MemoryPolicyOverrides sessionOverride, IConfiguration configuration, bool strictSummary = false)
         {
-            MemoryPolicy gamePolicy = DataStore.LoadMemoryPolicy(gameId);
+            MemoryPolicy gamePolicy = DataStore.LoadMemoryPolicy(gameId)?.Clone();
+            SanitizeSummaryParameters(gamePolicy?.summaryModel);
             MemorySettings npcPolicy = npc?.memory ?? new MemorySettings();
-            return MemoryPolicyResolver.Resolve(gamePolicy, npcPolicy, sessionOverride,
+            // useMainSummaryModel is a connection selection. Resolve only generation parameters here;
+            // Server applies the central connection selection once below.
+            var npcParameters = JsonConvert.DeserializeObject<MemorySettings>(JsonConvert.SerializeObject(npcPolicy));
+            npcParameters.useMainSummaryModel = null;
+            SanitizeSummaryParameters(npcParameters.summaryModel);
+            var sessionParameters = sessionOverride == null ? null
+                : JsonConvert.DeserializeObject<MemoryPolicyOverrides>(JsonConvert.SerializeObject(sessionOverride));
+            if (sessionParameters != null)
+            {
+                sessionParameters.useMainSummaryModel = null;
+                SanitizeSummaryParameters(sessionParameters.summaryModel);
+            }
+            EffectiveMemoryPolicy effective = MemoryPolicyResolver.Resolve(gamePolicy, npcParameters, sessionParameters,
                 LoadLimits(configuration));
+            try
+            {
+                ModelSettings main = ModelConnectionStore.ResolveMain(gameId, npc?.npcId, npc?.model);
+                SummaryModelResolution resolution = ModelConnectionStore.ResolveSummary(gameId, npc?.npcId,
+                    npcPolicy, effective.policy, main, sessionOverride);
+                effective.policy.summaryModel = resolution.settings;
+                effective.sources["summaryModel"] = resolution.source == "invalid" ? "invalid-model-connection"
+                    : resolution.source == "main" ? "main: " + resolution.connectionName
+                    : resolution.source + ": " + resolution.connectionName;
+                if (resolution.diagnostic != null)
+                {
+                    if (strictSummary) throw new InvalidOperationException(resolution.diagnostic);
+                    effective.adjustments.Add("摘要模型选择异常：" + resolution.diagnostic);
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                if (strictSummary) throw;
+                effective.sources["summaryModel"] = "invalid-model-connection";
+                effective.adjustments.Add("摘要模型选择异常：" + ex.Message);
+            }
+            return effective;
+        }
+
+        private static void SanitizeSummaryParameters(ModelSettings settings)
+        {
+            if (settings == null) return;
+            settings.baseUrl = null;
+            settings.model = null;
+            settings.apiKey = null;
         }
 
         public static MemoryPolicyLimits LoadLimits(IConfiguration configuration)

@@ -98,6 +98,8 @@ namespace AIBot.Tests
             Assert.True(ModelConnectionStore.Save(NewConnection("summary"), false, true));
             Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest
             { scope = "npc_summary", gameId = "demo", npcId = "smith", connectionId = "summary" }));
+            Assert.Equal("summary", ModelConnectionStore.Snapshot().npcSummary["demo/smith"]);
+            Assert.Equal("dedicated", ModelConnectionStore.Snapshot().npcSummaryMode["demo/smith"]);
             var custom = new ModelSettings { temperature = 0.15f, maxTokens = 900, timeoutMs = 5000 };
             var policy = MemoryPolicy.Defaults();
             policy.summaryModel = custom;
@@ -110,9 +112,13 @@ namespace AIBot.Tests
             Assert.Equal(900, policy.summaryModel.maxTokens);
 
             policy = MemoryPolicy.Defaults();
+            policy.summaryModel = new ModelSettings { temperature = 0.33f };
+            Assert.True(ModelConnectionStore.Save(NewConnection("main"), false, true));
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "global_main", connectionId = "main" }));
             Assert.False(ModelConnectionStore.ApplySummary("demo", "smith", new MemorySettings(), policy,
                 new MemoryPolicyOverrides { useMainSummaryModel = true }));
-            Assert.Null(policy.summaryModel);
+            Assert.Equal(0.33f, policy.summaryModel.temperature);
+            Assert.Equal("example-model", policy.summaryModel.model);
         }
 
         [Fact]
@@ -160,13 +166,16 @@ namespace AIBot.Tests
         }
 
         [Fact]
-        public void DedicatedSummaryParametersWithoutSummaryBindingFailClearly()
+        public void SummaryParameterOverrideDoesNotChooseOrRequireAConnection()
         {
+            Assert.True(ModelConnectionStore.Save(NewConnection("main"), false, true));
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "global_main", connectionId = "main" }));
             var policy = MemoryPolicy.Defaults();
             policy.summaryModel = new ModelSettings { temperature = 0.3f };
-            InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-                ModelConnectionStore.ApplySummary("demo", "smith", new MemorySettings(), policy));
-            Assert.Contains("摘要模型参数已配置，但未分配专用摘要连接", error.Message);
+            Assert.False(ModelConnectionStore.ApplySummary("demo", "smith", new MemorySettings(), policy));
+            Assert.Equal(0.3f, policy.summaryModel.temperature);
+            Assert.Equal("https://example.com/v1", policy.summaryModel.baseUrl);
+            Assert.Equal("profile-key-0123456789", policy.summaryModel.apiKey);
         }
 
         [Fact]
@@ -178,13 +187,12 @@ namespace AIBot.Tests
             var mainDefaults = new ModelSettings { temperature = 0.17f, maxTokens = 4321, timeoutMs = 7654 };
             var policy = MemoryPolicy.Defaults();
 
-            Assert.False(ModelConnectionStore.ApplySummary("demo", "smith", new MemorySettings(), policy));
-            Assert.Null(policy.summaryModel);
-            ModelSettings background = MemorySummaryQueue.ResolveSummarySettings(policy.summaryModel,
-                ModelConnectionStore.ResolveMain("demo", "smith", mainDefaults));
-            Assert.Equal(0.17f, background.temperature);
-            Assert.Equal(4321, background.maxTokens);
-            Assert.Equal(7654, background.timeoutMs);
+            SummaryModelResolution resolved = ModelConnectionStore.ResolveSummary("demo", "smith",
+                new MemorySettings(), policy, ModelConnectionStore.ResolveMain("demo", "smith", mainDefaults));
+            policy.summaryModel = resolved.settings;
+            Assert.Equal(0.17f, policy.summaryModel.temperature);
+            Assert.Equal(4321, policy.summaryModel.maxTokens);
+            Assert.Equal(7654, policy.summaryModel.timeoutMs);
         }
 
         [Fact]
@@ -250,6 +258,77 @@ namespace AIBot.Tests
             Assert.True(ModelConnectionStore.ApplySummary("demo", "smith", new MemorySettings { inheritGameDefaults = true }, policy));
             Assert.Equal("https://summary.example/v2", policy.summaryModel.baseUrl);
             Assert.Equal("profile-key-0123456789", policy.summaryModel.apiKey);
+        }
+
+        [Fact]
+        public void CentralSummaryModeWinsOverLegacyFlagsAndParametersDoNotSelectConnections()
+        {
+            Assert.True(ModelConnectionStore.Save(NewConnection("main"), false, true));
+            Assert.True(ModelConnectionStore.Save(NewConnection("game"), false, true));
+            Assert.True(ModelConnectionStore.Save(NewConnection("npc", "npc-summary-key-0123456789"), false, true));
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "global_main", connectionId = "main" }));
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "game_summary", gameId = "demo", connectionId = "game" }));
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "npc_summary", gameId = "demo", npcId = "smith", connectionId = "npc", summaryMode = "dedicated" }));
+
+            var legacy = new MemorySettings { inheritGameDefaults = true, useMainSummaryModel = true };
+            var policy = MemoryPolicy.Defaults();
+            policy.summaryModel = new ModelSettings { temperature = 0.2f, maxTokens = 777, timeoutMs = 3333 };
+            Assert.True(ModelConnectionStore.ApplySummary("demo", "smith", legacy, policy));
+            Assert.Equal("npc-summary-key-0123456789", policy.summaryModel.apiKey);
+            Assert.Equal(0.2f, policy.summaryModel.temperature);
+            Assert.Equal(777, policy.summaryModel.maxTokens);
+
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "npc_summary", gameId = "demo", npcId = "smith", connectionId = null, summaryMode = "main" }));
+            policy = MemoryPolicy.Defaults();
+            policy.summaryModel = new ModelSettings { temperature = 0.27f, maxTokens = 901, timeoutMs = 7012 };
+            Assert.False(ModelConnectionStore.ApplySummary("demo", "smith", legacy, policy));
+            Assert.Equal(0.27f, policy.summaryModel.temperature);
+            Assert.Equal(901, policy.summaryModel.maxTokens);
+            SummaryModelResolution sessionDedicated = ModelConnectionStore.ResolveSummary("demo", "smith", legacy,
+                policy, null, new MemoryPolicyOverrides { useMainSummaryModel = false });
+            Assert.Equal("invalid", sessionDedicated.source);
+            Assert.Contains("未分配有效摘要连接", sessionDedicated.diagnostic);
+
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "npc_summary", gameId = "demo", npcId = "smith", connectionId = null, summaryMode = "inherit" }));
+            policy = MemoryPolicy.Defaults();
+            Assert.True(ModelConnectionStore.ApplySummary("demo", "smith", new MemorySettings { inheritGameDefaults = true, useMainSummaryModel = true }, policy));
+            Assert.Equal("profile-key-0123456789", policy.summaryModel.apiKey);
+
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "npc_summary", gameId = "demo", npcId = "smith", connectionId = null }));
+            Assert.Equal("inherit", ModelConnectionStore.Snapshot().npcSummaryMode["demo/smith"]);
+            SummaryModelResolution sessionError = ModelConnectionStore.ResolveSummary("demo", "smith",
+                new MemorySettings { inheritGameDefaults = false }, MemoryPolicy.Defaults(), null,
+                new MemoryPolicyOverrides { useMainSummaryModel = false });
+            Assert.Contains("未分配有效摘要连接", sessionError.diagnostic);
+        }
+
+        [Fact]
+        public void LegacyUseMainFlagStillWinsBeforeTheNpcRevisitsCentralChoice()
+        {
+            Assert.True(ModelConnectionStore.Save(NewConnection("main", "main-key-0123456789"), false, true));
+            Assert.True(ModelConnectionStore.Save(NewConnection("summary", "summary-key-0123456789"), false, true));
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest { scope = "global_main", connectionId = "main" }));
+            var document = ModelConnectionStore.Snapshot();
+            document.npcSummary["demo/smith"] = "summary";
+            ModelConnectionStore.SaveMigration(document);
+
+            var policy = MemoryPolicy.Defaults();
+            SummaryModelResolution result = ModelConnectionStore.ResolveSummary("demo", "smith",
+                new MemorySettings { inheritGameDefaults = true, useMainSummaryModel = true }, policy,
+                ModelConnectionStore.ResolveMain("demo", "smith", null));
+            Assert.Equal("main", result.source);
+            Assert.Equal("main", result.connectionName);
+            Assert.Equal("main-key-0123456789", result.settings.apiKey);
+        }
+
+        [Fact]
+        public void ExplicitDedicatedModeWithoutBindingReturnsActionableError()
+        {
+            Assert.True(ModelConnectionStore.SetBinding(new ModelConnectionBindingRequest
+            { scope = "npc_summary", gameId = "demo", npcId = "smith", summaryMode = "dedicated" }));
+            InvalidOperationException ex = Assert.Throws<InvalidOperationException>(() =>
+                ModelConnectionStore.ApplySummary("demo", "smith", new MemorySettings(), MemoryPolicy.Defaults()));
+            Assert.Contains("未分配有效摘要连接", ex.Message);
         }
 
         [Fact]

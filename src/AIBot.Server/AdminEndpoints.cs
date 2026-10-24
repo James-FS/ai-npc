@@ -548,14 +548,22 @@ namespace AIBot.Server
                     string ownSummaryKey = npc.memory?.summaryModel?.apiKey;
                     EffectiveMemoryPolicy effective = MemoryPolicyService.Resolve(gid, npc, null, config);
                     string effectiveSummaryKey = effective.policy.summaryModel?.apiKey;
-                    connectionDoc.npcSummary.TryGetValue(pair, out string summaryConnectionId);
-                    if (summaryConnectionId == null && npc.memory?.useMainSummaryModel != true
-                        && npc.memory?.summaryModel == null && npc.memory?.inheritGameDefaults == true)
-                        connectionDoc.gameSummary.TryGetValue(gid, out summaryConnectionId);
-                    ModelConnection summaryConnection = connectionDoc.connections.FirstOrDefault(x => x.id == summaryConnectionId);
-                    string policySource = effective.sources.TryGetValue("summaryModel", out string source)
-                        ? source : "core";
-                    bool hasDedicatedSummaryKey = !string.IsNullOrWhiteSpace(effectiveSummaryKey);
+                    connectionDoc.npcSummaryMode.TryGetValue(pair, out string summaryMode);
+                    string resolvedSummarySource = effective.sources.TryGetValue("summaryModel", out string source) ? source : "main";
+                    string sourceKind = resolvedSummarySource.StartsWith("npc: ", StringComparison.Ordinal) ? "npc"
+                        : resolvedSummarySource.StartsWith("game: ", StringComparison.Ordinal) ? "game"
+                        : resolvedSummarySource.StartsWith("main: ", StringComparison.Ordinal) ? "main"
+                        : resolvedSummarySource == "invalid-model-connection" ? "invalid" : "main";
+                    string resolvedConnectionName = sourceKind == "npc" || sourceKind == "game" || sourceKind == "main"
+                        ? resolvedSummarySource.Substring(resolvedSummarySource.IndexOf(": ", StringComparison.Ordinal) + 2) : null;
+                    string selectedSummaryId = sourceKind == "npc" ? connectionDoc.npcSummary.GetValueOrDefault(pair)
+                        : sourceKind == "game" ? connectionDoc.gameSummary.GetValueOrDefault(gid)
+                        : sourceKind == "main" ? mainConnection?.id : null;
+                    ModelConnection summaryConnection = connectionDoc.connections.FirstOrDefault(x => x.id == selectedSummaryId);
+                    string uiSummaryMode = summaryMode ?? (npc.memory?.useMainSummaryModel == true ? "main"
+                        : npc.memory?.useMainSummaryModel == false ? "dedicated"
+                        : connectionDoc.npcSummary.ContainsKey(pair) ? "dedicated"
+                        : npc.memory?.inheritGameDefaults == true ? "inherit" : "main");
                     npcs.Add(new JObject
                     {
                         ["gameId"] = gid,
@@ -569,14 +577,13 @@ namespace AIBot.Server
                         ["npcSummaryModel"] = npc.memory?.summaryModel != null,
                         ["npcSummaryKeyConfigured"] = !string.IsNullOrWhiteSpace(ownSummaryKey),
                         ["npcSummaryMaskedKey"] = MaskKey(ownSummaryKey),
-                        ["summarySource"] = summaryConnection != null ? "connection"
-                            : hasDedicatedSummaryKey ? policySource : "main",
-                        ["summaryConnectionName"] = summaryConnection?.name,
-                        ["summaryConnectionScope"] = summaryConnection == null ? null
-                            : connectionDoc.npcSummary.ContainsKey(pair) ? "npc" : "game",
-                        ["summaryMainSource"] = summaryConnection != null || hasDedicatedSummaryKey ? null : mainSource,
-                        ["summaryMaskedKey"] = MaskKey(summaryConnection != null ? summaryConnection.apiKey
-                            : hasDedicatedSummaryKey ? effectiveSummaryKey : effectiveMainKey)
+                        ["summaryMode"] = uiSummaryMode,
+                        ["summarySource"] = sourceKind,
+                        ["summaryDiagnostic"] = sourceKind == "invalid" ? effective.adjustments.LastOrDefault() : null,
+                        ["summaryConnectionName"] = resolvedConnectionName,
+                        ["summaryConnectionScope"] = sourceKind == "npc" || sourceKind == "game" ? sourceKind : null,
+                        ["summaryMainSource"] = sourceKind == "main" ? mainSource : null,
+                        ["summaryMaskedKey"] = MaskKey(effectiveSummaryKey ?? summaryConnection?.apiKey ?? effectiveMainKey)
                     });
                 }
             }

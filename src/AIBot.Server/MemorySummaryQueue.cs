@@ -311,9 +311,8 @@ namespace AIBot.Server
             cfg.memory = cfg.memory ?? new MemorySettings();
             cfg.model = ModelConnectionStore.ResolveMain(job.GameId, job.NpcId, cfg.model);
 
-            EffectiveMemoryPolicy effective = MemoryPolicyService.Resolve(job.GameId, cfg, null, _configuration);
+            EffectiveMemoryPolicy effective = MemoryPolicyService.Resolve(job.GameId, cfg, null, _configuration, strictSummary: true);
             MemoryPolicy policy = effective.policy;
-            ModelConnectionStore.ApplySummary(job.GameId, job.NpcId, cfg.memory, policy);
             if (policy.memoryScope != MemoryPolicyValues.ScopePlayerNpc
                 || (!policy.backgroundSummarization && !job.Force)) return;
 
@@ -349,8 +348,8 @@ namespace AIBot.Server
                     JToken before = JToken.FromObject(existing);
                     ModelSettings settings = ResolveSummarySettings(policy.summaryModel, cfg.model);
                     // 摘要按玩家范围独立成一会话标识：避免与聊天共用缓存前缀而互相污染
-                    var backend = new HttpLlmBackend(settings, LlmRequestSession.For("summarize",
-                        job.GameId, job.NpcId, job.PlayerId));
+                    var backend = new SummaryParameterBackend(new HttpLlmBackend(settings,
+                        LlmRequestSession.For("summarize", job.GameId, job.NpcId, job.PlayerId)), settings);
                     PlayerMemorySummaryResult summarized = await MemorySummarizer.RunStructuredAsync(
                         backend, settings, existing, snapshot, policy.maxFacts, job.SessionId, _log, ct,
                         policy, usage => ChatLogService.Record(job.GameId, new ChatLogService.ChatLogEntry

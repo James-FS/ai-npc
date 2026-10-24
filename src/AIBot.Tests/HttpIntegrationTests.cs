@@ -120,6 +120,75 @@ namespace AIBot.Tests
         }
 
         [Fact]
+        public async Task SummaryBindingAndPolicySaveResolveToTheSameConcreteSettingsUsedByChat()
+        {
+            await using var host = await RunningServer.StartAsync();
+            host.Client.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "admin");
+
+            using var create = new StringContent(new JObject
+            {
+                ["connection"] = new JObject
+                {
+                    ["id"] = "summary-special", ["name"] = "Summary Special",
+                    ["baseUrl"] = host.UpstreamBase + "/summary/v1", ["apiFormat"] = "openai_chat_completions",
+                    ["model"] = "summary-not-deepseek", ["apiKey"] = "summary-test-key-0123456789"
+                }
+            }.ToString(Formatting.None), Encoding.UTF8, "application/json");
+            var created = await host.Client.PostAsync("/api/admin/model-connections", create);
+            Assert.Equal(HttpStatusCode.OK, created.StatusCode);
+            string summaryConnectionId = (string)JObject.Parse(await created.Content.ReadAsStringAsync())["connections"].Last["id"];
+
+            using var binding = new StringContent(new JObject
+            {
+                ["scope"] = "npc_summary", ["gameId"] = "other", ["npcId"] = "npc",
+                ["connectionId"] = summaryConnectionId, ["summaryMode"] = "dedicated"
+            }.ToString(Formatting.None), Encoding.UTF8, "application/json");
+            Assert.Equal(HttpStatusCode.OK, (await host.Client.PutAsync("/api/admin/model-connections/binding", binding)).StatusCode);
+
+            using var policy = new StringContent(new JObject
+            {
+                ["inheritGameDefaults"] = false, ["useMainSummaryModel"] = true,
+                ["shortTermTurns"] = 1, ["summaryThreshold"] = 1, ["memoryScope"] = "player_npc",
+                ["maxFacts"] = 8, ["rememberPlayerProfile"] = true, ["rememberPromises"] = true,
+                ["rememberQuestEvents"] = true, ["rememberCasualChat"] = false, ["backgroundSummarization"] = false,
+                ["summaryModel"] = new JObject { ["temperature"] = 0.23, ["maxTokens"] = 877, ["timeoutMs"] = 6543 }
+            }.ToString(Formatting.None), Encoding.UTF8, "application/json");
+            Assert.Equal(HttpStatusCode.OK, (await host.Client.PutAsync("/api/games/other/npcs/npc/memory-policy", policy)).StatusCode);
+            JObject preview = JObject.Parse(await host.Client.GetStringAsync("/api/games/other/npcs/npc/memory-policy"));
+            Assert.Equal(host.UpstreamBase + "/summary/v1", (string)preview["effective"]["policy"]["summaryModel"]["baseUrl"]);
+            Assert.Equal("summary-not-deepseek", (string)preview["effective"]["policy"]["summaryModel"]["model"]);
+            Assert.Equal(string.Empty, (string)preview["effective"]["policy"]["summaryModel"]["apiKey"]);
+            Assert.Equal(0.23, (double)preview["effective"]["policy"]["summaryModel"]["temperature"]);
+            Assert.Equal("npc: Summary Special", (string)preview["effective"]["sources"]["summaryModel"]);
+
+            Assert.Equal(HttpStatusCode.OK, (await host.Chat("client", "summary-routing-1")).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await host.Chat("client", "summary-routing-2")).StatusCode);
+            JObject summaryCall = host.Requests.Last(request => (string)request["path"] == "/summary/v1/chat/completions");
+            Assert.Equal("summary-not-deepseek", (string)summaryCall["body"]["model"]);
+            Assert.Equal(0.23, (double)summaryCall["body"]["temperature"]);
+            Assert.Equal(877, (int)summaryCall["body"]["max_tokens"]);
+            Assert.Equal("Bearer summary-test-key-0123456789", (string)summaryCall["authorization"]);
+            JObject mainCall = host.Requests.First(request => (string)request["path"] == "/v1/chat/completions");
+            Assert.Equal("primary-not-deepseek", (string)mainCall["body"]["model"]);
+            Assert.Equal("Bearer test-key", (string)mainCall["authorization"]);
+
+            using var missingBinding = new StringContent(new JObject
+            {
+                ["scope"] = "npc_summary", ["gameId"] = "other", ["npcId"] = "npc",
+                ["connectionId"] = null, ["summaryMode"] = "dedicated"
+            }.ToString(Formatting.None), Encoding.UTF8, "application/json");
+            Assert.Equal(HttpStatusCode.OK, (await host.Client.PutAsync("/api/admin/model-connections/binding", missingBinding)).StatusCode);
+            JObject diagnostic = JObject.Parse(await host.Client.GetStringAsync("/api/games/other/npcs/npc/memory-policy"));
+            Assert.Equal("invalid-model-connection", (string)diagnostic["effective"]["sources"]["summaryModel"]);
+            Assert.Contains(((JArray)diagnostic["effective"]["adjustments"]).Values<string>(),
+                item => item.Contains("未分配有效摘要连接", StringComparison.Ordinal));
+            HttpResponseMessage invalidChat = await host.Chat("client", "summary-routing-missing");
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, invalidChat.StatusCode);
+            Assert.Equal(3, host.UpstreamCalls);
+        }
+
+        [Fact]
         public async Task UnreadableSessionNeverRunsModelOrOverwritesRequestHistory()
         {
             await using var host = await RunningServer.StartAsync();
@@ -233,8 +302,10 @@ namespace AIBot.Tests
             public string Root { get; } = Path.Combine(Path.GetTempPath(), "aibot-http-" + Guid.NewGuid().ToString("N"));
             public HttpClient Client { get; private set; }
             public ConcurrentQueue<string> Scripts { get; } = new ConcurrentQueue<string>();
+            public ConcurrentQueue<JObject> Requests { get; } = new ConcurrentQueue<JObject>();
             public int UpstreamCalls;
             public bool RejectUsageOption;
+            public string UpstreamBase { get; private set; }
             private WebApplication _upstream;
             private Process _process;
 
@@ -247,35 +318,42 @@ namespace AIBot.Tests
                     builder.Logging.ClearProviders();
                     builder.WebHost.UseUrls("http://127.0.0.1:0");
                     host._upstream = builder.Build();
-                    host._upstream.MapPost("/v1/chat/completions", async (HttpContext http) =>
-                    {
-                        System.Threading.Interlocked.Increment(ref host.UpstreamCalls);
-                        using var reader = new StreamReader(http.Request.Body);
-                        JObject request = JObject.Parse(await reader.ReadToEndAsync());
-                        if (host.RejectUsageOption && request["stream_options"] != null)
-                        {
-                            http.Response.StatusCode = 400;
-                            await http.Response.WriteAsync("unsupported stream_options");
-                            return;
-                        }
-                        string script = host.Scripts.TryDequeue(out string queued) ? queued
-                            : "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"say\\\":\\\"hello\\\"}\"}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n";
-                        http.Response.ContentType = "text/event-stream";
-                        await http.Response.WriteAsync(script);
-                    });
+                    host._upstream.MapPost("/v1/chat/completions", (HttpContext http) => host.HandleCompletion(http));
+                    host._upstream.MapPost("/summary/v1/chat/completions", (HttpContext http) => host.HandleCompletion(http));
                     await host._upstream.StartAsync();
                     string upstream = host._upstream.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>().Addresses.Single();
+                    host.UpstreamBase = upstream;
                     Directory.CreateDirectory(Path.Combine(host.Root, "games", "other", "npcs"));
                     var npc = new AgentConfigDto { npcId = "npc", displayName = "tester" };
                     npc.enabledToolIds.Add("echo");
                     npc.model.baseUrl = upstream + "/v1";
                     npc.model.apiKey = "test-key";
+                    npc.model.model = "primary-not-deepseek";
                     npc.memory.summaryThreshold = 0;
                     File.WriteAllText(Path.Combine(host.Root, "games", "other", "npcs", "npc.json"), JsonConvert.SerializeObject(npc));
                     await host.RestartAsync();
                     return host;
                 }
                 catch { await host.DisposeAsync(); throw; }
+            }
+
+            private async Task HandleCompletion(HttpContext http)
+            {
+                System.Threading.Interlocked.Increment(ref UpstreamCalls);
+                using var reader = new StreamReader(http.Request.Body);
+                JObject body = JObject.Parse(await reader.ReadToEndAsync());
+                Requests.Enqueue(new JObject { ["path"] = http.Request.Path.Value, ["body"] = body,
+                    ["authorization"] = http.Request.Headers.Authorization.ToString() });
+                if (RejectUsageOption && body["stream_options"] != null)
+                {
+                    http.Response.StatusCode = 400;
+                    await http.Response.WriteAsync("unsupported stream_options");
+                    return;
+                }
+                string script = Scripts.TryDequeue(out string queued) ? queued
+                    : "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"say\\\":\\\"hello\\\"}\"}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n";
+                http.Response.ContentType = "text/event-stream";
+                await http.Response.WriteAsync(script);
             }
 
             public async Task RestartAsync()
